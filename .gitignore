@@ -1,0 +1,13 @@
+# ignore pkl
+*.pkl
+*.pickle
+*.pt
+*.pth
+__pycache__/
+*.pyc
+.vscode/
+*.mp4
+*.png
+*.jpg
+runs/
+*.ts
