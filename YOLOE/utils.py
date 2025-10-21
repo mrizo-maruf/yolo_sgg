@@ -477,6 +477,63 @@ def cam_to_world(points_cam: np.ndarray, T_w_c: np.ndarray):
     
     return ret_pts
 
+def estimate_scene_height(depth_m: np.ndarray, T_w_c: np.ndarray, stride: int = 1):
+    """
+    Estimate world-frame scene height from a single depth image by:
+    1) sampling depth pixels on a grid;
+    2) unprojecting to camera frame using intrinsics (fx, fy, cx, cy);
+    3) transforming to world frame via T_w_c;
+    4) returning min(Z), max(Z), and height = max - min in world coordinates.
+
+    Args:
+        depth_m: (H,W) depth map in meters, 0 indicates invalid.
+        T_w_c: 4x4 camera->world transform.
+        stride: subsampling step to reduce compute (default 8).
+
+    Returns:
+        (z_min, z_max, height). If no valid points, returns (nan, nan, 0.0).
+    """
+    if depth_m is None or depth_m.size == 0:
+        return float('nan'), float('nan'), 0.0
+    if T_w_c is None or not isinstance(T_w_c, np.ndarray) or T_w_c.shape != (4, 4):
+        return float('nan'), float('nan'), 0.0
+
+    H, W = depth_m.shape[:2]
+    vv = np.arange(0, H, max(1, int(stride)), dtype=np.int32)
+    uu = np.arange(0, W, max(1, int(stride)), dtype=np.int32)
+    V, U = np.meshgrid(vv, uu, indexing='ij')
+    D = depth_m[V, U].astype(np.float32)
+    valid = D > 0
+    if not np.any(valid):
+        return float('nan'), float('nan'), 0.0
+
+    us = U[valid].astype(np.float32)
+    vs = V[valid].astype(np.float32)
+    zs = D[valid]
+
+    X = (us - cx) * zs / fx
+    Y = (vs - cy) * zs / fy
+    Z = zs
+    pts_cam = np.stack([X, Y, Z], axis=1).astype(np.float32)
+
+    pts_w = cam_to_world(pts_cam, T_w_c)
+    if pts_w is None or pts_w.size == 0:
+        return float('nan'), float('nan'), 0.0
+
+    z_vals = pts_w[:, 2]
+    z_min = float(np.min(z_vals))
+    z_max = float(np.max(z_vals))
+    
+    x_min = float(np.min(pts_w[:, 0]))
+    x_max = float(np.max(pts_w[:, 0]))
+
+    y_min = float(np.min(pts_w[:, 1]))
+    y_max = float(np.max(pts_w[:, 1]))
+    
+    height = max(0.0, z_max - z_min)
+    # return x_min, x_max, y_min, y_max, z_min, z_max, height
+    return height
+
 def compute_3d_bboxes(points, fast_mode: bool = True):
     
     if points.shape[0] == 0:
@@ -531,10 +588,12 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             print("[WARN][prep_frames] No points extracted from mask. Skipping object.")
             points_world = None
             pts_for_bbox = points_cam
+            continue
         elif points_cam.size <= 0:
             print("[WARN][prep_frames] No valid points extracted from mask. Skipping object.")
             points_world = None
             pts_for_bbox = points_cam
+            continue
         elif T_w_c is None:
             print("[WARN][prep_frames] No poses loaded. Keeping points in camera frame.")
             points_world = None
@@ -553,7 +612,8 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             'bbox_3d': bbox3d
         }
         
-        graph.add_node(int(t_id), obj=obj)
+        graph.add_node(int(t_id), data=obj)
+        # graph.add_node(obj)
         frame_objs.append(obj)
             
     return frame_objs, graph

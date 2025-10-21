@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 import YOLOE.utils as yutils
 import numpy as np
-from ssg.ssg_main import predict_new_edges
+from ssg.ssg_main import predict_new_edges, edges
 
 def main(cfg):
     rgb_dir_path = cfg.rgb_dir
@@ -67,8 +67,9 @@ def main(cfg):
             yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
 
         # Edge predictor SceneVerse
-        predict_new_edges(current_graph, frame_objs)
-
+        edges(current_graph, frame_objs, T_w_c, depth_m)
+        
+        print(f"[yolo_sgg] Frame {frame_idx}: objects new edges predicted")
         # update_graph(current_graph, frame_objs, persistent_graph)
         frame_idx += 1
 
@@ -78,16 +79,16 @@ def main(cfg):
 
 if __name__ == "__main__":
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/rizo/mipt_ccm/yle_sc_sg/UR5-Peg-In-Hole_02_HD/rgb",
-        'depth_dir': "/home/rizo/mipt_ccm/yle_sc_sg/UR5-Peg-In-Hole_02_HD/depth",
-        'traj_path': "/home/rizo/mipt_ccm/yle_sc_sg/UR5-Peg-In-Hole_02_HD/traj.txt",
-        'yolo_model': 'yoloe-11l-seg-pf.pt',
+        'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/rgb",
+        'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/depth",
+        'traj_path': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/traj.txt",
+        'yolo_model': 'yoloe-11l-seg-pf-old.pt',
         'conf': 0.3,
         'iou': 0.5,
         'kernel_size': 19,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
-        'show_pcds': True,
-        'fast_mask': False,
+        'show_pcds': False,
+        'fast_mask': True,
     })
     main(cfg)

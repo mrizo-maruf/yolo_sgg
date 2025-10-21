@@ -40,18 +40,18 @@ def filter_labels(obj_label):
 
 def cal_hanging_relationships (ObjNode_dict, no_supported_objs, camera_angle,scene_high, dataset='scannet'):
     hanging_relationships = []
-
+    # no_supported_objs = []
     for obj_id in ObjNode_dict:
         if obj_id not in no_supported_objs:
             obj = ObjNode_dict[obj_id]
             if not filter_labels(obj.label): continue
-            desp = utils.generate_relation(obj.id, -2, 'hang')
-            if 'tv' in obj.label:
-                desp[2] = 'mounted on'
-            if 'mirror' in obj.label:
-                desp[2] = 'affixed to'
+            # desp = utils.generate_relation(obj.id, -2, 'hang')
+            # if 'tv' in obj.label:
+            #     desp[2] = 'mounted on'
+            # if 'mirror' in obj.label:
+            #     desp[2] = 'affixed to'
 
-            hanging_relationships.append(desp)
+            # hanging_relationships.append(desp)
             hanging_relationships.extend(cal_above_below_relationships(ObjNode_dict, obj, scene_high))
 
     return hanging_relationships

@@ -6,16 +6,23 @@ import pyvista as pv
 
 
 class ObjNode(object):
-    def __init__(self, id=None, label=None, mesh=None, position=None, size=None, children=[], room_id = None,dataset='scannet'):
+    def __init__(self, id=None, label=None, mesh=None, 
+                 position=None, x_min = None, x_max = None, 
+                 y_min = None, y_max = None, z_min=None, z_max=None,
+                 room_id = None,dataset='scannet'):
         self.id = id
         self.label = label
         self.obj_mesh = mesh
-        self.size = size
         self.position = position
-        self.children = children
         self.room_id = room_id
+        self.x_min = x_min
+        self.x_max = x_max
+        self.y_min = y_min
+        self.y_max = y_max
+        self.z_min = z_min
+        self.z_max = z_max
 
-        self.align_matrix, self.position, self.z_min, self.z_max, self.bottom_rect, self.top_rect = self.get_object_information(dataset)
+        self.align_matrix, self.position, self.bottom_rect, self.top_rect = self.get_object_information(dataset)
 
     def __str__(self):
         return "[{}:{},{},{}]".format(self.id, self.label, self.position, self.angle)
@@ -23,18 +30,12 @@ class ObjNode(object):
     def get_object_information(self, dataset):
         position = self.position # - bias
         axis_align_matrix = None
-        x_min = position[0] - self.size[0] / 2
-        x_max = position[0] + self.size[0] / 2
-        y_min = position[1] - self.size[1] / 2
-        y_max = position[1] + self.size[1] / 2
-        z_min = position[2] - self.size[2] / 2
-        z_max = position[2] + self.size[2] / 2
-        top_vertics = np.array([[x_min, y_min, z_min], [x_max, y_min, z_min],
-                                [x_max, y_max, z_min], [x_min, y_max, z_min]])
-        bottom_vertics = np.array([[x_min, y_min, z_max], [x_max, y_min, z_max], [x_max, y_max, z_max],
-                               [x_min, y_max, z_max]])
+        top_vertics = np.array([[self.x_min, self.y_min, self.z_min], [self.x_max, self.y_min, self.z_min],
+                                [self.x_max, self.y_max, self.z_min], [self.x_min, self.y_max, self.z_min]])
+        bottom_vertics = np.array([[self.x_min, self.y_min, self.z_max], [self.x_max, self.y_min, self.z_max], [self.x_max, self.y_max, self.z_max],
+                               [self.x_min, self.y_max, self.z_max]])
 
-        return axis_align_matrix, position, z_min, z_max, bottom_vertics, top_vertics
+        return axis_align_matrix, position, bottom_vertics, top_vertics
 
     def display_obb_box(self, scene_visible = True):
 
