@@ -75,8 +75,8 @@ def cal_proximity_relationships(neighbor_objs_id, camera_angle, ObjNode_dict, sc
         src = neighbor_objs_id[src_idx]
         tgt = neighbor_objs_id[tgt_idx]
 
-        if ObjNode_dict[src].room_id != ObjNode_dict[tgt].room_id:
-            continue
+        # if ObjNode_dict[src].room_id != ObjNode_dict[tgt].room_id:
+        #     continue
 
         # is overlap
         overlap_points = get_space_relations(src=ObjNode_dict[src], tgt=ObjNode_dict[tgt])

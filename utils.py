@@ -189,7 +189,7 @@ def save_pkl(data, name, path="/home/rizo/mipt_ccm/yle_sc_sg/out_pkls2"):
     with open(os.path.join(path, name), "wb") as f:
         pickle.dump(data, f)
 
-def extract_points_from_mask( depth_m: np.ndarray,
+def extract_points_from_mask1( depth_m: np.ndarray,
     mask,
     max_points = None,
     random_state = None,

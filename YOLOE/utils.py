@@ -367,10 +367,49 @@ def preprocess_mask(yolo_res, index, KERNEL_SIZE, alpha = 0.5, show=True, fast: 
 
     return bin_masks, cleaned_masks
 
+def _guided_filter_denoise(points: np.ndarray, radius: float, epsilon: float):
+    """
+    Apply guided filter denoising to a point cloud.
+    
+    Args:
+        points: (N, 3) array of 3D points
+        radius: search radius for neighbors
+        epsilon: regularization parameter
+        
+    Returns:
+        (N, 3) array of denoised points
+    """
+    if points.shape[0] < 3:
+        return points
+    
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # Build KD-tree
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+    points_copy = np.array(pcd.points)
+    num_points = len(pcd.points)
+    
+    for i in range(num_points):
+        k, idx, _ = kdtree.search_radius_vector_3d(pcd.points[i], radius)
+        if k < 3:
+            continue
+        neighbors = points[idx, :]
+        mean = np.mean(neighbors, axis=0)
+        cov = np.cov(neighbors.T)
+        e = np.linalg.inv(cov + epsilon * np.eye(3))
+        A = cov @ e
+        b = mean - A @ mean
+        points_copy[i] = A @ points[i] + b
+    
+    return points_copy.astype(np.float32)
 
 def extract_points_from_mask( depth_m: np.ndarray,
     mask,
     frame_idx,
+    o3_nb_neighbors,
+    o3std_ratio,
     max_points = None,
     random_state = None):
     """
@@ -448,14 +487,23 @@ def extract_points_from_mask( depth_m: np.ndarray,
     if pts is None or pts.size == 0:
         print(f"[utils.extract_points_from_mask] Warning: no points extracted from mask in frame {frame_idx},\
               {frame_idx} Extracted {pts.shape[0]}.")
-    return pts
+    
+    # Apply denoising if requested
+    # denoise_radius = 0.02
+    # denoise_epsilon = 0.5
+    # if pts.shape[0] > 0:
+    #     pts = _guided_filter_denoise(pts, denoise_radius, denoise_epsilon)
+    #     pts = _guided_filter_denoise(pts, denoise_radius, denoise_epsilon)
+    #     pts = _guided_filter_denoise(pts, denoise_radius, denoise_epsilon)
+    
+    # return pts
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
 
     # Clean with statistical outlier removal
-    # cl, ind = pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=0.7)
-    # pcd = pcd.select_by_index(ind)
+    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=o3_nb_neighbors, std_ratio=o3std_ratio)
+    pcd = pcd.select_by_index(ind)
 
     cleaned_pts_np = np.asarray(pcd.points)
     results_points = cleaned_pts_np
@@ -573,7 +621,7 @@ def compute_3d_bboxes(points, fast_mode: bool = True):
         'obb': {'center': obb_center, 'extent': obb_extent, 'R': obb_R}
     }
 
-def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx):
+def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx, o3_nb_neighbors, o3std_ratio):
     frame_objs = []
     graph = nx.DiGraph()
     for t_id, m_clean in zip(track_ids, masks_clean):
@@ -581,8 +629,16 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             continue
         
         # 1. extract points from mask in camera frame (cap points)
-        points_cam = extract_points_from_mask(depth_m, m_clean,frame_idx=frame_idx, max_points=max_points_per_obj, random_state=int(t_id))
-        
+        points_cam = extract_points_from_mask(
+            depth_m, 
+            m_clean, 
+            frame_idx=frame_idx, 
+            max_points=max_points_per_obj,
+            o3_nb_neighbors=o3_nb_neighbors,
+            o3std_ratio=o3std_ratio, 
+            random_state=int(t_id)
+        )
+
         # 2. transform to world frame if pose available
         if points_cam is None:
             print("[WARN][prep_frames] No points extracted from mask. Skipping object.")

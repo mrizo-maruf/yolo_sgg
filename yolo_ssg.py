@@ -60,17 +60,28 @@ def main(cfg):
         T_w_c = poses[min(frame_idx, len(poses)-1)] if poses else None
 
         # build 3D objects
-        frame_objs, current_graph = yutils.create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx)
+        frame_objs, current_graph = yutils.create_3d_objects(track_ids, 
+                                                             masks_clean, 
+                                                             max_points_per_obj, 
+                                                             depth_m, 
+                                                             T_w_c, 
+                                                             frame_idx,
+                                                             o3_nb_neighbors=cfg.o3_nb_neighbors,
+                                                             o3std_ratio=cfg.o3std_ratio
+        )
 
+        print(50*'=')
+        print(f"[yolo_sgg] Frame {frame_idx}: objects new edges predicted")
+        
         # Edge predictor SceneVerse
         edges(current_graph, frame_objs, T_w_c, depth_m)
+        print(50*'=')
         
         if bool(cfg.show_pcds):
             # visualize (blocking window)
             yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
 
         
-        print(f"[yolo_sgg] Frame {frame_idx}: objects new edges predicted")
         # update_graph(current_graph, frame_objs, persistent_graph)
         frame_idx += 1
 
@@ -80,16 +91,18 @@ def main(cfg):
 
 if __name__ == "__main__":
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/rgb",
-        'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/depth",
-        'traj_path': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02/traj.txt",
+        'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/rgb",
+        'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/depth",
+        'traj_path': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/traj.txt",
         'yolo_model': 'yoloe-11l-seg-pf-old.pt',
         'conf': 0.3,
         'iou': 0.5,
-        'kernel_size': 19,
+        'kernel_size': 9,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
         'show_pcds': False,
         'fast_mask': True,
+        'o3_nb_neighbors': 50,
+        'o3std_ratio': 0.1,
     })
     main(cfg)

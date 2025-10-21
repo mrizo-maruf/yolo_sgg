@@ -26,13 +26,18 @@ def is_supported(target_obj, obj, camera_angle, radius_range = 0.1, threshold_of
         # must be higher
         # if tz_max > z_max:
         #     return False
-        if z_min > (tz_max*0.05 if tz_max > 0 else tz_max*0.95): # floating
+        if tz_max < 0 and z_min > tz_max*0.95:
             return False
+        elif tz_max > 0 and z_min < tz_max*0.95:
+            return False
+        
+        # if z_min > (tz_max*0.05 if tz_max > 0 else tz_max*0.95): # floating
+        #     return False
         if z_min < tz_min:
             # Reject if the object bottom is beneath the target’s bottom (object 
             # would be intersecting from below)
             return False
-        if not diff_z < height*0.3:
+        if not diff_z < height*0.2:
             # Require that the vertical offset between object bottom and target top is less 
             # than 20% of the object height (prevents very large separations).
             return False

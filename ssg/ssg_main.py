@@ -532,8 +532,8 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     # iterate objects of graph and make object node dict
 
     for node, data in current_graph.nodes(data=True):
-        print(node)
-        print(data['data'].keys())
+        # print(node)
+        # print(data['data'].keys())
         if data['data']['bbox_3d']['obb'] is None:
             ObjNode_dict[node] = ObjNode(
                 id=-10,
@@ -581,6 +581,13 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
 
     # iterate graph to cal saptial relationships
     proximity_relations = []
+    
+    # vis DiGraph
+    pos = nx.spring_layout(current_graph)
+    nx.draw(current_graph, pos, with_labels=True)
+    edge_labels = nx.get_edge_attributes(current_graph, 'label')
+    nx.draw_networkx_edge_labels(current_graph, pos, edge_labels=edge_labels)
+
     for node in current_graph:
         neighbor = dict(nx.bfs_successors(current_graph, source=node, depth_limit=1))
         if len(neighbor[node]) > 1:
@@ -630,9 +637,10 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     # End SG latency timer (exclude visualization and IO)
 
     np.random.shuffle(objects_rels)
-    
-    print(relationships_json_string['relationships'])
-    print(f"")
+
+    print("relationships:", relationships_json_string['relationships'])
+    print("multi_objs_relationships:", relationships_json_string['multi_objs_relationships'])
+    # print(f"")
     
     return relationships_json_string['relationships']
 

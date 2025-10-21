@@ -97,7 +97,7 @@ def find_middle_furniture (proximity_relations, ObjNode_dict):
     edage_dict = G.edges.data()._adjdict
     for src_id in ObjNode_dict:
         if src_id not in edage_dict: continue
-        if ObjNode_dict[src_id].label == 'floor' :continue
+        # if ObjNode_dict[src_id].label == 'floor' :continue
         neighbors = edage_dict[src_id]
         tgt_ids = list(neighbors.keys())
         combinations = list(itertools.combinations(tgt_ids, 2))
