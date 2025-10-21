@@ -26,7 +26,7 @@ def is_supported(target_obj, obj, camera_angle, radius_range = 0.1, threshold_of
         # must be higher
         # if tz_max > z_max:
         #     return False
-        if z_min < (tz_max*0.05 if tz_max > 0 else tz_max*0.95): # floating
+        if z_min > (tz_max*0.05 if tz_max > 0 else tz_max*0.95): # floating
             return False
         if z_min < tz_min:
             # Reject if the object bottom is beneath the target’s bottom (object 

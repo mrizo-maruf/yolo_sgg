@@ -62,12 +62,13 @@ def main(cfg):
         # build 3D objects
         frame_objs, current_graph = yutils.create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx)
 
+        # Edge predictor SceneVerse
+        edges(current_graph, frame_objs, T_w_c, depth_m)
+        
         if bool(cfg.show_pcds):
             # visualize (blocking window)
             yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
 
-        # Edge predictor SceneVerse
-        edges(current_graph, frame_objs, T_w_c, depth_m)
         
         print(f"[yolo_sgg] Frame {frame_idx}: objects new edges predicted")
         # update_graph(current_graph, frame_objs, persistent_graph)
