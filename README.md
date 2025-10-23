@@ -10,11 +10,13 @@
 
 
 ### TO-DO
-[x] - multi-obj rel visualization
-[ ] - add time/GPU usage
-[ ] - camera relations
-[ ] - visualization
-[ ] - support of new yolo-seg with obj names
-[ ] - graph update
-[ ] - try with prompt model
-[ ] - VL-SAT edge predictor support
+- [x] multi-obj rel visualization
+- [x] add time/GPU usage
+- [ ] graph update
+- [ ] camera relations
+- [ ] improve SV edge predictor (faster)
+- [ ] 3D obj generation faster
+- [ ] support of new yolo-seg with obj names
+- [ ] try with prompt model
+- [ ] VL-SAT edge predictor support
+- [ ] visualization in 3d
