@@ -59,16 +59,19 @@ def get_distance(src, tgt):
     src_w = utils.euclideanDistance(src.position[:2], src.bottom_rect[0][:2], 2)
     tgt_w = utils.euclideanDistance(tgt.position[:2], tgt.bottom_rect[0][:2], 2)
 
-    return dis_of_center > 1.5 * (src_w + tgt_w)
+    # changing for closeness
+    return dis_of_center > 4 * (src_w + tgt_w)
 
 def cal_proximity_relationships(neighbor_objs_id, camera_angle, ObjNode_dict, scene_high):
     proximity_relations = []
 
     relations = ''
 
+    # print('neighbor_objs_id ', neighbor_objs_id)
     neighbor_objs_id_list = [i for i in range(len(neighbor_objs_id))]
     combinations = list(itertools.combinations(neighbor_objs_id_list, 2))
 
+    # print('combinations ', combinations)
     for combination in combinations:
 
         src_idx, tgt_idx = combination

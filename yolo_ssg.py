@@ -1,13 +1,21 @@
 from omegaconf import OmegaConf
 import YOLOE.utils as yutils
 import numpy as np
-from ssg.ssg_main import predict_new_edges, edges
+from ssg.ssg_main import edges
+import matplotlib.pyplot as plt
+import time
+import torch
 
 def main(cfg):
     rgb_dir_path = cfg.rgb_dir
     depth_folder = cfg.depth_dir
     traj_path = cfg.traj_path
     max_points_per_obj = int(cfg.max_points_per_obj)
+    
+    # Metrics accumulation
+    timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': []}
+    gpu_usage = {'yolo': [], 'edges': []}
+    cuda_available = torch.cuda.is_available()
 
     # 1) cache the depths (also initializes YOLOE.utils global DEPTH_PATHS)
     depth_paths = yutils.list_png_paths(depth_folder)
@@ -29,13 +37,24 @@ def main(cfg):
     
     frame_idx = 0
     for yl_res, rgb_cur_path, depth_cur_path in results_stream:
+        # YOLO tracking is done in the generator, measure time would require refactor
+        # For now we measure from when result arrives
+        timings['yolo'].append(yl_res.speed['inference'])  # ms
+        
         depth_m = depth_cache.get(depth_cur_path)
         if depth_m is None:
             print(f"[WARN][yolo_sgg] Missing depth for {depth_cur_path}; skipping frame {frame_idx}")
             frame_idx += 1
             continue
 
+        # GPU usage after YOLO (if available)
+        if cuda_available:
+            torch.cuda.synchronize()
+            gpu_mem_yolo = torch.cuda.memory_allocated() / (1024**2)  # MB
+            gpu_usage['yolo'].append(gpu_mem_yolo)
+
         # masks
+        t_preprocess_start = time.perf_counter()
         mask_org, masks_clean = yutils.preprocess_mask(
             yolo_res=yl_res,
             index=frame_idx,
@@ -43,6 +62,9 @@ def main(cfg):
             alpha=float(cfg.alpha),
             fast=cfg.fast_mask,
         )
+
+        t_preprocess_end = time.perf_counter()
+        timings['preprocess'].append((t_preprocess_end - t_preprocess_start) * 1000)  # ms
 
         # track ids
         track_ids = None
@@ -60,6 +82,7 @@ def main(cfg):
         T_w_c = poses[min(frame_idx, len(poses)-1)] if poses else None
 
         # build 3D objects
+        t_create3d_start = time.perf_counter()
         frame_objs, current_graph = yutils.create_3d_objects(track_ids, 
                                                              masks_clean, 
                                                              max_points_per_obj, 
@@ -69,23 +92,69 @@ def main(cfg):
                                                              o3_nb_neighbors=cfg.o3_nb_neighbors,
                                                              o3std_ratio=cfg.o3std_ratio
         )
+        t_create3d_end = time.perf_counter()
+        timings['create_3d'].append((t_create3d_end - t_create3d_start) * 1000)  # ms
 
-        print(50*'=')
-        print(f"[yolo_sgg] Frame {frame_idx}: objects new edges predicted")
-        
         # Edge predictor SceneVerse
+        t_edges_start = time.perf_counter()
         edges(current_graph, frame_objs, T_w_c, depth_m)
-        print(50*'=')
+        t_edges_end = time.perf_counter()
+        timings['edges'].append((t_edges_end - t_edges_start) * 1000)  # ms
+        
+        # GPU usage after edges (if available)
+        if cuda_available:
+            torch.cuda.synchronize()
+            gpu_mem_edges = torch.cuda.memory_allocated() / (1024**2)  # MB
+            gpu_usage['edges'].append(gpu_mem_edges)
+
+        if cfg.print_resource_usage:
+            print(50*'=')
+            print(f"[yolo_sgg] Frame {frame_idx}: Latency (ms) - preprocess: {timings['preprocess'][-1]:.2f}, create_3d: {timings['create_3d'][-1]:.2f}, edges: {timings['edges'][-1]:.2f}, yolo: {timings['yolo'][-1]:.2f}")
+            if cuda_available:
+                print(f"[yolo_ssg] Frame {frame_idx}: GPU mem (MB) - yolo: {gpu_usage['yolo'][-1]:.1f}, "
+                    f"edges: {gpu_usage['edges'][-1]:.1f}")
+            print(50*'=')
+        
+        # vis DiGraph
+        if cfg.vis_graph:
+            fig, ax = plt.subplots(figsize=(12, 8))
+            yutils.draw_labeled_multigraph(current_graph, ax=ax)
+            ax.set_title(f"Scene Graph")
+            plt.tight_layout()
+            plt.show()
         
         if bool(cfg.show_pcds):
             # visualize (blocking window)
             yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
 
-        
         # update_graph(current_graph, frame_objs, persistent_graph)
         frame_idx += 1
 
-    print("[yolo_sgg] Done")
+    # Print summary statistics
+    print("\n" + "="*60)
+    print("SUMMARY STATISTICS")
+    print("="*60)
+    
+    if timings['preprocess']:
+        print(f"\nLatency Averages (ms):")
+        print(f"  Preprocessing:    {np.mean(timings['preprocess']):.2f} ± {np.std(timings['preprocess']):.2f}")
+        print(f"  Create 3D:        {np.mean(timings['create_3d']):.2f} ± {np.std(timings['create_3d']):.2f}")
+        print(f"  Edge Prediction:  {np.mean(timings['edges']):.2f} ± {np.std(timings['edges']):.2f}")
+        print(f"  YOLO:             {np.mean(timings['yolo']):.2f} ± {np.std(timings['yolo']):.2f}")
+        total_avg = np.mean(timings['preprocess']) + np.mean(timings['create_3d']) + np.mean(timings['edges']) + np.mean(timings['yolo'])
+        print(f"  Total per frame:  {total_avg:.2f}")
+    
+    if cuda_available and gpu_usage['yolo']:
+        print(f"\nGPU Memory Usage Averages (MB):")
+        print(f"  After YOLO:       {np.mean(gpu_usage['yolo']):.1f} ± {np.std(gpu_usage['yolo']):.1f}")
+        print(f"  After Edges:      {np.mean(gpu_usage['edges']):.1f} ± {np.std(gpu_usage['edges']):.1f}")
+    elif cuda_available:
+        print(f"\nGPU Memory: CUDA available but no measurements recorded")
+    else:
+        print(f"\nGPU Memory: CUDA not available")
+    
+    print(f"\nTotal frames processed: {frame_idx}")
+    print("="*60)
     return 0
 
 
@@ -104,5 +173,7 @@ if __name__ == "__main__":
         'fast_mask': True,
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
+        'vis_graph': False,
+        'print_resource_usage': False,
     })
     main(cfg)

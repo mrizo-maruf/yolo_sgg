@@ -1,3 +1,4 @@
+import itertools as it
 import json
 import pickle
 from sympy import re
@@ -20,6 +21,7 @@ from .relationships.proximity import cal_proximity_relationships
 from .relationships.hanging import cal_hanging_relationships
 from .relationships.multi_objs import find_aligned_furniture, find_middle_furniture
 
+import matplotlib.pyplot as plt
 
 def default_dump(obj):
     """Convert numpy classes to JSON serializable objects."""
@@ -40,127 +42,6 @@ def convert_pc_to_box(obj_pc):
     center = [(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2]
     box_size = [xmax-xmin, ymax-ymin, zmax-zmin]
     return center, box_size
-
-
-def predict_new_edges(current_graph, frame_objs, distance_scale: float = 0.5, support_z_tol: float = 0.02):
-    """Predict simple spatial relationships (support / near / above / below) between
-    objects detected in a single frame and add them as edges to `current_graph`.
-
-    This is a lightweight, heuristic edge predictor intended to provide reasonable
-    edges for downstream processing when a learned SceneVerse-style predictor is
-    not available. It mutates `current_graph` in-place and also returns a list of
-    added edges for convenience.
-
-    Args:
-        current_graph (networkx.DiGraph): Graph whose nodes are object ids and
-            node attribute 'obj' holds a dict with key 'bbox_3d' containing
-            an 'aabb' with 'min' and 'max' (numpy arrays or lists).
-        frame_objs (list): List of per-object dicts returned by YOLOE utils
-            (each has 'track_id' and 'bbox_3d').
-        distance_scale (float): Scale used to determine "near" threshold as a
-            fraction of object sizes (default 0.5).
-        support_z_tol (float): Vertical tolerance (meters) to consider an object
-            sitting on/top-of another (default 0.02 m).
-
-    Returns:
-        List[tuple]: list of (src_id, tgt_id, relation_label) edges added.
-    """
-    added = []
-    try:
-        import numpy as _np
-    except Exception:
-        _np = np
-
-    # Build quick lookup for node -> bbox aabb (min,max) and center
-    node_data = {}
-    for n in current_graph.nodes:
-        nd = current_graph.nodes[n].get('obj') if isinstance(current_graph.nodes[n], dict) else None
-        if nd is None and isinstance(frame_objs, (list, tuple)):
-            # try find in frame_objs by track_id
-            for fo in frame_objs:
-                if int(fo.get('track_id', -999)) == int(n):
-                    nd = fo
-                    break
-        if nd is None:
-            continue
-        bbox = nd.get('bbox_3d', {}) or {}
-        aabb = bbox.get('aabb')
-        if not aabb or aabb.get('min') is None or aabb.get('max') is None:
-            continue
-        mn = _np.array(aabb['min'], dtype=float)
-        mx = _np.array(aabb['max'], dtype=float)
-        center = (mn + mx) / 2.0
-        size = (mx - mn)
-        node_data[n] = {'min': mn, 'max': mx, 'center': center, 'size': size}
-
-    ids = list(node_data.keys())
-    for i_idx in range(len(ids)):
-        for j_idx in range(i_idx + 1, len(ids)):
-            i = ids[i_idx]
-            j = ids[j_idx]
-            di = node_data[i]
-            dj = node_data[j]
-
-            # XY distance between centers
-            xy_dist = _np.linalg.norm(di['center'][:2] - dj['center'][:2])
-
-            # size-based threshold: use average diagonal of AABBs
-            diag_i = _np.linalg.norm(di['size'])
-            diag_j = _np.linalg.norm(dj['size'])
-            near_thresh = max(1e-3, distance_scale * 0.5 * (diag_i + diag_j))
-
-            # Decide "near" relation
-            if xy_dist <= near_thresh:
-                # add bidirectional 'near' edges
-                current_graph.add_edge(i, j, label='near')
-                current_graph.add_edge(j, i, label='near')
-                added.append((i, j, 'near'))
-                added.append((j, i, 'near'))
-
-            # Vertical relationship (support / above)
-            # If bottom of one is very close to top of the other and their XY projections overlap,
-            # declare support: edge from supporting (lower) -> supported (upper).
-            i_bottom_z = di['min'][2]
-            i_top_z = di['max'][2]
-            j_bottom_z = dj['min'][2]
-            j_top_z = dj['max'][2]
-
-            # helper: xy overlap of AABB projections
-            def _xy_overlap(a_min, a_max, b_min, b_max):
-                return not (a_max[0] < b_min[0] or b_max[0] < a_min[0] or a_max[1] < b_min[1] or b_max[1] < a_min[1])
-
-            overlap_xy = _xy_overlap(di['min'], di['max'], dj['min'], dj['max'])
-
-            # j supports i ? (i sits on top of j)
-            if overlap_xy and (abs(i_bottom_z - j_top_z) <= support_z_tol) and (i_bottom_z >= j_top_z - support_z_tol):
-                current_graph.add_edge(j, i, label='support')
-                added.append((j, i, 'support'))
-            # i supports j
-            if overlap_xy and (abs(j_bottom_z - i_top_z) <= support_z_tol) and (j_bottom_z >= i_top_z - support_z_tol):
-                current_graph.add_edge(i, j, label='support')
-                added.append((i, j, 'support'))
-
-            # Above / below (non-contact) if one center significantly higher
-            z_center_diff = di['center'][2] - dj['center'][2]
-            if abs(z_center_diff) > max(di['size'][2], dj['size'][2]) * 0.5:
-                if z_center_diff > 0:
-                    current_graph.add_edge(i, j, label='above')
-                    current_graph.add_edge(j, i, label='below')
-                    added.append((i, j, 'above'))
-                    added.append((j, i, 'below'))
-                else:
-                    current_graph.add_edge(j, i, label='above')
-                    current_graph.add_edge(i, j, label='below')
-                    added.append((j, i, 'above'))
-                    added.append((i, j, 'below'))
-
-    # small debug
-    if len(added) == 0:
-        # don't spam; only print if graph non-empty
-        if len(ids) > 0:
-            print('[predict_new_edges] No edges added for current frame (heuristic thresholds may be strict).')
-
-    return added
 
 def view_from_pose(T_w_c):
     # T_w_c: 4x4 camera-to-world transform
@@ -572,28 +453,43 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
 
     support_relations, embedded_relations, hanging_objs_dict = cal_support_relations(ObjNode_dict, camera_angle)
     for rela in support_relations:
-        target_obj_id, obj_id, _ = rela
-        current_graph.add_edge(target_obj_id, obj_id, label='support') # optimizer
+        target_obj_id, obj_id, rel_type = rela
+        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='support') # optimizer
+
+    for rela in embedded_relations:
+        target_obj_id, obj_id, rel_type = rela
+        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='embedded')
 
     # hanging relationships
     hanging_relationships = cal_hanging_relationships(ObjNode_dict, hanging_objs_dict, camera_angle,
                                                         scene_high)
+    
+    for rela in hanging_relationships:
+        src_id, tgt_id, rel_type = rela
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='hanging')
+        
+        # tgt_id, src_id, rel_type = opporel
+        # current_graph.add_edge(src_id, tgt_id, label=rel_type)
 
     # iterate graph to cal saptial relationships
     proximity_relations = []
     
-    # vis DiGraph
-    pos = nx.spring_layout(current_graph)
-    nx.draw(current_graph, pos, with_labels=True)
-    edge_labels = nx.get_edge_attributes(current_graph, 'label')
-    nx.draw_networkx_edge_labels(current_graph, pos, edge_labels=edge_labels)
+    # for node in current_graph:
+    #     neighbor = dict(nx.bfs_successors(current_graph, source=node, depth_limit=1))
+    #     if len(neighbor[node]) > 1:
+    #         neighbor_objs = neighbor[node]
+    #         proximity = cal_proximity_relationships(neighbor_objs, camera_angle, ObjNode_dict, scene_high)
+    #         proximity_relations += proximity
 
-    for node in current_graph:
-        neighbor = dict(nx.bfs_successors(current_graph, source=node, depth_limit=1))
-        if len(neighbor[node]) > 1:
-            neighbor_objs = neighbor[node]
-            proximity = cal_proximity_relationships(neighbor_objs, camera_angle, ObjNode_dict, scene_high)
-            proximity_relations += proximity
+    proximity = cal_proximity_relationships(list(current_graph.nodes()), camera_angle, ObjNode_dict, scene_high)
+    proximity_relations += proximity
+
+    for rela in proximity_relations:
+        src_id, tgt_id, rel_type = rela
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='proximity')
+        
+        # tgt_id, src_id, rel_type = opporel
+        # current_graph.add_edge(src_id, tgt_id, label=rel_type)
 
     # added some special relations and oppo support relationships
     oppo_support_relations = []
@@ -613,6 +509,10 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
         if tgt_label in dictionary.added_hanging and dictionary.added_hanging[tgt_label] == src_label:
             objects_rels[idx][2] = 'hanging'
 
+    for rela in oppo_support_relations:
+        src_id, tgt_id, rel_type = rela
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='oppo_support')
+        
     # multi objects
     multi_objs_relationships = []
 
@@ -623,26 +523,42 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     for _, aligned_furni in enumerate(aligned_furniture):
         multi_objs_relationships.append([aligned_furni, 'Aligned'])
 
+        aligned_objs = 'aligned:'
+        for af in aligned_furni:
+            aligned_objs += str(af) + ','
+        
+        combinations = list(it.combinations(aligned_furni, 2))
+        
+        for group in combinations:
+            idx1, idx2 = group
+            current_graph.add_edge(idx1, idx2, label=aligned_objs, label_class='aligned_furniture')
+            current_graph.add_edge(idx2, idx1, label=aligned_objs, label_class='aligned_furniture')
+
     # added in the middle of relationship
     middle_relationships = find_middle_furniture(proximity_relations, ObjNode_dict)
+    
+    for objs, _ in middle_relationships:
+        # print('objs ', objs)
+        src, idx1, idx2 = objs
+        current_graph.add_edge(src, idx2, label=f'in mid of {idx1} {idx2}', label_class='middle_furniture')
+        current_graph.add_edge(src, idx1, label=f'in mid of {idx1} {idx2}', label_class='middle_furniture')
+    
 
     # output json
-    relationships_json_string = {
-        'camera_view': camera_view,
-        'camera_position': camera_pos,
-        'relationships': objects_rels + proximity_relations + oppo_support_relations,
-        'multi_objs_relationships': multi_objs_relationships + middle_relationships,
-    }
+    # relationships_json_string = {
+    #     'camera_view': camera_view,
+    #     'camera_position': camera_pos,
+    #     'relationships': objects_rels + proximity_relations + oppo_support_relations,
+    #     'multi_objs_relationships': multi_objs_relationships + middle_relationships,
+    # }
 
     # End SG latency timer (exclude visualization and IO)
 
-    np.random.shuffle(objects_rels)
-
-    print("relationships:", relationships_json_string['relationships'])
-    print("multi_objs_relationships:", relationships_json_string['multi_objs_relationships'])
+    # print("relationships:", relationships_json_string['relationships'])
+    # print("multi_objs_relationships:", relationships_json_string['multi_objs_relationships'])
     # print(f"")
     
-    return relationships_json_string['relationships']
+    # return relationships_json_string['relationships']
 
 
 if __name__ == '__main__':

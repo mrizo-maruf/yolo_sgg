@@ -7,3 +7,14 @@
 4. to vis pcds, ``` 'show_pcds': True``` inside `yolo_ssg.py` conf
 5. to vis masks orig/cleaned, ``` 'fast_mask': False,``` inside `yolo_ssg.py` conf
 6. 
+
+
+### TO-DO
+[x] - multi-obj rel visualization
+[ ] - add time/GPU usage
+[ ] - camera relations
+[ ] - visualization
+[ ] - support of new yolo-seg with obj names
+[ ] - graph update
+[ ] - try with prompt model
+[ ] - VL-SAT edge predictor support

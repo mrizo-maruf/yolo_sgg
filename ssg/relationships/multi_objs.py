@@ -108,7 +108,8 @@ def find_middle_furniture (proximity_relations, ObjNode_dict):
 
                 direction1 = int(neighbors[idx1]['label'].split(' ')[0])
                 direction2 = int(neighbors[idx2]['label'].split(' ')[0])
-                if abs(direction1 - direction2) == 6:
+                if abs(direction1 - direction2) >= 5 and abs(direction1 - direction2) <= 6:
+                    # print(f'found middle furniture: {src_id} between {idx1} and {idx2}, {abs(direction1 - direction2)}')
                     middle_relationships.append([[src_id,idx1,idx2], 'in the middle of'])
 
     return middle_relationships

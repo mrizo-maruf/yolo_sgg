@@ -21,6 +21,7 @@ import os
 import pickle
 import time
 import networkx as nx
+import itertools as it
 
 IMAGE_WIDTH = 1280
 IMAGE_HEIGHT = 720
@@ -41,6 +42,60 @@ DEPTH_PATHS = []
 RGB_PATHS = []
 TRACKER_CFG = "botsort.yaml"
 DEVICE = "0"
+
+
+def draw_labeled_multigraph(G, attr_name='label', ax=None):
+    """
+    Draw a multigraph with labeled edges.
+    Red labels for 'proximity' type, blue for others.
+    """
+    connectionstyle = [f"arc3,rad={r}" for r in it.accumulate([0.15] * 4)]
+    
+    pos = nx.shell_layout(G)
+    nx.draw_networkx_nodes(G, pos, ax=ax)
+    nx.draw_networkx_labels(G, pos, font_size=20, ax=ax)
+    nx.draw_networkx_edges(
+        G, pos, edge_color="grey", connectionstyle=connectionstyle, ax=ax
+    )
+    
+    # Group edges by (u, v) to track which connectionstyle index to use
+    edge_count = {}
+    
+    for u, v, key, attrs in G.edges(keys=True, data=True):
+        edge_pair = (u, v)
+        if edge_pair not in edge_count:
+            edge_count[edge_pair] = 0
+        
+        # Get the appropriate connectionstyle for this specific edge
+        cs_index = edge_count[edge_pair]
+        cs = connectionstyle[cs_index] if cs_index < len(connectionstyle) else connectionstyle[-1]
+        
+        label = attrs[attr_name]
+        label_class = attrs.get('label_class', '')
+        color = "red" if (label_class == 'proximity' or label_class == 'middle_furniture') else "blue"
+        
+        # Draw this specific edge label
+        nx.draw_networkx_edge_labels(
+            G,
+            pos,
+            {(u, v, key): label},
+            connectionstyle=[cs],
+            label_pos=0.3,
+            font_color=color,
+            bbox={"alpha": 0},
+            ax=ax,
+        )
+        
+        edge_count[edge_pair] += 1
+
+    # Create custom legend with text colors
+    ax.legend(handles=[
+        plt.Line2D([0], [0], marker='o', color='r', markerfacecolor='w', 
+                   markersize=0, label='egocentric'),
+        plt.Line2D([0], [0], marker='o', color='b', markerfacecolor='w', 
+                   markersize=0, label='allocentric')
+    ], loc='upper right')
+
 
 def list_png_paths(folder: str):
     p = Path(folder)
@@ -156,7 +211,7 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
     Yields:
         _type_: _description_
     """
-    print(f'DEBUG tracking init')
+    # print(f'DEBUG tracking init')
     rgb_paths = list_jpg_paths(rgb_dir_path)
     depth_paths = depth_path_list
 
@@ -623,7 +678,7 @@ def compute_3d_bboxes(points, fast_mode: bool = True):
 
 def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx, o3_nb_neighbors, o3std_ratio):
     frame_objs = []
-    graph = nx.DiGraph()
+    graph = nx.MultiDiGraph()
     for t_id, m_clean in zip(track_ids, masks_clean):
         if m_clean is None:
             continue

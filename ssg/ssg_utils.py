@@ -292,7 +292,7 @@ def visualize_camera_relations(ObjNode_dict, camera_relations, camera_position, 
 
         if desc == 'behind':
             src_p.entities[0].color = (0, 255, 0, 255)
-        elif desc == 'in front of':
+        elif desc == 'in q of':
             src_p.entities[0].color = (255, 0, 0, 255)
         elif desc == 'left':
             src_p.entities[0].color = (0, 0, 255, 255)
