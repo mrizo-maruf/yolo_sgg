@@ -22,7 +22,7 @@ import pickle
 import time
 import networkx as nx
 import itertools as it
-
+    
 IMAGE_WIDTH = 1280
 IMAGE_HEIGHT = 720
 MIN_DEPTH = 0.01
@@ -237,11 +237,6 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
         yield res, rgb_p, depth_paths[ip]
 
 def preprocess_mask(yolo_res, index, KERNEL_SIZE, alpha = 0.5, show=True, fast: bool = False):
-    import numpy as np
-    import torch
-    import cv2
-    import matplotlib.pyplot as plt
-
     img = yolo_res.orig_img
 
     if isinstance(img, torch.Tensor):
@@ -1202,13 +1197,23 @@ def merge_scene_graphs(persistent_graph, current_graph):
                     # (object can't be both ON and INSIDE something)
                     if are_conflicting_relations(persist_class, curr_class):
                         persistent_graph.remove_edge(u_mapped, v_mapped, edge_key)
-                        print(f"[merge_scene_graphs] Removed conflicting allocentric edge (persisted: {persist_class} vs current: {curr_class}).")
-                        print(f"    Between nodes {u_mapped} and {v_mapped}.")
+                        # print(f"[merge_scene_graphs] Removed conflicting allocentric edge (persisted: {persist_class} vs current: {curr_class}).")
+                        # print(f"[merge_scene_graphs] {u_mapped}=>{v_mapped},K: {edge_key}, cl: {curr_label}, l:{persist_label}")
                         if persist_class == 'support':
                             # special case: when support is removed, also remove the opposite support edge
                             if persistent_graph.has_edge(v_mapped, u_mapped):
-                                print("[merge_scene_graphs] Removing opposite support edge due to conflict.")
-                                persistent_graph.remove_edge(v_mapped, u_mapped, edge_key)
+                                # print edges before removal
+                                # print(f"all keys between {v_mapped}=>{u_mapped} before removal: {list(persistent_graph[v_mapped][u_mapped].keys())}")
+                                for edge_key2 in list(persistent_graph[v_mapped][u_mapped].keys()):
+                                    edge_data2 = persistent_graph[v_mapped][u_mapped][edge_key2]
+                                    persist_class2 = edge_data2.get('label_class')
+                                    persist_label2 = edge_data2.get('label')
+                                    # print(f"{v_mapped}->{u_mapped}: k:{edge_key2}, cl:{persist_class2}, l:{persist_label2}")  
+                                    if persist_class2 == 'oppo_support':
+                                        # print(f"[merge_scene_graphs] Removing opposite support edge with key v_mapped: {v_mapped} -> u_mapped: {u_mapped}: k:{edge_key2}.")
+                                        persistent_graph.remove_edge(v_mapped, u_mapped, edge_key2)
+                                        break
+                                # pass
         
         # Add edge if not found
         if not edge_found:
