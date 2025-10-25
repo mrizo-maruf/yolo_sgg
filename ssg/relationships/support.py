@@ -16,15 +16,33 @@ def is_supported(target_obj, obj, camera_angle, radius_range = 0.1, threshold_of
 
     # must be larger
     # target's bottom area must be larger than obj's bottom area
-    if not utils.get_Poly_Area(target_obj.bottom_rect[:, 0:2]) > utils.get_Poly_Area(obj.bottom_rect[:, 0:2]):
-        return False
-    # must be centered
-    center = obj.position
-    # The object’s horizontal center must lie inside the target’s bottom polygon 
+    # print(target_obj.bottom_rect[:, 0:2])
+    
     # (object must be located above the target footprint).
-    if not utils.if_inPoly(target_obj.bottom_rect, center):
+    # print("target_obj.bottom_rect", target_obj.bottom_rect[:, 0:2])
+    # print("target_obj.bottom_rect x", target_obj.bottom_rect[:, 0])
+    # print("target_obj.bottom_rect y", target_obj.bottom_rect[:, 1])
+
+    # print(f"area: {utils.get_Poly_Area(target_obj.bottom_rect[:, 0:2])}, fast: {utils.get_Poly_Area_fast(target_obj.bottom_rect)}")
+    # if not utils.get_Poly_Area(target_obj.bottom_rect[:, 0:2]) > utils.get_Poly_Area(obj.bottom_rect[:, 0:2]):
+    #     return False
+    
+    # faster area check
+    if not utils.get_Poly_Area_fast(target_obj.bottom_rect) > utils.get_Poly_Area_fast(obj.bottom_rect):
+        return False
+    
+    # must be centered
+    # The object’s horizontal center must lie inside the target’s bottom polygon 
+    center = obj.position
+    if not utils.if_inPoly_fast(target_obj.bottom_rect, center):
         return False
 
+    # print("center", center)
+    # print("target_obj.bottom_rect", target_obj.bottom_rect)
+
+    # if utils.if_inPoly(target_obj.bottom_rect, center) != utils.if_inPoly_fast(target_obj.bottom_rect, center):
+    #     print("BUG in if_inPoly_fast is not same as if_inPoly")
+        
     if z_max > tz_max:
         if (z_max - tz_max) > 0.5*height:
             if z_min >= tz_max:
@@ -98,8 +116,8 @@ def cal_support_relations(ObjNode_list, camera_angle):
             obj = ObjNode_list[obj_id]
 
             if target_obj.id == obj.id: continue
-            if target_obj.label in always_supported or obj.label in always_supported: continue
-            if target_obj.label in hanging or obj.label in hanging: continue
+            # if target_obj.label in always_supported or obj.label in always_supported: continue
+            # if target_obj.label in hanging or obj.label in hanging: continue
 
             is_support = is_supported(target_obj, obj, camera_angle)
 

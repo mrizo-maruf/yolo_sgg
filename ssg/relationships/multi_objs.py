@@ -22,7 +22,10 @@ def are_furniture_aligned(furniture1, furniture2, offset_threshold):
     z_offset = abs(z1 - z2)
 
     # volumn
-    volumn_diff = abs(utils.get_Poly_Area(rect1) - utils.get_Poly_Area(rect2))
+    volumn_diff = abs(utils.get_Poly_Area_fast(rect1) - utils.get_Poly_Area_fast(rect2))
+
+    # if utils.get_Poly_Area(rect1) != utils.get_Poly_Area_fast(rect1) or utils.get_Poly_Area(rect2) != utils.get_Poly_Area_fast(rect2):
+    #     print("[ssg_utils.multi_objs.are_furniture_aligned]BUG in get_Poly_Area_fast is not same as get_Poly_Area")
 
     if volumn_diff > offset_threshold:
         return False

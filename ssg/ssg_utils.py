@@ -30,11 +30,28 @@ def if_inPoly(polygon, Points):
     polygon = geometry.Polygon(line)
     return polygon.contains(point)
 
+def if_inPoly_fast(polygon, Points):
+    xmin = polygon[:, 0].min()
+    xmax = polygon[:, 0].max()
+    ymin = polygon[:, 1].min()
+    ymax = polygon[:, 1].max()
+    
+    # Check if the point's coordinates fall within the bounding box
+    return (xmin <= Points[0] <= xmax) and (ymin <= Points[1] <= ymax)
+    
+    
 def get_Poly_Area(polygon):
-
     line = geometry.LineString(polygon)
     polygon = geometry.Polygon(line)
     return polygon.area
+
+def get_Poly_Area_fast(polygon):
+    x = polygon[:, 0]
+    y = polygon[:, 1]
+    
+    width = max(x) - min(x)
+    height = max(y) - min(y)
+    return width * height
 
 def get_theta (x, y):
 
