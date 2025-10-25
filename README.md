@@ -12,7 +12,8 @@
 ### TO-DO
 - [x] multi-obj rel visualization
 - [x] add time/GPU usage
-- [ ] graph update
+- [x] graph update
+- [ ] video visualization
 - [ ] camera relations
 - [ ] improve SV edge predictor (faster)
 - [ ] 3D obj generation faster
@@ -20,3 +21,4 @@
 - [ ] try with prompt model
 - [ ] VL-SAT edge predictor support
 - [ ] visualization in 3d
+- [ ] add `requirements.txt`

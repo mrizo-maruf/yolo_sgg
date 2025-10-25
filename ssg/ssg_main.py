@@ -402,7 +402,6 @@ def obj_min_max(pcd):
     
     return x_min, x_max, y_min, y_max, z_min, z_max
 def edges(current_graph, frame_objs, T_w_c, depth_m):
-
     ### init camera ###
     camera_view, camera_pos, camera_angle = view_from_pose(T_w_c)
     scene_center = np.array([0, 0, 0])

@@ -5,15 +5,18 @@ from ssg.ssg_main import edges
 import matplotlib.pyplot as plt
 import time
 import torch
+import networkx as nx
 
 def main(cfg):
     rgb_dir_path = cfg.rgb_dir
     depth_folder = cfg.depth_dir
     traj_path = cfg.traj_path
     max_points_per_obj = int(cfg.max_points_per_obj)
-    
+
+    persistent_graph = nx.MultiDiGraph()
+
     # Metrics accumulation
-    timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': []}
+    timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': [], 'merge': []}
     gpu_usage = {'yolo': [], 'edges': []}
     cuda_available = torch.cuda.is_available()
 
@@ -115,20 +118,35 @@ def main(cfg):
                     f"edges: {gpu_usage['edges'][-1]:.1f}")
             print(50*'=')
         
-        # vis DiGraph
-        if cfg.vis_graph:
-            fig, ax = plt.subplots(figsize=(12, 8))
-            yutils.draw_labeled_multigraph(current_graph, ax=ax)
-            ax.set_title(f"Scene Graph")
-            plt.tight_layout()
-            plt.show()
         
         if bool(cfg.show_pcds):
             # visualize (blocking window)
             yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
 
-        # update_graph(current_graph, frame_objs, persistent_graph)
+        t_merge_start = time.perf_counter()
+        persistent_graph = yutils.merge_scene_graphs(persistent_graph, current_graph)
+        t_merge_end = time.perf_counter()
+        timings['merge'].append((t_merge_end - t_merge_start) * 1000)  # ms
+        
+        # vis DiGraph
+        if cfg.vis_graph:
+            fig, axes = plt.subplots(1, 2, figsize=(18, 8))
+
+            # First graph
+            yutils.draw_labeled_multigraph(persistent_graph, ax=axes[0])
+            axes[0].set_title(f"Persistent Graph frame: {frame_idx}")
+
+            # Second graph (example: current_graph)
+            yutils.draw_labeled_multigraph(current_graph, ax=axes[1])
+            axes[1].set_title(f"Current Graph frame: {frame_idx}")
+
+            plt.tight_layout()
+            plt.show()
+
+            
         frame_idx += 1
+        
+        # return 0
 
     # Print summary statistics
     print("\n" + "="*60)
@@ -141,7 +159,8 @@ def main(cfg):
         print(f"  Create 3D:        {np.mean(timings['create_3d']):.2f} ± {np.std(timings['create_3d']):.2f}")
         print(f"  Edge Prediction:  {np.mean(timings['edges']):.2f} ± {np.std(timings['edges']):.2f}")
         print(f"  YOLO:             {np.mean(timings['yolo']):.2f} ± {np.std(timings['yolo']):.2f}")
-        total_avg = np.mean(timings['preprocess']) + np.mean(timings['create_3d']) + np.mean(timings['edges']) + np.mean(timings['yolo'])
+        print(f"  Merge:           {np.mean(timings['merge']):.2f} ± {np.std(timings['merge']):.2f}")
+        total_avg = np.mean(timings['preprocess']) + np.mean(timings['create_3d']) + np.mean(timings['edges']) + np.mean(timings['yolo']) + np.mean(timings['merge'])
         print(f"  Total per frame:  {total_avg:.2f}")
     
     if cuda_available and gpu_usage['yolo']:
@@ -166,14 +185,14 @@ if __name__ == "__main__":
         'yolo_model': 'yoloe-11l-seg-pf-old.pt',
         'conf': 0.3,
         'iou': 0.5,
-        'kernel_size': 9,
+        'kernel_size': 11,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
         'show_pcds': False,
-        'fast_mask': True,
+        'fast_mask': False,
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
-        'vis_graph': False,
+        'vis_graph': True,
         'print_resource_usage': False,
     })
     main(cfg)
