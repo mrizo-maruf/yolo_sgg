@@ -217,13 +217,15 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
 
     model = YOLOE(model_path)
     for ip, rgb_p in enumerate(rgb_paths):
-        bgr = cv2.imread(rgb_p)
-        if bgr is None:
+        # read in rgb
+        rgb = cv2.imread(rgb_p)
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+        if rgb is None:
             print(f"[WARN][prep_frames] Could not read image: {rgb_p}")
             continue
         
         out = model.track(
-            source=[bgr],
+            source=[rgb],
             tracker=TRACKER_CFG,
             device=DEVICE,
             conf=conf,
@@ -904,4 +906,323 @@ def get_track_ids(yolo_res):
         print("[utils.get_track_ids] Warning: No track IDs found.")
         return []
     return track_ids
+
+def update_graph(current_graph, persistan_graph):
+    """
+    Update persistent graph with current frame graph.
+    Args:
+        current_graph: nx.MultiDiGraph of current frame
+        persistan_graph: nx.MultiDiGraph of accumulated frames
+    Returns:
+        updated persistent graph
+    """
+    if persistan_graph is None:
+        persistan_graph = current_graph.copy()
+        return persistan_graph
+    
+    for node_id, data in current_graph.nodes(data=True):
+        if not persistan_graph.has_node(node_id):
+            persistan_graph.add_node(node_id, data=data['data'])
+        else:
+            # Optionally, update existing node data if needed
+            pass
+    return persistan_graph
+
+def match_nodes(persistent_graph, current_graph, iou_threshold=0.3, distance_threshold=0.3):
+    """
+    Match nodes between persistent and current graphs.
+    
+    Strategy:
+    1. First try matching by track_id (most reliable)
+    2. Fall back to spatial proximity for objects without reliable tracking
+    3. Unmatched current nodes will be added as new nodes
+    
+    Args:
+        persistent_graph: nx.MultiDiGraph - accumulated graph
+        current_graph: nx.MultiDiGraph - current frame graph
+        iou_threshold: float - 3D IoU threshold for spatial matching
+        distance_threshold: float - Euclidean distance threshold (meters)
+    
+    Returns:
+        node_mapping: dict - maps current_graph node IDs to persistent_graph node IDs
+    """
+    node_mapping = {}
+    matched_persistent_nodes = set()
+    
+    # Step 1: Match by track_id (highest priority)
+    for curr_node, curr_data in current_graph.nodes(data=True):
+        curr_track_id = curr_data.get('data', {}).get('track_id', None)
+        
+        # Skip invalid track_ids
+        if curr_track_id is None or curr_track_id == -10 or curr_track_id < 0:
+            continue
+        
+        # Search for matching track_id in persistent graph
+        for persist_node, persist_data in persistent_graph.nodes(data=True):
+            persist_track_id = persist_data.get('data', {}).get('track_id', None)
+            
+            if persist_track_id == curr_track_id and persist_node not in matched_persistent_nodes:
+                node_mapping[curr_node] = persist_node
+                matched_persistent_nodes.add(persist_node)
+                break
+    
+    # Step 2: Match remaining nodes by spatial proximity
+    for curr_node, curr_data in current_graph.nodes(data=True):
+        # Skip if already matched
+        if curr_node in node_mapping:
+            continue
+        
+        # Skip if no valid 3D bounding box
+        curr_bbox_3d = curr_data.get('data', {}).get('bbox_3d', {})
+        curr_obb = curr_bbox_3d.get('obb')
+        if curr_obb is None:
+            continue
+        
+        curr_center = np.array(curr_obb['center'])
+        curr_points = np.array(curr_data.get('data', {}).get('points', []))
+        
+        best_match = None
+        best_score = 0
+        
+        for persist_node, persist_data in persistent_graph.nodes(data=True):
+            # Skip already matched nodes
+            if persist_node in matched_persistent_nodes:
+                continue
+            
+            persist_bbox_3d = persist_data.get('data', {}).get('bbox_3d', {})
+            persist_obb = persist_bbox_3d.get('obb')
+            if persist_obb is None:
+                continue
+            
+            persist_center = np.array(persist_obb['center'])
+            persist_points = np.array(persist_data.get('data', {}).get('points', []))
+            
+            # Calculate center distance
+            distance = np.linalg.norm(curr_center - persist_center)
+            
+            # If too far, skip
+            if distance > distance_threshold:
+                continue
+            
+            # Calculate 3D IoU if points are available
+            if len(curr_points) > 0 and len(persist_points) > 0:
+                iou = calculate_3d_iou(curr_points, persist_points)
+                score = iou
+            else:
+                # Fall back to distance-based score (inverse distance)
+                score = 1.0 / (1.0 + distance)
+            
+            # Keep track of best match
+            if score > best_score and score > iou_threshold:
+                best_score = score
+                best_match = persist_node
+        
+        # If found a good match, add to mapping
+        if best_match is not None:
+            # print(f"[match_nodes] Matched current node {curr_node} to persistent node {best_match} with score {best_score:.3f}")
+            node_mapping[curr_node] = best_match
+            matched_persistent_nodes.add(best_match)
+    
+    # Step 3: Assign new IDs to unmatched current nodes
+    for curr_node in current_graph.nodes():
+        if curr_node not in node_mapping:
+            node_mapping[curr_node] = curr_node
+    
+    return node_mapping
+
+
+def calculate_3d_iou(points1, points2):
+    """
+    Calculate 3D Intersection over Union between two point clouds.
+    Simple approximation using axis-aligned bounding boxes.
+    
+    Args:
+        points1: np.array of shape (N, 3)
+        points2: np.array of shape (M, 3)
+    
+    Returns:
+        iou: float - IoU score between 0 and 1
+    """
+    if len(points1) == 0 or len(points2) == 0:
+        return 0.0
+    
+    # Get axis-aligned bounding boxes
+    min1 = np.min(points1, axis=0)
+    max1 = np.max(points1, axis=0)
+    min2 = np.min(points2, axis=0)
+    max2 = np.max(points2, axis=0)
+    
+    # Calculate intersection
+    inter_min = np.maximum(min1, min2)
+    inter_max = np.minimum(max1, max2)
+    
+    # Check if there's an intersection
+    if np.any(inter_min >= inter_max):
+        return 0.0
+    
+    # Calculate volumes
+    inter_volume = np.prod(inter_max - inter_min)
+    volume1 = np.prod(max1 - min1)
+    volume2 = np.prod(max2 - min2)
+    
+    # Calculate IoU
+    union_volume = volume1 + volume2 - inter_volume
+    iou = inter_volume / union_volume if union_volume > 0 else 0.0
+    
+    return iou
+
+
+def calculate_bbox_iou_3d(obb1, obb2):
+    """
+    Alternative: Calculate IoU using oriented bounding boxes.
+    For more accurate matching with rotated objects.
+    
+    Args:
+        obb1: dict with 'center', 'extent', 'rotation'
+        obb2: dict with 'center', 'extent', 'rotation'
+    
+    Returns:
+        iou: float - approximate IoU
+    """
+    # This is a simplified version
+    # For production, consider using libraries like Open3D for accurate OBB IoU
+    
+    center1 = np.array(obb1['center'])
+    center2 = np.array(obb2['center'])
+    extent1 = np.array(obb1.get('extent', [1, 1, 1]))
+    extent2 = np.array(obb2.get('extent', [1, 1, 1]))
+    
+    # Simple approximation: treat as axis-aligned for quick check
+    min1 = center1 - extent1 / 2
+    max1 = center1 + extent1 / 2
+    min2 = center2 - extent2 / 2
+    max2 = center2 + extent2 / 2
+    
+    # Calculate intersection
+    inter_min = np.maximum(min1, min2)
+    inter_max = np.minimum(max1, max2)
+    
+    if np.any(inter_min >= inter_max):
+        return 0.0
+    
+    inter_volume = np.prod(inter_max - inter_min)
+    volume1 = np.prod(extent1)
+    volume2 = np.prod(extent2)
+    union_volume = volume1 + volume2 - inter_volume
+    
+    return inter_volume / union_volume if union_volume > 0 else 0.0
+
+def merge_scene_graphs(persistent_graph, current_graph):
+    """
+    Merge current frame's scene graph into persistent graph.
+    Handles egocentric vs allocentric relationships appropriately.
+    """
+    
+    # Step 1: Match nodes (using track_id + spatial proximity fallback)
+    node_mapping = match_nodes(persistent_graph, current_graph, 
+                               iou_threshold=0.3)
+    
+    # Step 2: Update node attributes
+    for curr_node, persist_node in node_mapping.items():
+        if persist_node in persistent_graph:
+            # Update with latest observation
+            persistent_graph.nodes[persist_node].update(
+                current_graph.nodes[curr_node]
+            )
+        else:
+            # Add new node
+            persistent_graph.add_node(persist_node, 
+                **current_graph.nodes[curr_node])
+    
+    # Step 3: Handle EGOCENTRIC edges (camera-dependent)
+    egocentric_classes = ['proximity', 'middle_furniture']
+    
+    # Remove old egocentric edges for all nodes
+    # current_nodes = set(node_mapping.values())
+    # for u, v, key, data in list(persistent_graph.edges(keys=True, data=True)):
+    #     if data['label_class'] in egocentric_classes:
+    #         persistent_graph.remove_edge(u, v, key)
+    
+    # Remove old egocentric edges for nodes in current view only
+    current_nodes = set(node_mapping.values())
+    for u, v, key, data in list(persistent_graph.edges(keys=True, data=True)):
+        if data['label_class'] in egocentric_classes:
+            if u in current_nodes and v in current_nodes:
+                persistent_graph.remove_edge(u, v, key)
+    
+    # Add new egocentric edges from current frame
+    for u, v, key, data in current_graph.edges(keys=True, data=True):
+        if data['label_class'] in egocentric_classes:
+            u_mapped = node_mapping[u]
+            v_mapped = node_mapping[v]
+            persistent_graph.add_edge(u_mapped, v_mapped, **data)
+
+    # remove all aligned furniture edges: because in dynamic scenes these are unreliable, should be updated
+    # for every frame
+    for u, v, key, data in list(persistent_graph.edges(keys=True, data=True)):
+        if data['label_class'] == 'aligned_furniture':
+            persistent_graph.remove_edge(u, v, key)
+    
+    # Step 4: Handle ALLOCENTRIC edges (camera-independent)
+    allocentric_classes = ['support', 'embedded', 'hanging', 
+                          'oppo_support', 'aligned_furniture']
+    
+    for u, v, key, data in current_graph.edges(keys=True, data=True):
+        if data['label_class'] not in allocentric_classes:
+            continue
+            
+        u_mapped = node_mapping[u]
+        v_mapped = node_mapping[v]
+        curr_label = data['label']
+        curr_class = data['label_class']
+        
+        # Check for existing edges between these nodes
+        edge_found = False
+        if persistent_graph.has_edge(u_mapped, v_mapped):
+            for edge_key in list(persistent_graph[u_mapped][v_mapped].keys()):
+                edge_data = persistent_graph[u_mapped][v_mapped][edge_key]
+                persist_class = edge_data.get('label_class')
+                persist_label = edge_data.get('label')
+                
+                # Same label_class
+                if persist_class == curr_class:
+                    if persist_label == curr_label:
+                        # Same edge - update attributes (e.g., confidence)
+                        persistent_graph[u_mapped][v_mapped][edge_key].update(data)
+                    else:
+                        # Different label but same class - replace
+                        persistent_graph.remove_edge(u_mapped, v_mapped, edge_key)
+                        persistent_graph.add_edge(u_mapped, v_mapped, **data)
+                    edge_found = True
+                    break
+                
+                # Conflicting allocentric classes (e.g., support vs embedded)
+                elif persist_class in allocentric_classes:
+                    # Remove conflicting relationship
+                    # (object can't be both ON and INSIDE something)
+                    if are_conflicting_relations(persist_class, curr_class):
+                        persistent_graph.remove_edge(u_mapped, v_mapped, edge_key)
+                        print(f"[merge_scene_graphs] Removed conflicting allocentric edge (persisted: {persist_class} vs current: {curr_class}).")
+                        print(f"    Between nodes {u_mapped} and {v_mapped}.")
+                        if persist_class == 'support':
+                            # special case: when support is removed, also remove the opposite support edge
+                            if persistent_graph.has_edge(v_mapped, u_mapped):
+                                print("[merge_scene_graphs] Removing opposite support edge due to conflict.")
+                                persistent_graph.remove_edge(v_mapped, u_mapped, edge_key)
+        
+        # Add edge if not found
+        if not edge_found:
+            persistent_graph.add_edge(u_mapped, v_mapped, **data)
+    
+    return persistent_graph
+
+
+def are_conflicting_relations(class1, class2):
+    """Check if two allocentric relation types are mutually exclusive"""
+    conflicts = {
+        'support': ['embedded', 'hanging'],
+        'embedded': ['support', 'hanging'],
+        'hanging': ['support', 'embedded']
+    }
+    return class2 in conflicts.get(class1, [])
 
