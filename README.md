@@ -1,5 +1,5 @@
 ### how to run
-1. download yoloe-11l-seg-pf-new.pt from https://drive.google.com/drive/folders/1noXhCDYF7yvHvDLeYBeSUMVQD-88OtBQ?usp=sharing
+1. download yoloe-11l-seg-pf-old.pt from https://drive.google.com/drive/folders/1noXhCDYF7yvHvDLeYBeSUMVQD-88OtBQ?usp=sharing
 2. Download *UR5-Peg-In-Hole_02_straight* folder also from same drive
 3. pass corresponding paths inside `yolo_ssg.py` conf
 2. open3d, networkx, yolo ... libs install
@@ -13,7 +13,8 @@
 - [x] multi-obj rel visualization
 - [x] add time/GPU usage
 - [x] graph update
-- [ ] 3D obj generation faster
+- [x] 3D obj generation faster
+- [ ] graph update logic
 - [ ] video visualization
 - [ ] camera relations
 - [ ] improve SV edge predictor (faster)
@@ -23,6 +24,48 @@
 - [ ] visualization in 3d
 - [ ] add `requirements.txt`
 
+### Latency
+
+#### Latency with big erosion using `opencv2`
+* small objects might be erased by erosion
+* outliers in pcds
+* `kernel_size: 19`
+
+For complex scene:
+```
+Latency Averages (ms):
+  Preprocessing:    28.48 ± 10.72
+  Create 3D:        26.59 ± 8.07
+  Edge Prediction:  7.17 ± 4.45
+  YOLO:             29.34 ± 4.98
+  Merge:           1.28 ± 0.26
+  Total per frame:  92.85
+
+GPU Memory Usage Averages (MB):
+  After YOLO:       179.5 ± 5.9
+  After Edges:      169.8 ± 3.3
+
+Total frames processed: 30
+```
+
+For simple scene:
+```
+Latency Averages (ms):
+  Preprocessing:    16.71 ± 4.21
+  Create 3D:        18.32 ± 5.77
+  Edge Prediction:  1.82 ± 0.40
+  YOLO:             28.20 ± 8.47
+  Merge:           0.33 ± 0.13
+  Total per frame:  65.38
+
+GPU Memory Usage Averages (MB):
+  After YOLO:       168.9 ± 1.0
+  After Edges:      164.4 ± 0.4
+
+Total frames processed: 40
+```
+
+#### Latency with `open3d` statistical outlier removal
 For complex scene:
 ```Latency Averages (ms):
   Preprocessing:    13.37 ± 6.04

@@ -522,7 +522,7 @@ def extract_points_from_mask( depth_m: np.ndarray,
         M = zs.shape[0]
     else:
         # keep 70% of points
-        idx = rng.choice(M, size=int(M * 0.7), replace=False)
+        idx = rng.choice(M, size=int(M * 0.5), replace=False)
         us = us[idx]
         vs = vs[idx]
         zs = zs[idx]
@@ -539,8 +539,9 @@ def extract_points_from_mask( depth_m: np.ndarray,
     if pts is None or pts.size == 0:
         print(f"[utils.extract_points_from_mask] Warning: no points extracted from mask in frame {frame_idx},\
               {frame_idx} Extracted {pts.shape[0]}.")
-    
-    # Apply denoising if requested
+    return pts
+
+    # Very SLOW: Apply denoising if requested
     # denoise_radius = 0.02
     # denoise_epsilon = 0.5
     # if pts.shape[0] > 0:
@@ -550,6 +551,7 @@ def extract_points_from_mask( depth_m: np.ndarray,
     
     # return pts
 
+    # OK SLOW
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
 
@@ -559,7 +561,6 @@ def extract_points_from_mask( depth_m: np.ndarray,
 
     cleaned_pts_np = np.asarray(pcd.points)
     results_points = cleaned_pts_np
-    
     return results_points
 
 def cam_to_world(points_cam: np.ndarray, T_w_c: np.ndarray):
@@ -674,6 +675,15 @@ def compute_3d_bboxes(points, fast_mode: bool = True):
     }
 
 def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx, o3_nb_neighbors, o3std_ratio):
+    # t_total_start = time.perf_counter()
+    # timings = {
+    #     'extract_points': 0,
+    #     'cam_to_world': 0,
+    #     'compute_bbox': 0,
+    #     'graph_ops': 0,
+    # }
+    n_objects = 0
+    
     frame_objs = []
     graph = nx.MultiDiGraph()
     for t_id, m_clean in zip(track_ids, masks_clean):
@@ -681,6 +691,7 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             continue
         
         # 1. extract points from mask in camera frame (cap points)
+        # t_start = time.perf_counter()
         points_cam = extract_points_from_mask(
             depth_m, 
             m_clean, 
@@ -690,6 +701,7 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             o3std_ratio=o3std_ratio, 
             random_state=int(t_id)
         )
+        # timings['extract_points'] += (time.perf_counter() - t_start) * 1000
 
         # 2. transform to world frame if pose available
         if points_cam is None:
@@ -707,13 +719,17 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             points_world = None
             pts_for_bbox = points_cam
         else:
+            # t_start = time.perf_counter()
             points_world = cam_to_world(points_cam, T_w_c)
             pts_for_bbox = points_world
+            # timings['cam_to_world'] += (time.perf_counter() - t_start) * 1000
 
         # 3. compute 3d bbox (in world if transformed, else in camera)
+        # t_start = time.perf_counter()
         bbox3d = compute_3d_bboxes(pts_for_bbox)
+        # timings['compute_bbox'] += (time.perf_counter() - t_start) * 1000
         
-        
+        # t_start = time.perf_counter()
         obj = {
             'track_id': int(t_id),
             'points': pts_for_bbox,
@@ -723,6 +739,19 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
         graph.add_node(int(t_id), data=obj)
         # graph.add_node(obj)
         frame_objs.append(obj)
+        # timings['graph_ops'] += (time.perf_counter() - t_start) * 1000
+        n_objects += 1
+    
+    # Calculate total time
+    # total_time = (time.perf_counter() - t_total_start) * 1000
+    
+    # Print timing breakdown
+    # print(f"    [create_3d] Objects: {n_objects}, Total: {total_time:.2f} ms")
+    # if n_objects > 0:
+    #     print(f"      extract_points:  {timings['extract_points']:6.2f} ms ({timings['extract_points']/n_objects:.2f} ms/obj)")
+    #     print(f"      cam_to_world:    {timings['cam_to_world']:6.2f} ms ({timings['cam_to_world']/n_objects:.2f} ms/obj)")
+    #     print(f"      compute_bbox:    {timings['compute_bbox']:6.2f} ms ({timings['compute_bbox']/n_objects:.2f} ms/obj)")
+    #     print(f"      graph_ops:       {timings['graph_ops']:6.2f} ms ({timings['graph_ops']/n_objects:.2f} ms/obj)")
             
     return frame_objs, graph
 
