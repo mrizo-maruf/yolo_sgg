@@ -98,3 +98,35 @@ GPU Memory Usage Averages (MB):
 
 Total frames processed: 40
 ```
+
+### Scene Graph Merging Algorithm
+
+The system builds a **persistent scene graph** across multiple frames by merging frame-by-frame observations. This allows tracking objects and their relationships over time as the camera moves through the scene.
+
+#### How It Works
+
+**1. Node Matching**
+- First, the algorithm matches objects between the current frame and the persistent graph using **tracking IDs** from YOLO (most reliable method)
+- For objects without reliable IDs, it falls back to **spatial matching** using 3D position and bounding box overlap
+- Objects that can't be matched are added as new nodes
+
+**2. Node Updates**
+- Matched nodes get updated with the latest 3D position, point cloud, and bounding box information
+- This keeps the graph synchronized with the most recent observations
+
+**3. Edge Handling: Egocentric vs Allocentric**
+
+The algorithm treats two types of spatial relationships differently:
+
+- **Egocentric relationships** (camera-dependent): proximity, "to the left/right", directional relations
+  - These change as the camera moves
+  - Old egocentric edges are removed and replaced with current frame observations
+  
+- **Allocentric relationships** (camera-independent): support, embedded, hanging, aligned
+  - These are physical relationships that don't depend on camera viewpoint
+  - Once detected, they persist across frames unless contradicted by new evidence
+  - Conflicting allocentric relationships (e.g., object can't be both ON and INSIDE another) are resolved by keeping the newest observation
+
+**4. Conflict Resolution**
+- If a new observation contradicts an existing allocentric relationship, the old edge is removed
+- Special handling for support relationships: removing a support edge also removes the corresponding opposite-support edge
