@@ -130,3 +130,10 @@ The algorithm treats two types of spatial relationships differently:
 **4. Conflict Resolution**
 - If a new observation contradicts an existing allocentric relationship, the old edge is removed
 - Special handling for support relationships: removing a support edge also removes the corresponding opposite-support edge
+
+
+### TO-DO
+* update based on std div, of rgbs, kdl
+* generate in intervals
+* every time stemp update
+* track only moving objects, cam can move/stay still
