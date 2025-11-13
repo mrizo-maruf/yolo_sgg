@@ -14,7 +14,7 @@
 - [x] add time/GPU usage
 - [x] graph update
 - [x] 3D obj generation faster
-- [ ] Try DERT instead of YOLOE hat.openai.com/c/187ea4f8-14ab-4c35-bb43-69beb61c6136
+- [ ] Try [DERT](https://github.com/roboflow/rf-detr) instead of YOLOE
 - [ ] graph update logic
 - [ ] video visualization
 - [ ] camera relations
