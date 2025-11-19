@@ -1,30 +1,124 @@
-### how to run
-1. download yoloe-11l-seg-pf-old.pt from https://drive.google.com/drive/folders/1noXhCDYF7yvHvDLeYBeSUMVQD-88OtBQ?usp=sharing
-2. Download *UR5-Peg-In-Hole_02_straight* folder also from same drive
-3. pass corresponding paths inside `yolo_ssg.py` conf
-2. open3d, networkx, yolo ... libs install
-3. run `python3 yolo_ssg.py`
-4. to vis pcds, ``` 'show_pcds': True``` inside `yolo_ssg.py` conf
-5. to vis masks orig/cleaned, ``` 'fast_mask': False,``` inside `yolo_ssg.py` conf
-6. 
+# YOLO-Based Scene Graph Generation (SSG)
+
+Automated 3D scene understanding and relationship detection using YOLO segmentation and geometric reasoning.
+
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+
+---
+
+## 🚀 Quick Links
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get running in 5 minutes
+- **[Full Setup Instructions](SETUP.md)** - Detailed installation guide
+- **[Requirements](requirements.txt)** - Python dependencies
+- **[Conda Environment](environment.yml)** - Reproducible conda setup
+
+---
+
+## 📋 Overview
+
+![pipeline](/assets/image.png)
 
 
-### TO-DO
-- [x] multi-obj rel visualization
-- [x] add time/GPU usage
-- [x] graph update
-- [x] 3D obj generation faster
-- [ ] Try [DERT](https://github.com/roboflow/rf-detr) instead of YOLOE
-- [ ] graph update logic
-- [ ] video visualization
-- [ ] camera relations
-- [ ] improve SV edge predictor (faster)
-- [ ] support of new yolo-seg with obj names
-- [ ] try with prompt model
-- [ ] VL-SAT edge predictor support
-- [ ] visualization in 3d
-- [ ] add `requirements.txt`
+This project generates **3D scene graphs** from RGB-D or monocular video sequences by:
 
+1. **Object Detection & Segmentation** - Using YOLO for instance segmentation
+2. **Preprocessing segmentation masks** - Using OpenCV erosion operation to adjust masks
+2. **3D Reconstruction** - Converting 2D masks to 3D point clouds
+3. **Relationship Detection** - Computing spatial relationships (support, proximity, etc.) using SceneVerse edge prediction algorithm
+4. **Graph Construction** - Building multi-frame persistent scene graphs
+---
+
+## 📦 Installation
+
+### Quick Setup
+
+```bash
+# Create conda environment
+conda create -n yolo_ssg python=3.10 -y
+conda activate yolo_ssg
+
+# Install PyTorch with CUDA
+conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia -y
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**👉 See [SETUP.md](SETUP.md) for detailed instructions and [QUICKSTART.md](QUICKSTART.md) for rapid setup.**
+
+---
+
+<!-- ## 🏃 How to Run
+
+### VGGT-Based Processing (Recommended)
+
+Process RGB images with VGGT-predicted camera parameters:
+
+```bash
+python yolo_ssg_e.py
+``` -->
+
+### Traditional RGBD Processing
+
+Process RGB-D sequences with known camera poses:
+
+```bash
+python yolo_ssg.py
+```
+
+### Data Requirements
+
+1. **Download YOLO model**
+2. **Download sample data**: *UR5-Peg-In-Hole_02_straight* folder from same drive
+  * or any RGB-D sequence with camera trajectory
+    ```
+    depth/
+      - frame1.png
+      - ...
+    rgb/
+      - frame2.jpg
+      - ...
+    traj.txt
+      - 4x4 matric of camera postion
+    ```
+3. **Configure paths** inside `yolo_ssg.py`
+
+### Configuration Options
+
+Edit the config in the script's `__main__` section:
+
+```python
+cfg = OmegaConf.create({
+    'rgb_dir': "/path/to/rgb",
+    'yolo_model': 'yoloe-11l-seg-pf-old.pt',
+    'conf': 0.3,                      # Detection confidence
+    'iou': 0.5,                       # IOU threshold
+    'max_points_per_obj': 2000,       # Points per object
+    'show_pcds': True,                # 3D visualization
+    'vis_graph': True,                # Graph visualization
+    'fast_mask': False,               # Show mask processing
+})
+```
+
+---
+
+## 📊 Output
+
+The system generates:
+
+1. **Scene Graphs** - NetworkX MultiDiGraph with nodes (objects) and edges (relationships)
+2. **3D Point Clouds** - Open3D format with colors and bounding boxes
+3. **Visualizations** - Interactive 3D views and 2D graph plots
+4. **Rendered Frames** - Camera-perspective renders with annotations (optional)
+
+### Relationship Types
+
+- **Egocentric (Camera-Relative)**: Clock-direction proximity, distance-based
+- **Allocentric (Object-Relative)**: Support, hanging, embedded, alignment
+
+--- 
 ### Latency
 
 #### Latency with big erosion using `opencv2`
@@ -132,9 +226,43 @@ The algorithm treats two types of spatial relationships differently:
 - If a new observation contradicts an existing allocentric relationship, the old edge is removed
 - Special handling for support relationships: removing a support edge also removes the corresponding opposite-support edge
 
-
 ### TO-DO
-* update based on std div, of rgbs, kdl
-* generate in intervals
-* every time stemp update
-* track only moving objects, cam can move/stay still
+- [x] multi-obj rel visualization
+- [x] add time/GPU usage
+- [x] graph update
+- [x] 3D obj generation faster
+- [ ] graph update logic
+- [ ] video visualization
+- [ ] camera relations
+- [ ] improve SV edge predictor (faster)
+- [ ] support of new yolo-seg with obj names
+- [ ] try with prompt model
+- [ ] VL-SAT edge predictor support
+- [ ] visualization in 3d
+- [ ] add `requirements.txt`
+---
+
+## 🗂️ Project Structure
+
+```
+yolo_ssg/
+├── yolo_ssg.py              # Main: RGBD processing
+├── requirements.txt         # Python dependencies
+├── environment.yml          # Conda environment
+├── SETUP.md                 # Setup instructions
+├── QUICKSTART.md           # Quick start guide
+├── README.md               # This file
+│
+├── YOLOE/
+│   └── utils.py            # YOLO utilities
+│
+└── ssg/
+    ├── ssg_main.py         # Scene graph generation
+    ├── ssg_utils.py        # SSG utilities
+    ├── relationships/      # Relationship detectors
+    │   ├── support.py
+    │   ├── proximity.py
+    │   ├── hanging.py
+    │   └── multi_objs.py
+    └── ssg_data/           # Data structures
+```
