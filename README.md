@@ -8,7 +8,7 @@ Automated 3D scene understanding and relationship detection using YOLO segmentat
 
 ## 📋 Overview
 
-![pipeline](/assets/image.png)
+![pipeline](/assets/image.jpeg)
 
 
 This project generates **3D scene graphs** from RGB-D or monocular video sequences by:
