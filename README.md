@@ -4,16 +4,6 @@ Automated 3D scene understanding and relationship detection using YOLO segmentat
 
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-
----
-
-## 🚀 Quick Links
-
-- **[Quick Start Guide](QUICKSTART.md)** - Get running in 5 minutes
-- **[Full Setup Instructions](SETUP.md)** - Detailed installation guide
-- **[Requirements](requirements.txt)** - Python dependencies
-- **[Conda Environment](environment.yml)** - Reproducible conda setup
-
 ---
 
 ## 📋 Overview
