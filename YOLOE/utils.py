@@ -674,7 +674,7 @@ def compute_3d_bboxes(points, fast_mode: bool = True):
         'obb': {'center': obb_center, 'extent': obb_extent, 'R': obb_R}
     }
 
-def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx, o3_nb_neighbors, o3std_ratio):
+def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c, frame_idx, o3_nb_neighbors, o3std_ratio, accumulated_points_dict=None, max_accumulated_points=10000):
     # t_total_start = time.perf_counter()
     # timings = {
     #     'extract_points': 0,
@@ -683,6 +683,9 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
     #     'graph_ops': 0,
     # }
     n_objects = 0
+    
+    if accumulated_points_dict is None:
+        accumulated_points_dict = {}
     
     frame_objs = []
     graph = nx.MultiDiGraph()
@@ -724,16 +727,36 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
             pts_for_bbox = points_world
             # timings['cam_to_world'] += (time.perf_counter() - t_start) * 1000
 
-        # 3. compute 3d bbox (in world if transformed, else in camera)
+        # 2.5. Accumulate points across frames for this track_id
+        if t_id not in accumulated_points_dict:
+            # First time seeing this object
+            accumulated_points_dict[t_id] = pts_for_bbox.copy()
+        else:
+            # Accumulate with previous points
+            accumulated_points_dict[t_id] = np.vstack([accumulated_points_dict[t_id], pts_for_bbox])
+            
+            # Limit total accumulated points to avoid memory issues
+            if accumulated_points_dict[t_id].shape[0] > max_accumulated_points:
+                # Downsample: randomly sample to avoid temporal bias
+                indices = np.random.choice(accumulated_points_dict[t_id].shape[0], 
+                                          size=max_accumulated_points, 
+                                          replace=False)
+                accumulated_points_dict[t_id] = accumulated_points_dict[t_id][indices]
+        
+        # Use accumulated points for bbox computation (more robust)
+        pts_accumulated = accumulated_points_dict[t_id]
+
+        # 3. compute 3d bbox (in world if transformed, else in camera) using accumulated points
         # t_start = time.perf_counter()
-        bbox3d = compute_3d_bboxes(pts_for_bbox)
+        bbox3d = compute_3d_bboxes(pts_accumulated)
         # timings['compute_bbox'] += (time.perf_counter() - t_start) * 1000
         
         # t_start = time.perf_counter()
         obj = {
             'track_id': int(t_id),
-            'points': pts_for_bbox,
-            'bbox_3d': bbox3d
+            'points': pts_for_bbox,  # Current frame points
+            'points_accumulated': pts_accumulated,  # Accumulated points from all frames
+            'bbox_3d': bbox3d  # Computed from accumulated points
         }
         
         graph.add_node(int(t_id), data=obj)
@@ -817,19 +840,22 @@ def visualize_frame_objects_open3d(
     height: int = 720,
     point_size: float = 2.0,
     line_width: float = 2.0,
+    use_accumulated_points: bool = True,
 ):
     """
     Visualize per-object point clouds and 3D boxes using Open3D.
 
     Each element in frame_objs is expected to be a dict with keys:
       - 'track_id': int
-      - 'points': (N,3) numpy array (in world or camera)
+      - 'points': (N,3) numpy array (current frame points in world or camera)
+      - 'points_accumulated': (M,3) numpy array (accumulated points across frames)
       - 'bbox_3d': { 'aabb': {'min': [..], 'max': [..]}, 'obb': {'center':[..], 'extent':[..], 'R':[[..],[..],[..]]} }
 
     - AABB is drawn in red.
     - OBB is drawn in green.
     - Points are colored by track id.
     - Labels (track IDs) are added as small spheres at OBB/AABB center; if 3D text mesh is available, it's also added.
+    - use_accumulated_points: if True, visualize accumulated points instead of current frame points
     """
     if not isinstance(frame_objs, (list, tuple)) or len(frame_objs) == 0:
         print("[visualize_frame_objects_open3d] Nothing to visualize.")
@@ -876,7 +902,13 @@ def visualize_frame_objects_open3d(
     for obj in frame_objs:
         tid = int(obj.get('track_id', -1))
         col = _yoloe_utils__generate_color(tid)
-        pts = obj.get('points', None)
+        
+        # Choose which points to display
+        if use_accumulated_points and 'points_accumulated' in obj:
+            pts = obj.get('points_accumulated', None)
+        else:
+            pts = obj.get('points', None)
+            
         if show_points and isinstance(pts, np.ndarray) and pts.size >= 3:
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(pts)

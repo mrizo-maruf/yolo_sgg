@@ -14,6 +14,10 @@ def main(cfg):
     max_points_per_obj = int(cfg.max_points_per_obj)
 
     persistent_graph = nx.MultiDiGraph()
+    
+    # Dictionary to accumulate point clouds per track_id across frames
+    accumulated_points_dict = {}
+    max_accumulated_points = int(cfg.get('max_accumulated_points', 10000))
 
     # Metrics accumulation
     timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': [], 'merge': []}
@@ -93,7 +97,9 @@ def main(cfg):
                                                              T_w_c, 
                                                              frame_idx,
                                                              o3_nb_neighbors=cfg.o3_nb_neighbors,
-                                                             o3std_ratio=cfg.o3std_ratio
+                                                             o3std_ratio=cfg.o3std_ratio,
+                                                             accumulated_points_dict=accumulated_points_dict,
+                                                             max_accumulated_points=max_accumulated_points
         )
         t_create3d_end = time.perf_counter()
         timings['create_3d'].append((t_create3d_end - t_create3d_start) * 1000)  # ms
@@ -181,13 +187,14 @@ if __name__ == "__main__":
     cfg = OmegaConf.create({
         'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/rgb",
         'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/depth",
-        'traj_path': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/traj.txt",
+        'traj_path': "/home/rizo/mipt_ccm/yolo_sgg/UR5-Peg-In-Hole_02_straight/traj.txt",
         'yolo_model': 'yoloe-11l-seg-pf-old.pt',
         'conf': 0.3,
         'iou': 0.5,
         'kernel_size': 11,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
+        'max_accumulated_points': 10000,
         'show_pcds': False,
         'fast_mask': False,
         'o3_nb_neighbors': 50,
