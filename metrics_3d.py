@@ -79,6 +79,20 @@ class TrackingMetrics3D:
             for j, gt in enumerate(gt_boxes):
                 iou_matrix[i, j] = pred.compute_iou_3d(gt)
         
+        # Debug: print max IoU
+        if iou_matrix.size > 0:
+            max_iou = np.max(iou_matrix)
+            if max_iou < self.iou_threshold:
+                # Print diagnostic info for first mismatch
+                max_idx = np.unravel_index(np.argmax(iou_matrix), iou_matrix.shape)
+                pred_idx, gt_idx = max_idx
+                pred_box = pred_boxes[pred_idx]
+                gt_box = gt_boxes[gt_idx]
+                print(f"[DEBUG] Frame {pred_box.frame_id}: Max IoU {max_iou:.4f} < threshold {self.iou_threshold}")
+                print(f"[DEBUG]   Pred center: [{pred_box.center[0]:.3f}, {pred_box.center[1]:.3f}, {pred_box.center[2]:.3f}]")
+                print(f"[DEBUG]   GT center:   [{gt_box.center[0]:.3f}, {gt_box.center[1]:.3f}, {gt_box.center[2]:.3f}]")
+                print(f"[DEBUG]   Distance: {pred_box.distance_to(gt_box):.3f} meters")
+        
         # Greedy matching (better: use Hungarian algorithm from scipy)
         matches = {}
         matched_gt = set()
@@ -325,6 +339,16 @@ def load_gt_data(scene_path: Path) -> Dict[int, List[BBox3D]]:
                     bbox = BBox3D(track_id, aabb, frame_id)
                     gt_tracks[frame_id].append(bbox)
     
+    print(f"[DEBUG] Loaded GT: {len(gt_tracks)} frames, "
+          f"total boxes: {sum(len(boxes) for boxes in gt_tracks.values())}")
+    if gt_tracks:
+        sample_frame = min(gt_tracks.keys())
+        if gt_tracks[sample_frame]:
+            sample_box = gt_tracks[sample_frame][0]
+            print(f"[DEBUG] Sample GT - Track ID: {sample_box.track_id}, Frame: {sample_frame}")
+            print(f"[DEBUG]   Center: [{sample_box.center[0]:.3f}, {sample_box.center[1]:.3f}, {sample_box.center[2]:.3f}]")
+            print(f"[DEBUG]   Size: [{sample_box.xmax-sample_box.xmin:.3f}, {sample_box.ymax-sample_box.ymin:.3f}, {sample_box.zmax-sample_box.zmin:.3f}]")
+    
     return gt_tracks
 
 
@@ -339,6 +363,20 @@ def load_prediction_data(graph_per_frame: Dict[int, 'nx.MultiDiGraph']) -> Dict[
         Dict mapping frame_id to list of BBox3D objects
     """
     pred_tracks = defaultdict(list)
+    
+    # Debug: check first frame structure
+    if graph_per_frame and len(graph_per_frame) > 0:
+        first_frame_id = min(graph_per_frame.keys())
+        first_graph = graph_per_frame[first_frame_id]
+        print(f"\n[DEBUG] First frame ({first_frame_id}) has {first_graph.number_of_nodes()} nodes")
+        if first_graph.number_of_nodes() > 0:
+            sample_node = list(first_graph.nodes(data=True))[0]
+            print(f"[DEBUG] Sample node: {sample_node[0]}")
+            print(f"[DEBUG] Available attributes: {list(sample_node[1].keys())}")
+            if 'aabb_xyzmin_xyzmax' in sample_node[1]:
+                print(f"[DEBUG] Sample AABB: {sample_node[1]['aabb_xyzmin_xyzmax']}")
+            else:
+                print(f"[DEBUG] WARNING: 'aabb_xyzmin_xyzmax' not found in node attributes!")
     
     for frame_id, graph in graph_per_frame.items():
         for node_id, node_data in graph.nodes(data=True):
@@ -356,6 +394,16 @@ def load_prediction_data(graph_per_frame: Dict[int, 'nx.MultiDiGraph']) -> Dict[
                 ]
                 bbox = BBox3D(track_id, aabb_list, frame_id)
                 pred_tracks[frame_id].append(bbox)
+    
+    print(f"[DEBUG] Loaded predictions: {len(pred_tracks)} frames, "
+          f"total boxes: {sum(len(boxes) for boxes in pred_tracks.values())}")
+    if pred_tracks:
+        sample_frame = min(pred_tracks.keys())
+        if pred_tracks[sample_frame]:
+            sample_box = pred_tracks[sample_frame][0]
+            print(f"[DEBUG] Sample prediction - Track ID: {sample_box.track_id}, Frame: {sample_frame}")
+            print(f"[DEBUG]   Center: [{sample_box.center[0]:.3f}, {sample_box.center[1]:.3f}, {sample_box.center[2]:.3f}]")
+            print(f"[DEBUG]   Size: [{sample_box.xmax-sample_box.xmin:.3f}, {sample_box.ymax-sample_box.ymin:.3f}, {sample_box.zmax-sample_box.zmin:.3f}]")
     
     return pred_tracks
 
@@ -381,7 +429,20 @@ def evaluate_tracking(scene_path: Path,
     print(f"Loading predictions...")
     pred_tracks = load_prediction_data(graph_per_frame)
     
-    print(f"GT frames: {len(gt_tracks)}, Pred frames: {len(pred_tracks)}")
+    print(f"\n[DEBUG] GT frames: {sorted(list(gt_tracks.keys())[:10])}...")
+    print(f"[DEBUG] Pred frames: {sorted(list(pred_tracks.keys())[:10])}...")
+    print(f"[DEBUG] Total GT frames: {len(gt_tracks)}, Pred frames: {len(pred_tracks)}")
+    
+    # Check for frame overlap
+    gt_frame_set = set(gt_tracks.keys())
+    pred_frame_set = set(pred_tracks.keys())
+    common_frames = gt_frame_set & pred_frame_set
+    print(f"[DEBUG] Common frames: {len(common_frames)}")
+    if len(common_frames) == 0:
+        print("[ERROR] No overlapping frames between GT and predictions!")
+        print(f"[ERROR] This suggests a frame numbering mismatch.")
+        print(f"[ERROR] GT frames start at: {min(gt_tracks.keys()) if gt_tracks else 'N/A'}")
+        print(f"[ERROR] Pred frames start at: {min(pred_tracks.keys()) if pred_tracks else 'N/A'}")
     
     # Initialize metrics calculator
     metrics_calc = TrackingMetrics3D(iou_threshold=iou_threshold)
