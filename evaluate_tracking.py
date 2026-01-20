@@ -112,10 +112,10 @@ def main():
     
     # Configuration
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/rgb",
-        'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/depth",
-        'traj_path': "/home/rizo/mipt_ccm/yolo_sgg/UR5-Peg-In-Hole_02_straight/traj.txt",
-        'yolo_model': 'yoloe-11l-seg-pf-old.pt',
+        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/rgb",
+        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/depth",
+        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/traj.txt",
+        'yolo_model': '/home/maribjonov_mr/yolo_bench/yoloe-11l-seg-pf.pt',
         'conf': 0.3,
         'iou': 0.5,
         'kernel_size': 11,
@@ -129,7 +129,7 @@ def main():
     })
     
     # Path to scene with ground truth
-    scene_path = Path("/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight")
+    scene_path = Path("/home/maribjonov_mr/IsaacSim_bench/cabinet_simple")
     scene_name = scene_path.name
     
     print("="*60)
