@@ -125,7 +125,9 @@ def main():
         'fast_mask': True,  # Fast mode for evaluation
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
-        'compute_edges': False,  # Skip edge computation for faster evaluation
+        'compute_edges': False,  # Skip edge computation for faster evaluation        'visualize_frames': True,  # Enable side-by-side visualization
+        'viz_frames': [0, 5, 10, 15, 20],  # Which frames to visualize        'visualize_frames': True,  # Enable side-by-side visualization
+        'viz_frames': [0, 5, 10, 15, 20],  # Which frames to visualize
     })
     
     # Path to scene with ground truth
@@ -139,6 +141,26 @@ def main():
     # Step 1: Run tracking and collect graphs
     print("\n[1/3] Running tracking pipeline...")
     graph_per_frame = collect_graphs_from_tracking(cfg)
+    
+    # Step 1.5: Optional visualization of sample frames
+    if cfg.get('visualize_frames', False):
+        from metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
+        
+        print("\n[1.5/3] Loading data for visualization...")
+        gt_tracks = load_gt_data(scene_path)
+        pred_tracks = load_prediction_data(graph_per_frame)
+        
+        # Visualize first few frames
+        frames_to_viz = cfg.get('viz_frames', [0, 1, 2])
+        for frame_id in frames_to_viz:
+            if frame_id in graph_per_frame:
+                visualize_frame_comparison(
+                    frame_id=frame_id,
+                    gt_tracks=gt_tracks,
+                    pred_tracks=pred_tracks,
+                    graph_per_frame=graph_per_frame,
+                    show_points=True
+                )
     
     # Step 2: Evaluate metrics
     print("\n[2/3] Computing tracking metrics...")

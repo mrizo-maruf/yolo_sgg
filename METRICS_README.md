@@ -221,6 +221,48 @@ class CustomMetrics(TrackingMetrics3D):
 **Issue**: `Different number of GT and prediction frames`
 - **Solution**: This is normal - metrics handle missing frames gracefully
 
+**Issue**: `Very low IoU (< 0.1) or zero matches`
+- **Solution**: Use the visualization tool to debug:
+  ```bash
+  # Visualize specific frames during evaluation
+  python evaluate_tracking.py  # With visualize_frames=True in config
+  
+  # Or visualize after tracking
+  python visualize_tracking.py --scene /path/to/scene --tracked-graphs metrics_data/scene_tracked_graphs.pkl --frames 0 5 10
+  ```
+- Check for:
+  - **Coordinate system mismatch**: Camera coords vs world coords
+  - **Scale differences**: Millimeters vs meters
+  - **Frame numbering**: 0-indexed vs 1-indexed
+  - **Transformation issues**: GT in different reference frame
+
+## 🔍 Debugging with Visualization
+
+The visualization tool shows GT (green) and predictions (red) side-by-side with point clouds:
+
+```python
+# In evaluate_tracking.py config
+cfg = OmegaConf.create({
+    # ... other config ...
+    'visualize_frames': True,  # Enable visualization
+    'viz_frames': [0, 5, 10, 15, 20],  # Which frames to show
+})
+```
+
+Or use the standalone script:
+```bash
+python visualize_tracking.py \
+    --scene /path/to/scene \
+    --tracked-graphs metrics_data/scene_tracked_graphs.pkl \
+    --frames 0 5 10 15
+```
+
+The visualization displays:
+- **Left window**: Ground truth bounding boxes (GREEN) with coordinate frame
+- **Right window**: Predicted bounding boxes (RED) with point clouds
+- **Console output**: IoU matrix showing overlap between all GT/pred pairs
+- **Coordinate frames**: Red=X, Green=Y, Blue=Z axes
+
 ## 📚 References
 
 - HOTA: [A Higher Order Metric for Evaluating Multi-Object Tracking](https://arxiv.org/abs/2009.07736)
