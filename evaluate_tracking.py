@@ -126,7 +126,7 @@ def main():
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
         'compute_edges': False,  # Skip edge computation for faster evaluation        'visualize_frames': True,  # Enable side-by-side visualization
-        'viz_frames': [0, 5, 10, 15, 20],  # Which frames to visualize        'visualize_frames': True,  # Enable side-by-side visualization
+        'visualize_frames': True,  # Which frames to visualize        'visualize_frames': True,  # Enable side-by-side visualization
         'viz_frames': [0, 5, 10, 15, 20],  # Which frames to visualize
     })
     
@@ -143,7 +143,7 @@ def main():
     graph_per_frame = collect_graphs_from_tracking(cfg)
     
     # Step 1.5: Optional visualization of sample frames
-    if cfg.get('visualize_frames', False):
+    if cfg.get('visualize_frames', True):
         from metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
         
         print("\n[1.5/3] Loading data for visualization...")

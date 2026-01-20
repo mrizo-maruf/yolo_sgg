@@ -9,7 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 import csv
-
+import open3d as o3d
 
 class BBox3D:
     """3D Bounding Box representation"""
