@@ -112,9 +112,9 @@ def main():
     
     # Configuration
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/rgb",
-        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/depth",
-        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/cabinet_simple/traj.txt",
+        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex/rgb",
+        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex/depth",
+        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex/traj.txt",
         'yolo_model': '/home/maribjonov_mr/yolo_bench/yoloe-11l-seg-pf.pt',
         'conf': 0.3,
         'iou': 0.5,
@@ -131,7 +131,7 @@ def main():
     })
     
     # Path to scene with ground truth
-    scene_path = Path("/home/maribjonov_mr/IsaacSim_bench/cabinet_simple")
+    scene_path = Path("/home/maribjonov_mr/IsaacSim_bench/cabinet_complex")
     scene_name = scene_path.name
     
     print("="*60)
