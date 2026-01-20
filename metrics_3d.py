@@ -248,53 +248,89 @@ class TrackingMetrics3D:
                      pred_tracks: Dict[int, List[BBox3D]]) -> Dict[str, float]:
         """
         Compute HOTA (Higher Order Tracking Accuracy).
-        Simplified implementation.
+        
+        HOTA = sqrt(DetA * AssA)
+        
+        DetA (Detection Accuracy) = TP / (TP + FN + FP)
+        AssA (Association Accuracy) = average of per-match association scores
+        
+        For each true positive match, AssA measures how well the track IDs are consistent.
         """
         all_frames = sorted(set(list(gt_tracks.keys()) + list(pred_tracks.keys())))
         
-        alpha = 0.5  # Weight between detection and association
+        # Count detections
+        total_tp = 0  # True Positives (matched detections)
+        total_fn = 0  # False Negatives (missed GT)
+        total_fp = 0  # False Positives (unmatched predictions)
         
-        tpa = 0  # True Positive Association
-        total_matches = 0
-        
-        # Track associations
-        gt_id_to_pred = defaultdict(set)
-        pred_id_to_gt = defaultdict(set)
+        # Track ID associations for AssA
+        # For each (gt_id, pred_id) pair, count how many times they were matched
+        association_counts = defaultdict(int)  # {(gt_id, pred_id): count}
+        gt_id_total_matches = defaultdict(int)  # {gt_id: total times matched}
+        pred_id_total_matches = defaultdict(int)  # {pred_id: total times matched}
         
         for frame_id in all_frames:
             gt_boxes = gt_tracks.get(frame_id, [])
             pred_boxes = pred_tracks.get(frame_id, [])
             
-            matches, _, _ = self.match_frames(gt_boxes, pred_boxes)
+            matches, unmatched_gt, unmatched_pred = self.match_frames(gt_boxes, pred_boxes)
             
+            # Count TP, FN, FP
+            total_tp += len(matches)
+            total_fn += len(unmatched_gt)
+            total_fp += len(unmatched_pred)
+            
+            # Track associations
             for pred_idx, gt_idx in matches.items():
                 gt_id = gt_boxes[gt_idx].track_id
                 pred_id = pred_boxes[pred_idx].track_id
                 
-                gt_id_to_pred[gt_id].add(pred_id)
-                pred_id_to_gt[pred_id].add(gt_id)
-                total_matches += 1
+                association_counts[(gt_id, pred_id)] += 1
+                gt_id_total_matches[gt_id] += 1
+                pred_id_total_matches[pred_id] += 1
         
-        # Calculate association accuracy
-        for gt_id, pred_ids in gt_id_to_pred.items():
-            if len(pred_ids) == 1:  # One-to-one mapping
-                pred_id = list(pred_ids)[0]
-                if len(pred_id_to_gt[pred_id]) == 1:
-                    tpa += 1
+        # Calculate DetA: TP / (TP + FN + FP)
+        deta = total_tp / (total_tp + total_fn + total_fp) if (total_tp + total_fn + total_fp) > 0 else 0.0
         
-        # Simplified HOTA calculation
-        num_gt_ids = len(gt_id_to_pred)
-        num_pred_ids = len(pred_id_to_gt)
+        # Calculate AssA: For each TP, compute association accuracy and average
+        # AssA = (1/|TP|) * sum over all TPs of |TPA| / |FPA + TPA + FNA|
+        # Where for each match (gt_id, pred_id):
+        #   TPA = count of frames where this exact pair matched
+        #   FPA = count of frames where pred_id matched a different GT
+        #   FNA = count of frames where gt_id matched a different pred
         
-        deta = total_matches / (num_gt_ids + num_pred_ids) if (num_gt_ids + num_pred_ids) > 0 else 0.0
-        assa = tpa / max(num_gt_ids, num_pred_ids) if max(num_gt_ids, num_pred_ids) > 0 else 0.0
+        if total_tp > 0:
+            total_assa = 0.0
+            
+            for (gt_id, pred_id), tpa_count in association_counts.items():
+                # TPA: times this exact pair matched
+                tpa = tpa_count
+                
+                # FNA: times gt_id matched with OTHER predictions
+                fna = gt_id_total_matches[gt_id] - tpa_count
+                
+                # FPA: times pred_id matched with OTHER ground truths  
+                fpa = pred_id_total_matches[pred_id] - tpa_count
+                
+                # Association accuracy for this pair
+                assa_pair = tpa / (tpa + fna + fpa) if (tpa + fna + fpa) > 0 else 0.0
+                
+                # Weight by number of matches for this pair
+                total_assa += assa_pair * tpa_count
+            
+            # Average over all TPs
+            assa = total_assa / total_tp
+        else:
+            assa = 0.0
         
+        # HOTA = sqrt(DetA * AssA)
         hota = np.sqrt(deta * assa)
         
         return {
             'HOTA': hota * 100,
             'DetA': deta * 100,
-            'AssA': assa * 100
+            'AssA': assa * 100,
+            'TP': total_tp,
         }
 
 
