@@ -499,7 +499,7 @@ def visualize_frame_comparison(frame_id: int,
         graph = graph_per_frame[frame_id]
         for node_id, node_data in graph.nodes(data=True):
             data = node_data.get('data', {})
-            points = data.get('points_accumulated') or data.get('points')
+            points = data.get('points_accumulated')
             
             if points is not None and len(points) > 0:
                 pcd = o3d.geometry.PointCloud()
