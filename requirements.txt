@@ -1,0 +1,41 @@
+# YOLO SSG - Scene Graph Generation Requirements
+# Python 3.10 recommended
+
+# Core Dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer Vision & 3D
+open3d>=0.17.0
+Pillow>=10.0.0
+
+# Scene Graph & Network
+networkx>=3.1
+matplotlib>=3.7.0
+
+# Configuration & Utilities
+omegaconf>=2.3.0
+tqdm>=4.65.0
+
+# Geometry Processing
+shapely>=2.0.0
+trimesh>=3.21.0
+pyvista>=0.40.0
+
+# Deep Learning & Tracking
+# Note: ultralytics-yolo-extension (YOLOE) needs to be installed separately
+# Install with: pip install git+https://github.com/your-repo/ultralytics-yoloe.git
+# or place the custom YOLOE package in your environment
+
+# Symbolic Math (for relationship calculations)
+sympy>=1.12
+
+# VGGT Dependencies (optional, for VGGT-based processing)
+# Install VGGT separately if needed:
+# pip install git+https://github.com/ahkhan-repo/VGGT.git
+
+# Development & Testing (optional)
+pytest>=7.3.0
+jupyter>=1.0.0

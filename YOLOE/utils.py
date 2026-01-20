@@ -231,6 +231,7 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
             conf=conf,
             verbose=False,
             persist=True,
+            agnostic_nms=True
         )
          
         res = out[0] if isinstance(out, (list, tuple)) and len(out) > 0 else out        
@@ -539,7 +540,7 @@ def extract_points_from_mask( depth_m: np.ndarray,
     if pts is None or pts.size == 0:
         print(f"[utils.extract_points_from_mask] Warning: no points extracted from mask in frame {frame_idx},\
               {frame_idx} Extracted {pts.shape[0]}.")
-    return pts
+    # return pts
 
     # Very SLOW: Apply denoising if requested
     # denoise_radius = 0.02

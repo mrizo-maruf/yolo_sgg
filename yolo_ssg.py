@@ -185,21 +185,21 @@ def main(cfg):
 
 if __name__ == "__main__":
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/rgb",
-        'depth_dir': "/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_straight/depth",
-        'traj_path': "/home/rizo/mipt_ccm/yolo_sgg/UR5-Peg-In-Hole_02_straight/traj.txt",
-        'yolo_model': 'yoloe-11l-seg-pf-old.pt',
-        'conf': 0.3,
+        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/rgb",
+        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/depth",
+        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/traj.txt",
+        'yolo_model': '/home/maribjonov_mr/yolo_bench/yoloe-11l-seg-pf.pt',
+        'conf': 0.25,
         'iou': 0.5,
-        'kernel_size': 11,
+        'kernel_size': 17,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
         'max_accumulated_points': 10000,
         'show_pcds': False,
-        'fast_mask': False,
+        'fast_mask': True,
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
-        'vis_graph': True,
+        'vis_graph': False,
         'print_resource_usage': False,
     })
     main(cfg)
