@@ -441,19 +441,19 @@ def visualize_frame_comparison(frame_id: int,
                                gt_tracks: Dict[int, List[BBox3D]],
                                pred_tracks: Dict[int, List[BBox3D]],
                                graph_per_frame: Dict[int, 'nx.MultiDiGraph'] = None,
-                               show_points: bool = True):
+                               show_points: bool = False):
     """
-    Visualize GT and predictions side-by-side for a specific frame.
+    Visualize GT (RED) and predictions (GREEN) in the same window.
     
     Args:
         frame_id: Frame number to visualize
         gt_tracks: Ground truth bounding boxes
         pred_tracks: Predicted bounding boxes
-        graph_per_frame: Optional graph data with point clouds
-        show_points: Whether to show point clouds
+        graph_per_frame: Optional graph data (unused)
+        show_points: Whether to show point clouds (unused)
     """
     print(f"\n{'='*60}")
-    print(f"Visualizing Frame {frame_id}")
+    print(f"Frame {frame_id}")
     print(f"{'='*60}")
     
     gt_boxes = gt_tracks.get(frame_id, [])
@@ -465,74 +465,50 @@ def visualize_frame_comparison(frame_id: int,
         print("No data to visualize for this frame.")
         return
     
-    # Create two visualizers side-by-side
-    vis_list = []
+    # Create single visualizer
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=f"Frame {frame_id} - GT(RED) vs Pred(GREEN)", width=1280, height=720)
     
-    # Ground Truth visualizer
-    vis_gt = o3d.visualization.Visualizer()
-    vis_gt.create_window(window_name=f"Frame {frame_id} - Ground Truth", width=640, height=480, left=50, top=50)
-    
-    # Add GT bounding boxes (GREEN)
+    # Add GT bounding boxes (RED)
+    print("\nGround Truth (RED):")
     for bbox in gt_boxes:
-        line_set = create_bbox_lineset(bbox, color=[0, 1, 0])  # Green for GT
-        vis_gt.add_geometry(line_set)
-        
-        # Add text label at center
-        print(f"  GT Box {bbox.track_id}: center={bbox.center}, size=[{bbox.xmax-bbox.xmin:.3f}, {bbox.ymax-bbox.ymin:.3f}, {bbox.zmax-bbox.zmin:.3f}]")
+        line_set = create_bbox_lineset(bbox, color=[1, 0, 0])  # RED for GT
+        vis.add_geometry(line_set)
+        print(f"  GT {bbox.track_id}: center=[{bbox.center[0]:.3f}, {bbox.center[1]:.3f}, {bbox.center[2]:.3f}], "
+              f"size=[{bbox.xmax-bbox.xmin:.3f}, {bbox.ymax-bbox.ymin:.3f}, {bbox.zmax-bbox.zmin:.3f}]")
     
-    # Add coordinate frame for GT
-    coord_frame_gt = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-    vis_gt.add_geometry(coord_frame_gt)
-    
-    # Prediction visualizer
-    vis_pred = o3d.visualization.Visualizer()
-    vis_pred.create_window(window_name=f"Frame {frame_id} - Predictions", width=640, height=480, left=700, top=50)
-    
-    # Add prediction bounding boxes (RED)
+    # Add prediction bounding boxes (GREEN)
+    print("\nPredictions (GREEN):")
     for bbox in pred_boxes:
-        line_set = create_bbox_lineset(bbox, color=[1, 0, 0])  # Red for predictions
-        vis_pred.add_geometry(line_set)
-        print(f"  Pred Box {bbox.track_id}: center={bbox.center}, size=[{bbox.xmax-bbox.xmin:.3f}, {bbox.ymax-bbox.ymin:.3f}, {bbox.zmax-bbox.zmin:.3f}]")
+        line_set = create_bbox_lineset(bbox, color=[0, 1, 0])  # GREEN for predictions
+        vis.add_geometry(line_set)
+        print(f"  Pred {bbox.track_id}: center=[{bbox.center[0]:.3f}, {bbox.center[1]:.3f}, {bbox.center[2]:.3f}], "
+              f"size=[{bbox.xmax-bbox.xmin:.3f}, {bbox.ymax-bbox.ymin:.3f}, {bbox.zmax-bbox.zmin:.3f}]")
     
-    # Add point clouds if available
-    if show_points and graph_per_frame and frame_id in graph_per_frame:
-        graph = graph_per_frame[frame_id]
-        for node_id, node_data in graph.nodes(data=True):
-            data = node_data.get('data', {})
-            points = data.get('points_accumulated')
-            
-            if points is not None and len(points) > 0:
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(points)
-                # Color by track_id
-                track_id = data.get('track_id', 0)
-                color = np.array([track_id * 0.3 % 1.0, track_id * 0.7 % 1.0, track_id * 0.5 % 1.0])
-                pcd.paint_uniform_color(color)
-                vis_pred.add_geometry(pcd)
+    # Add coordinate frame
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+    vis.add_geometry(coord_frame)
     
-    # Add coordinate frame for predictions
-    coord_frame_pred = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-    vis_pred.add_geometry(coord_frame_pred)
-    
-    # Compute and display IoU for matching boxes
+    # Compute and display IoU for all pairs
     if len(gt_boxes) > 0 and len(pred_boxes) > 0:
-        print("\n  IoU Matrix:")
-        for i, pred in enumerate(pred_boxes):
-            for j, gt in enumerate(gt_boxes):
+        print("\nIoU Matrix:")
+        max_iou = 0
+        for pred in pred_boxes:
+            for gt in gt_boxes:
                 iou = pred.compute_iou_3d(gt)
                 dist = pred.distance_to(gt)
-                if iou > 0.001 or dist < 2.0:  # Show if there's any overlap or they're close
-                    print(f"    Pred {pred.track_id} <-> GT {gt.track_id}: IoU={iou:.4f}, dist={dist:.3f}m")
+                max_iou = max(max_iou, iou)
+                if iou > 0.001 or dist < 2.0:
+                    print(f"  Pred {pred.track_id} <-> GT {gt.track_id}: IoU={iou:.4f}, dist={dist:.3f}m")
+        if max_iou < 0.001:
+            print("  No overlapping boxes found!")
     
-    print(f"\nPress Q in both windows to continue...")
+    print(f"\nPress Q to continue to next frame...")
     print(f"{'='*60}\n")
     
-    # Run the visualizers
-    vis_gt.run()
-    vis_pred.run()
-    
-    vis_gt.destroy_window()
-    vis_pred.destroy_window()
+    # Run the visualizer
+    vis.run()
+    vis.destroy_window()
 
 
 def evaluate_tracking(scene_path: Path, 

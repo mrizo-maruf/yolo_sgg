@@ -238,7 +238,7 @@ class CustomMetrics(TrackingMetrics3D):
 
 ## 🔍 Debugging with Visualization
 
-The visualization tool shows GT (green) and predictions (red) side-by-side with point clouds:
+The visualization tool shows GT (red) and predictions (green) in the same window:
 
 ```python
 # In evaluate_tracking.py config
@@ -258,10 +258,11 @@ python visualize_tracking.py \
 ```
 
 The visualization displays:
-- **Left window**: Ground truth bounding boxes (GREEN) with coordinate frame
-- **Right window**: Predicted bounding boxes (RED) with point clouds
-- **Console output**: IoU matrix showing overlap between all GT/pred pairs
-- **Coordinate frames**: Red=X, Green=Y, Blue=Z axes
+- **GT bounding boxes**: RED
+- **Predicted bounding boxes**: GREEN
+- **Coordinate frame**: Red=X, Green=Y, Blue=Z axes
+- **Console output**: Box positions, sizes, and IoU matrix for all pairs
+- **Press Q** to continue to next frame
 
 ## 📚 References
 
