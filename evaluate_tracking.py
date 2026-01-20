@@ -142,12 +142,20 @@ def main():
     print("\n[1/3] Running tracking pipeline...")
     graph_per_frame = collect_graphs_from_tracking(cfg)
     
+    # GT filtering settings (same as gt_vis.py)
+    MAX_BOX_EDGE = 20.0  # meters; filter very large boxes
+    IGNORE_PRIM_PREFIXES = []  # e.g., ["/World/env"] to ignore environment
+    
     # Step 1.5: Optional visualization of sample frames
     if cfg.get('visualize_frames', False):
         from metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
         
         print("\n[1.5/3] Loading data for visualization...")
-        gt_tracks = load_gt_data(scene_path)
+        gt_tracks = load_gt_data(
+            scene_path,
+            max_box_edge=MAX_BOX_EDGE,
+            ignore_prim_prefixes=IGNORE_PRIM_PREFIXES
+        )
         pred_tracks = load_prediction_data(graph_per_frame)
         
         # Visualize specified frames
@@ -168,7 +176,9 @@ def main():
         results = evaluate_tracking(
             scene_path=scene_path,
             graph_per_frame=graph_per_frame,
-            iou_threshold=0.5
+            iou_threshold=0.5,
+            max_box_edge=MAX_BOX_EDGE,
+            ignore_prim_prefixes=IGNORE_PRIM_PREFIXES
         )
         
         # Step 3: Save results

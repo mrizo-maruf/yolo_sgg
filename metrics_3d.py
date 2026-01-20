@@ -298,13 +298,26 @@ class TrackingMetrics3D:
         }
 
 
-def load_gt_data(scene_path: Path) -> Dict[int, List[BBox3D]]:
+def load_gt_data(scene_path: Path, 
+                 max_box_edge: float = 20.0,
+                 ignore_prim_prefixes: List[str] = None) -> Dict[int, List[BBox3D]]:
     """
     Load ground truth data from bbox JSON files.
+    
+    The bboxes are expected to be in WORLD coordinates (already transformed during
+    data collection using the annotator's row-major transform matrix).
+    
+    Args:
+        scene_path: Path to scene folder containing 'bbox' subfolder
+        max_box_edge: Maximum allowed edge length (filters large/invalid boxes)
+        ignore_prim_prefixes: List of prim path prefixes to ignore (e.g., ["/World/env"])
     
     Returns:
         Dict mapping frame_id to list of BBox3D objects
     """
+    if ignore_prim_prefixes is None:
+        ignore_prim_prefixes = []
+    
     bbox_folder = scene_path / 'bbox'
     if not bbox_folder.exists():
         raise FileNotFoundError(f"Bbox folder not found: {bbox_folder}")
@@ -313,6 +326,10 @@ def load_gt_data(scene_path: Path) -> Dict[int, List[BBox3D]]:
     
     # Find all bbox JSON files
     bbox_files = sorted(bbox_folder.glob('bboxes*.json'))
+    
+    skipped_large = 0
+    skipped_prim = 0
+    skipped_invalid = 0
     
     for bbox_file in bbox_files:
         # Extract frame number from filename (e.g., bboxes000001_info.json -> 1)
@@ -327,27 +344,58 @@ def load_gt_data(scene_path: Path) -> Dict[int, List[BBox3D]]:
         with open(bbox_file, 'r') as f:
             data = json.load(f)
         
-        # Extract bboxes
+        # Extract bboxes - same structure as gt_vis.py
         if 'bboxes' in data and 'bbox_3d' in data['bboxes']:
             boxes_data = data['bboxes']['bbox_3d'].get('boxes', [])
             
             for box_data in boxes_data:
-                track_id = box_data.get('track_id')
+                # Get prim path for filtering
+                prim_path = box_data.get('prim_path', '')
+                
+                # Skip ignored prims (like background environment)
+                should_skip = False
+                for prefix in ignore_prim_prefixes:
+                    if prim_path and prim_path.startswith(prefix):
+                        should_skip = True
+                        skipped_prim += 1
+                        break
+                if should_skip:
+                    continue
+                
+                # Get track_id and aabb
+                track_id = box_data.get('track_id', box_data.get('bbox_id'))
                 aabb = box_data.get('aabb_xyzmin_xyzmax')
                 
-                if track_id is not None and aabb is not None:
-                    bbox = BBox3D(track_id, aabb, frame_id)
-                    gt_tracks[frame_id].append(bbox)
+                if track_id is None or aabb is None:
+                    skipped_invalid += 1
+                    continue
+                
+                # Parse AABB - boxes are already in WORLD coordinates after data collection fix
+                xmin, ymin, zmin, xmax, ymax, zmax = map(float, aabb)
+                
+                # Filter by box size (same as gt_vis.py)
+                sx = xmax - xmin
+                sy = ymax - ymin
+                sz = zmax - zmin
+                if max(sx, sy, sz) > max_box_edge:
+                    skipped_large += 1
+                    continue
+                
+                # Create BBox3D object
+                bbox = BBox3D(track_id, aabb, frame_id)
+                gt_tracks[frame_id].append(bbox)
     
-    print(f"[DEBUG] Loaded GT: {len(gt_tracks)} frames, "
+    print(f"[GT Load] Loaded {len(gt_tracks)} frames, "
           f"total boxes: {sum(len(boxes) for boxes in gt_tracks.values())}")
+    print(f"[GT Load] Skipped: {skipped_large} too large, {skipped_prim} ignored prims, {skipped_invalid} invalid")
+    
     if gt_tracks:
         sample_frame = min(gt_tracks.keys())
         if gt_tracks[sample_frame]:
             sample_box = gt_tracks[sample_frame][0]
-            print(f"[DEBUG] Sample GT - Track ID: {sample_box.track_id}, Frame: {sample_frame}")
-            print(f"[DEBUG]   Center: [{sample_box.center[0]:.3f}, {sample_box.center[1]:.3f}, {sample_box.center[2]:.3f}]")
-            print(f"[DEBUG]   Size: [{sample_box.xmax-sample_box.xmin:.3f}, {sample_box.ymax-sample_box.ymin:.3f}, {sample_box.zmax-sample_box.zmin:.3f}]")
+            print(f"[GT Load] Sample - Track ID: {sample_box.track_id}, Frame: {sample_frame}")
+            print(f"[GT Load]   Center: [{sample_box.center[0]:.3f}, {sample_box.center[1]:.3f}, {sample_box.center[2]:.3f}]")
+            print(f"[GT Load]   Size: [{sample_box.xmax-sample_box.xmin:.3f}, {sample_box.ymax-sample_box.ymin:.3f}, {sample_box.zmax-sample_box.zmin:.3f}]")
     
     return gt_tracks
 
@@ -513,7 +561,9 @@ def visualize_frame_comparison(frame_id: int,
 
 def evaluate_tracking(scene_path: Path, 
                      graph_per_frame: Dict[int, 'nx.MultiDiGraph'],
-                     iou_threshold: float = 0.5) -> Dict[str, any]:
+                     iou_threshold: float = 0.5,
+                     max_box_edge: float = 20.0,
+                     ignore_prim_prefixes: List[str] = None) -> Dict[str, any]:
     """
     Evaluate 3D tracking metrics.
     
@@ -521,13 +571,19 @@ def evaluate_tracking(scene_path: Path,
         scene_path: Path to scene folder containing bbox ground truth
         graph_per_frame: Dict of frame_id -> NetworkX graph with predictions
         iou_threshold: IoU threshold for matching
+        max_box_edge: Maximum allowed edge length for GT boxes
+        ignore_prim_prefixes: Prim path prefixes to ignore in GT
     
     Returns:
         Dict containing all metrics
     """
-    # Load data
+    # Load data with same filtering as gt_vis.py
     print(f"Loading ground truth from {scene_path}...")
-    gt_tracks = load_gt_data(scene_path)
+    gt_tracks = load_gt_data(
+        scene_path, 
+        max_box_edge=max_box_edge,
+        ignore_prim_prefixes=ignore_prim_prefixes
+    )
     
     print(f"Loading predictions...")
     pred_tracks = load_prediction_data(graph_per_frame)
