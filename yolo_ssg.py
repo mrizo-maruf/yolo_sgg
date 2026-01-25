@@ -1,5 +1,6 @@
 from omegaconf import OmegaConf
 import YOLOE.utils as yutils
+from YOLOE.utils import GlobalObjectRegistry
 import numpy as np
 from ssg.ssg_main import edges
 import matplotlib.pyplot as plt
@@ -15,9 +16,14 @@ def main(cfg):
 
     persistent_graph = nx.MultiDiGraph()
     
-    # Dictionary to accumulate point clouds per track_id across frames
-    accumulated_points_dict = {}
-    max_accumulated_points = int(cfg.get('max_accumulated_points', 10000))
+    # Initialize Global Object Registry for consistent tracking across frames
+    # This replaces the simple accumulated_points_dict with smarter re-identification
+    object_registry = GlobalObjectRegistry(
+        overlap_threshold=float(cfg.get('tracking_overlap_threshold', 0.5)),
+        distance_threshold=float(cfg.get('tracking_distance_threshold', 0.5)),
+        max_points_per_object=int(cfg.get('max_accumulated_points', 10000)),
+        inactive_frames_limit=int(cfg.get('tracking_inactive_limit', 0))  # 0 = never remove
+    )
 
     # Metrics accumulation
     timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': [], 'merge': []}
@@ -88,21 +94,27 @@ def main(cfg):
         # pose for this frame
         T_w_c = poses[min(frame_idx, len(poses)-1)] if poses else None
 
-        # build 3D objects
+        # build 3D objects with enhanced tracking
         t_create3d_start = time.perf_counter()
-        frame_objs, current_graph = yutils.create_3d_objects(track_ids, 
-                                                             masks_clean, 
-                                                             max_points_per_obj, 
-                                                             depth_m, 
-                                                             T_w_c, 
-                                                             frame_idx,
-                                                             o3_nb_neighbors=cfg.o3_nb_neighbors,
-                                                             o3std_ratio=cfg.o3std_ratio,
-                                                             accumulated_points_dict=accumulated_points_dict,
-                                                             max_accumulated_points=max_accumulated_points
+        frame_objs, current_graph = yutils.create_3d_objects_with_tracking(
+            track_ids, 
+            masks_clean, 
+            max_points_per_obj, 
+            depth_m, 
+            T_w_c, 
+            frame_idx,
+            o3_nb_neighbors=cfg.o3_nb_neighbors,
+            o3std_ratio=cfg.o3std_ratio,
+            object_registry=object_registry
         )
         t_create3d_end = time.perf_counter()
         timings['create_3d'].append((t_create3d_end - t_create3d_start) * 1000)  # ms
+
+        # Print tracking info if enabled
+        if cfg.get('print_tracking_info', False):
+            for obj in frame_objs:
+                print(f"  [Track] Frame {frame_idx}: YOLO_ID={obj['yolo_track_id']} -> "
+                      f"GLOBAL_ID={obj['global_id']} (source: {obj['match_source']})")
 
         # Edge predictor SceneVerse
         t_edges_start = time.perf_counter()
@@ -154,6 +166,17 @@ def main(cfg):
         
         # return 0
 
+    # Print tracking summary
+    print("\n" + "="*60)
+    print("TRACKING SUMMARY")
+    print("="*60)
+    print(f"Total unique objects tracked: {len(object_registry.get_all_objects())}")
+    for gid, obj in object_registry.get_all_objects().items():
+        print(f"  Object {gid}: seen in {obj['observation_count']} frames, "
+              f"first: {obj['first_seen_frame']}, last: {obj['last_seen_frame']}, "
+              f"points: {len(obj['points_accumulated'])}")
+    print("="*60)
+
     # Print summary statistics
     print("\n" + "="*60)
     print("SUMMARY STATISTICS")
@@ -201,5 +224,10 @@ if __name__ == "__main__":
         'o3std_ratio': 0.1,
         'vis_graph': False,
         'print_resource_usage': False,
+        # Tracking parameters
+        'tracking_overlap_threshold': 0.3,  # 3D IoU threshold for matching
+        'tracking_distance_threshold': 0.5,  # Max centroid distance (meters)
+        'tracking_inactive_limit': 0,  # Frames before removing unseen objects (0 = keep forever)
+        'print_tracking_info': False,  # Print per-frame tracking details
     })
     main(cfg)

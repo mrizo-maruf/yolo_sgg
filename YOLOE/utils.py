@@ -44,6 +44,287 @@ TRACKER_CFG = "botsort.yaml"
 DEVICE = "0"
 
 
+class GlobalObjectRegistry:
+    """
+    Maintains a persistent registry of all objects ever observed.
+    Enables re-identification when camera returns to previously seen objects.
+    
+    Matching Priority:
+    1. YOLO track_id mapping (verified with spatial check)
+    2. Previous frame objects (temporal continuity)
+    3. Global registry lookup (re-observation after occlusion)
+    4. New object assignment
+    """
+    
+    def __init__(self, 
+                 overlap_threshold: float = 0.3,
+                 distance_threshold: float = 0.5,
+                 max_points_per_object: int = 10000,
+                 inactive_frames_limit: int = 0):
+        """
+        Args:
+            overlap_threshold: 3D IoU threshold for matching
+            distance_threshold: Max centroid distance (meters) for candidate matching
+            max_points_per_object: Cap accumulated points per object
+            inactive_frames_limit: Remove objects not seen for this many frames (0 = never remove)
+        """
+        self.overlap_threshold = overlap_threshold
+        self.distance_threshold = distance_threshold
+        self.max_points_per_object = max_points_per_object
+        self.inactive_frames_limit = inactive_frames_limit
+        
+        # Global object storage: global_id -> object_data
+        self.objects = {}
+        
+        # Counter for assigning new global IDs
+        self._next_global_id = 1
+        
+        # Previous frame's objects for temporal continuity matching
+        self._prev_frame_objects = {}  # global_id -> object_data
+        
+        # Mapping from YOLO track_id to global_id (for current session)
+        self.yolo_to_global = {}
+        
+        # Current frame index
+        self.current_frame = -1
+    
+    def _generate_global_id(self) -> int:
+        """Generate a new unique global ID."""
+        gid = self._next_global_id
+        self._next_global_id += 1
+        return gid
+    
+    def _compute_overlap_score(self, pcd1: np.ndarray, pcd2: np.ndarray, 
+                                bbox1: dict, bbox2: dict) -> tuple:
+        """
+        Compute overlap score between two objects using both IoU and centroid distance.
+        
+        Returns:
+            (iou_score, centroid_distance, is_candidate)
+        """
+        if pcd1 is None or pcd2 is None or len(pcd1) == 0 or len(pcd2) == 0:
+            return 0.0, float('inf'), False
+        
+        # Get centroids from bbox or compute from points
+        if bbox1 and 'obb' in bbox1 and bbox1['obb']:
+            center1 = np.array(bbox1['obb']['center'])
+        else:
+            center1 = np.mean(pcd1, axis=0)
+        
+        if bbox2 and 'obb' in bbox2 and bbox2['obb']:
+            center2 = np.array(bbox2['obb']['center'])
+        else:
+            center2 = np.mean(pcd2, axis=0)
+        
+        centroid_dist = np.linalg.norm(center1 - center2)
+        
+        # Quick rejection based on distance
+        if centroid_dist > self.distance_threshold:
+            return 0.0, centroid_dist, False
+        
+        # Compute 3D IoU
+        iou = calculate_3d_iou(pcd1, pcd2)
+        
+        is_candidate = iou >= self.overlap_threshold
+        
+        return iou, centroid_dist, is_candidate
+    
+    def _merge_point_clouds(self, pcd_existing: np.ndarray, pcd_new: np.ndarray) -> np.ndarray:
+        """Merge two point clouds with downsampling to limit size."""
+        if pcd_existing is None or len(pcd_existing) == 0:
+            merged = pcd_new
+        elif pcd_new is None or len(pcd_new) == 0:
+            merged = pcd_existing
+        else:
+            merged = np.vstack([pcd_existing, pcd_new])
+        
+        # Downsample if exceeds limit
+        if merged is not None and len(merged) > self.max_points_per_object:
+            indices = np.random.choice(len(merged), 
+                                       size=self.max_points_per_object, 
+                                       replace=False)
+            merged = merged[indices]
+        
+        return merged
+    
+    def process_frame(self, frame_idx: int, detections: list) -> list:
+        """
+        Process detections from a single frame and update the registry.
+        
+        Args:
+            frame_idx: Current frame index
+            detections: List of dicts with keys:
+                - 'yolo_track_id': int (from YOLO tracker)
+                - 'points': np.ndarray (N, 3) in world coordinates
+                - 'bbox_3d': dict with 'aabb' and 'obb'
+        
+        Returns:
+            List of objects with assigned global_ids
+        """
+        self.current_frame = frame_idx
+        
+        # Store current frame objects for next iteration
+        current_frame_objects = {}
+        
+        # Track which global objects were matched this frame
+        matched_global_ids = set()
+        
+        # Results to return
+        processed_objects = []
+        
+        for det in detections:
+            yolo_id = det.get('yolo_track_id', -1)
+            points = det.get('points')
+            bbox_3d = det.get('bbox_3d', {})
+            
+            if points is None or len(points) == 0:
+                continue
+            
+            global_id = None
+            match_source = None
+            
+            # === LEVEL 1: Try to match using YOLO track_id mapping ===
+            if yolo_id >= 0 and yolo_id in self.yolo_to_global:
+                candidate_gid = self.yolo_to_global[yolo_id]
+                if candidate_gid in self.objects:
+                    # Verify with spatial overlap (YOLO might reuse IDs incorrectly)
+                    existing = self.objects[candidate_gid]
+                    iou, dist, is_match = self._compute_overlap_score(
+                        points, existing['points_accumulated'],
+                        bbox_3d, existing['bbox_3d']
+                    )
+                    if is_match or dist < self.distance_threshold * 0.5:
+                        global_id = candidate_gid
+                        match_source = 'yolo_mapping'
+            
+            # === LEVEL 2: Try to match with previous frame objects (temporal continuity) ===
+            if global_id is None:
+                best_match = None
+                best_iou = 0
+                
+                for gid, prev_obj in self._prev_frame_objects.items():
+                    if gid in matched_global_ids:
+                        continue
+                    
+                    iou, dist, is_candidate = self._compute_overlap_score(
+                        points, prev_obj['points_accumulated'],
+                        bbox_3d, prev_obj['bbox_3d']
+                    )
+                    
+                    if is_candidate and iou > best_iou:
+                        best_iou = iou
+                        best_match = gid
+                
+                if best_match is not None:
+                    global_id = best_match
+                    match_source = 'prev_frame'
+            
+            # === LEVEL 3: Try to match with global registry (re-observation) ===
+            if global_id is None:
+                best_match = None
+                best_iou = 0
+                
+                for gid, obj in self.objects.items():
+                    if gid in matched_global_ids:
+                        continue
+                    
+                    iou, dist, is_candidate = self._compute_overlap_score(
+                        points, obj['points_accumulated'],
+                        bbox_3d, obj['bbox_3d']
+                    )
+                    
+                    if is_candidate and iou > best_iou:
+                        best_iou = iou
+                        best_match = gid
+                
+                if best_match is not None:
+                    global_id = best_match
+                    match_source = 'global_registry'
+            
+            # === LEVEL 4: No match found - create new object ===
+            if global_id is None:
+                global_id = self._generate_global_id()
+                match_source = 'new'
+                self.objects[global_id] = {
+                    'global_id': global_id,
+                    'points_accumulated': points.copy(),
+                    'bbox_3d': bbox_3d,
+                    'first_seen_frame': frame_idx,
+                    'last_seen_frame': frame_idx,
+                    'observation_count': 0
+                }
+            
+            # === Update the object ===
+            matched_global_ids.add(global_id)
+            
+            # Update YOLO mapping
+            if yolo_id >= 0:
+                self.yolo_to_global[yolo_id] = global_id
+            
+            # Merge point clouds
+            existing_points = self.objects[global_id].get('points_accumulated')
+            merged_points = self._merge_point_clouds(existing_points, points)
+            
+            # Recompute bbox from merged points
+            merged_bbox = compute_3d_bboxes(merged_points)
+            
+            # Update registry
+            self.objects[global_id].update({
+                'points_accumulated': merged_points,
+                'bbox_3d': merged_bbox,
+                'last_seen_frame': frame_idx,
+                'observation_count': self.objects[global_id].get('observation_count', 0) + 1
+            })
+            
+            # Store for current frame
+            current_frame_objects[global_id] = self.objects[global_id]
+            
+            # Build result object
+            result_obj = {
+                'global_id': global_id,
+                'yolo_track_id': yolo_id,
+                'track_id': global_id,  # For compatibility with existing code
+                'points': points,  # Current frame points
+                'points_accumulated': merged_points,
+                'bbox_3d': merged_bbox,
+                'match_source': match_source
+            }
+            processed_objects.append(result_obj)
+        
+        # Update previous frame reference
+        self._prev_frame_objects = current_frame_objects
+        
+        # Optional: Clean up very old objects
+        if self.inactive_frames_limit > 0:
+            self._cleanup_inactive_objects(frame_idx)
+        
+        return processed_objects
+    
+    def _cleanup_inactive_objects(self, current_frame: int):
+        """Remove objects not seen for too long (optional)."""
+        to_remove = []
+        for gid, obj in self.objects.items():
+            frames_inactive = current_frame - obj.get('last_seen_frame', current_frame)
+            if frames_inactive > self.inactive_frames_limit:
+                to_remove.append(gid)
+        
+        for gid in to_remove:
+            del self.objects[gid]
+            # Also clean up YOLO mappings
+            self.yolo_to_global = {k: v for k, v in self.yolo_to_global.items() if v != gid}
+    
+    def get_all_objects(self) -> dict:
+        """Return all objects in the registry."""
+        return self.objects
+    
+    def get_active_objects(self, frame_idx: int, max_inactive_frames: int = 10) -> dict:
+        """Return objects seen recently."""
+        return {
+            gid: obj for gid, obj in self.objects.items()
+            if frame_idx - obj.get('last_seen_frame', 0) <= max_inactive_frames
+        }
+
+
 def draw_labeled_multigraph(G, attr_name='label', ax=None):
     """
     Draw a multigraph with labeled edges.
@@ -845,6 +1126,86 @@ def create_3d_objects(track_ids, masks_clean, max_points_per_obj, depth_m, T_w_c
     #     print(f"      graph_ops:       {timings['graph_ops']:6.2f} ms ({timings['graph_ops']/n_objects:.2f} ms/obj)")
             
     return frame_objs, graph
+
+
+def create_3d_objects_with_tracking(
+    track_ids, 
+    masks_clean, 
+    max_points_per_obj, 
+    depth_m, 
+    T_w_c, 
+    frame_idx,
+    o3_nb_neighbors,
+    o3std_ratio,
+    object_registry: GlobalObjectRegistry
+):
+    """
+    Enhanced version of create_3d_objects that uses GlobalObjectRegistry for tracking.
+    Provides consistent object IDs across frames even when camera moves away and returns.
+    
+    Args:
+        track_ids: YOLO track IDs
+        masks_clean: Cleaned masks
+        max_points_per_obj: Max points to extract per object
+        depth_m: Depth map in meters
+        T_w_c: Camera to world transform
+        frame_idx: Current frame index
+        o3_nb_neighbors: Open3D outlier removal param
+        o3std_ratio: Open3D outlier removal param
+        object_registry: GlobalObjectRegistry instance
+    
+    Returns:
+        frame_objs: List of processed objects with global IDs
+        graph: NetworkX graph with nodes having global IDs
+    """
+    
+    # Step 1: Extract detections from current frame
+    detections = []
+    
+    for t_id, m_clean in zip(track_ids, masks_clean):
+        if m_clean is None:
+            continue
+        
+        # Extract points from mask in camera frame
+        points_cam = extract_points_from_mask(
+            depth_m, 
+            m_clean, 
+            frame_idx=frame_idx, 
+            max_points=max_points_per_obj,
+            o3_nb_neighbors=o3_nb_neighbors,
+            o3std_ratio=o3std_ratio, 
+            random_state=int(t_id)
+        )
+        
+        if points_cam is None or points_cam.size <= 0:
+            continue
+        
+        # Transform to world frame
+        if T_w_c is not None:
+            points_world = cam_to_world(points_cam, T_w_c)
+        else:
+            points_world = points_cam
+        
+        # Compute initial bbox (will be recomputed after merging)
+        bbox_3d = compute_3d_bboxes(points_world)
+        
+        detections.append({
+            'yolo_track_id': int(t_id),
+            'points': points_world,
+            'bbox_3d': bbox_3d
+        })
+    
+    # Step 2: Process through registry for consistent tracking
+    frame_objs = object_registry.process_frame(frame_idx, detections)
+    
+    # Step 3: Build graph with global IDs
+    graph = nx.MultiDiGraph()
+    for obj in frame_objs:
+        global_id = obj['global_id']
+        graph.add_node(global_id, data=obj)
+    
+    return frame_objs, graph
+
 
 def _yoloe_utils__generate_color(track_id: int):
     import random
