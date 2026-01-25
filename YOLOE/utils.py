@@ -196,6 +196,71 @@ def masks_to_binary_by_polygons(masks, orig_shape):
             bin_masks.append(mask)
         return bin_masks
 
+def remove_mask_overlaps(masks):
+    """
+    Remove overlapping regions from masks. When masks overlap, 
+    the overlapping pixels are removed from both masks.
+    
+    Args:
+        masks: list of binary masks (H, W) with values 0/255 or bool
+        
+    Returns:
+        list of masks with overlaps removed
+    """
+    if not masks or len(masks) < 2:
+        return masks
+    
+    # Handle None masks
+    if all(m is None for m in masks):
+        return masks
+    
+    # Find first non-None mask to get shape
+    shape = None
+    for m in masks:
+        if m is not None:
+            shape = m.shape
+            break
+    
+    if shape is None:
+        return masks
+    
+    # Convert all masks to boolean for easier processing
+    bool_masks = []
+    for m in masks:
+        if m is None:
+            bool_masks.append(None)
+        elif m.dtype == bool:
+            bool_masks.append(m.copy())
+        else:
+            bool_masks.append(m > 0)
+    
+    # Find all overlapping pixels across all masks
+    n = len(bool_masks)
+    overlap_map = np.zeros(shape, dtype=bool)
+    
+    for i in range(n):
+        if bool_masks[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if bool_masks[j] is None:
+                continue
+            # Find overlap between mask i and j
+            overlap = bool_masks[i] & bool_masks[j]
+            overlap_map |= overlap
+    
+    # Remove overlaps from all masks
+    result_masks = []
+    for i, m in enumerate(bool_masks):
+        if m is None:
+            result_masks.append(None)
+        else:
+            # Remove overlap regions
+            cleaned = m & (~overlap_map)
+            # Convert back to uint8 format (0/255)
+            result_masks.append(cleaned.astype(np.uint8) * 255)
+    
+    return result_masks
+
 def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
                                   model_path='yoloe-11l-seg-pf.pt',
                                   conf=0.3,
@@ -272,6 +337,8 @@ def preprocess_mask(yolo_res, index, KERNEL_SIZE, alpha = 0.5, show=True, fast: 
     if masks is not None and getattr(masks, "data", None) is not None:
         bin_masks = masks_to_binary_by_polygons(masks, yolo_res.orig_shape)
         cleaned_masks = [morph_mask(mask, method='erode', kernel_size=KERNEL_SIZE, iterations=1) for mask in bin_masks]
+        # Remove overlapping regions from masks
+        cleaned_masks = remove_mask_overlaps(cleaned_masks)
     else:
         print(f"[WARN][prep_frames] No masks found at frame {index}.")
         bin_masks = [None] * N
