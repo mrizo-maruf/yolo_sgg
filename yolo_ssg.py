@@ -16,8 +16,10 @@ def main(cfg):
 
     persistent_graph = nx.MultiDiGraph()
     
-    # Initialize Global Object Registry for consistent tracking across frames
-    # This replaces the simple accumulated_points_dict with smarter re-identification
+    # Initialize Global Object Registry for consistent tracking and reconstruction
+    # - Stores accumulated PCDs centrally (for reconstruction)
+    # - Returns lightweight bbox objects (for edge prediction)
+    # - Tracks visibility status for all objects
     object_registry = GlobalObjectRegistry(
         overlap_threshold=float(cfg.get('tracking_overlap_threshold', 0.5)),
         distance_threshold=float(cfg.get('tracking_distance_threshold', 0.5)),
@@ -79,13 +81,25 @@ def main(cfg):
         t_preprocess_end = time.perf_counter()
         timings['preprocess'].append((t_preprocess_end - t_preprocess_start) * 1000)  # ms
 
-        # track ids
+        # track ids and class names from YOLO
         track_ids = None
-        if hasattr(yl_res, 'boxes') and yl_res.boxes is not None and getattr(yl_res.boxes, 'id', None) is not None:
-            try:
-                track_ids = yl_res.boxes.id.detach().cpu().numpy().astype(np.int64)
-            except Exception:
-                pass
+        class_names = None
+        if hasattr(yl_res, 'boxes') and yl_res.boxes is not None:
+            # Get track IDs
+            if getattr(yl_res.boxes, 'id', None) is not None:
+                try:
+                    track_ids = yl_res.boxes.id.detach().cpu().numpy().astype(np.int64)
+                except Exception:
+                    pass
+            
+            # Get class names if available
+            if getattr(yl_res.boxes, 'cls', None) is not None and hasattr(yl_res, 'names'):
+                try:
+                    cls_ids = yl_res.boxes.cls.detach().cpu().numpy().astype(np.int64)
+                    class_names = [yl_res.names[int(c)] for c in cls_ids]
+                except Exception:
+                    pass
+        
         if track_ids is None:
             # fallback: sequential ids up to number of masks
             n = len(masks_clean) if isinstance(masks_clean, (list, tuple)) else 0
@@ -94,7 +108,9 @@ def main(cfg):
         # pose for this frame
         T_w_c = poses[min(frame_idx, len(poses)-1)] if poses else None
 
-        # build 3D objects with enhanced tracking
+        # Build 3D objects with enhanced tracking
+        # Returns LIGHTWEIGHT objects (bbox only) for edge prediction
+        # PCDs are stored in registry for reconstruction
         t_create3d_start = time.perf_counter()
         frame_objs, current_graph = yutils.create_3d_objects_with_tracking(
             track_ids, 
@@ -105,18 +121,23 @@ def main(cfg):
             frame_idx,
             o3_nb_neighbors=cfg.o3_nb_neighbors,
             o3std_ratio=cfg.o3std_ratio,
-            object_registry=object_registry
+            object_registry=object_registry,
+            class_names=class_names
         )
         t_create3d_end = time.perf_counter()
         timings['create_3d'].append((t_create3d_end - t_create3d_start) * 1000)  # ms
 
         # Print tracking info if enabled
         if cfg.get('print_tracking_info', False):
+            summary = object_registry.get_tracking_summary()
+            print(f"  [Track] Frame {frame_idx}: Visible={summary['visible_objects']}, "
+                  f"Total={summary['total_objects']}, Invisible={summary['invisible_objects']}")
             for obj in frame_objs:
-                print(f"  [Track] Frame {frame_idx}: YOLO_ID={obj['yolo_track_id']} -> "
-                      f"GLOBAL_ID={obj['global_id']} (source: {obj['match_source']})")
+                class_str = f" ({obj['class_name']})" if obj.get('class_name') else ""
+                print(f"    YOLO_ID={obj['yolo_track_id']} -> GLOBAL_ID={obj['global_id']}{class_str} "
+                      f"(source: {obj['match_source']}, obs_count: {obj['observation_count']})")
 
-        # Edge predictor SceneVerse
+        # Edge predictor SceneVerse (uses lightweight bbox objects)
         t_edges_start = time.perf_counter()
         edges(current_graph, frame_objs, T_w_c, depth_m)
         t_edges_end = time.perf_counter()
@@ -136,10 +157,14 @@ def main(cfg):
                     f"edges: {gpu_usage['edges'][-1]:.1f}")
             print(50*'=')
         
-        
+        # Visualize reconstruction (all accumulated PCDs with visibility status)
         if bool(cfg.show_pcds):
-            # visualize (blocking window)
-            yutils.visualize_frame_objects_open3d(frame_objs, frame_idx)
+            yutils.visualize_reconstruction(
+                object_registry=object_registry,
+                frame_index=frame_idx,
+                show_visible_only=False,  # Show all objects (visible + ghosted invisible)
+                show_aabb=True
+            )
 
         t_merge_start = time.perf_counter()
         persistent_graph = yutils.merge_scene_graphs(persistent_graph, current_graph)
@@ -168,18 +193,23 @@ def main(cfg):
 
     # Print tracking summary
     print("\n" + "="*60)
-    print("TRACKING SUMMARY")
+    print("TRACKING & RECONSTRUCTION SUMMARY")
     print("="*60)
-    print(f"Total unique objects tracked: {len(object_registry.get_all_objects())}")
-    for gid, obj in object_registry.get_all_objects().items():
-        print(f"  Object {gid}: seen in {obj['observation_count']} frames, "
+    all_objs = object_registry.get_all_objects()
+    print(f"Total unique objects tracked: {len(all_objs)}")
+    print(f"\nPer-object details:")
+    for gid, obj in all_objs.items():
+        class_str = f" ({obj.get('class_name')})" if obj.get('class_name') else ""
+        visible_str = "VISIBLE" if obj.get('visible_current_frame') else "not visible"
+        print(f"  Object {gid}{class_str}: {visible_str}, "
+              f"seen in {obj['observation_count']} frames, "
               f"first: {obj['first_seen_frame']}, last: {obj['last_seen_frame']}, "
               f"points: {len(obj['points_accumulated'])}")
     print("="*60)
 
     # Print summary statistics
     print("\n" + "="*60)
-    print("SUMMARY STATISTICS")
+    print("PERFORMANCE STATISTICS")
     print("="*60)
     
     if timings['preprocess']:

@@ -46,14 +46,31 @@ DEVICE = "0"
 
 class GlobalObjectRegistry:
     """
-    Maintains a persistent registry of all objects ever observed.
-    Enables re-identification when camera returns to previously seen objects.
+    Central registry for all tracked objects with reconstruction support.
+    
+    Design principles:
+    - Point clouds are stored centrally for reconstruction (not passed around)
+    - Only lightweight 3D bboxes are used for edge prediction
+    - Each object has visibility status for current frame
+    - Objects persist even when not visible (for re-identification)
     
     Matching Priority:
     1. YOLO track_id mapping (verified with spatial check)
     2. Previous frame objects (temporal continuity)
     3. Global registry lookup (re-observation after occlusion)
     4. New object assignment
+    
+    Object structure:
+    {
+        'global_id': int,
+        'class_name': str or None,
+        'points_accumulated': np.ndarray,  # Full PCD for reconstruction
+        'bbox_3d': dict,  # Lightweight bbox for edge prediction
+        'first_seen_frame': int,
+        'last_seen_frame': int,
+        'observation_count': int,
+        'visible_current_frame': bool,  # Visibility in current frame
+    }
     """
     
     def __init__(self, 
@@ -87,6 +104,9 @@ class GlobalObjectRegistry:
         
         # Current frame index
         self.current_frame = -1
+        
+        # Set of object IDs visible in current frame
+        self._visible_this_frame = set()
     
     def _generate_global_id(self) -> int:
         """Generate a new unique global ID."""
@@ -151,17 +171,27 @@ class GlobalObjectRegistry:
         """
         Process detections from a single frame and update the registry.
         
+        Updates visibility status for ALL objects:
+        - Objects detected this frame: visible_current_frame = True
+        - Objects not detected: visible_current_frame = False
+        
         Args:
             frame_idx: Current frame index
             detections: List of dicts with keys:
                 - 'yolo_track_id': int (from YOLO tracker)
                 - 'points': np.ndarray (N, 3) in world coordinates
                 - 'bbox_3d': dict with 'aabb' and 'obb'
+                - 'class_name': str (optional)
         
         Returns:
-            List of objects with assigned global_ids
+            List of lightweight object dicts for edge prediction (bbox only, no heavy PCDs)
         """
         self.current_frame = frame_idx
+        
+        # Reset visibility for all objects
+        self._visible_this_frame = set()
+        for gid in self.objects:
+            self.objects[gid]['visible_current_frame'] = False
         
         # Store current frame objects for next iteration
         current_frame_objects = {}
@@ -169,13 +199,14 @@ class GlobalObjectRegistry:
         # Track which global objects were matched this frame
         matched_global_ids = set()
         
-        # Results to return
+        # Results to return (lightweight, for edge prediction)
         processed_objects = []
         
         for det in detections:
             yolo_id = det.get('yolo_track_id', -1)
             points = det.get('points')
             bbox_3d = det.get('bbox_3d', {})
+            class_name = det.get('class_name', None)
             
             if points is None or len(points) == 0:
                 continue
@@ -247,47 +278,56 @@ class GlobalObjectRegistry:
                 match_source = 'new'
                 self.objects[global_id] = {
                     'global_id': global_id,
+                    'class_name': class_name,
                     'points_accumulated': points.copy(),
                     'bbox_3d': bbox_3d,
                     'first_seen_frame': frame_idx,
                     'last_seen_frame': frame_idx,
-                    'observation_count': 0
+                    'observation_count': 0,
+                    'visible_current_frame': True
                 }
             
             # === Update the object ===
             matched_global_ids.add(global_id)
+            self._visible_this_frame.add(global_id)
             
             # Update YOLO mapping
             if yolo_id >= 0:
                 self.yolo_to_global[yolo_id] = global_id
             
-            # Merge point clouds
+            # Merge point clouds (reconstruction)
             existing_points = self.objects[global_id].get('points_accumulated')
             merged_points = self._merge_point_clouds(existing_points, points)
             
             # Recompute bbox from merged points
             merged_bbox = compute_3d_bboxes(merged_points)
             
+            # Update class name if provided and not already set
+            if class_name and not self.objects[global_id].get('class_name'):
+                self.objects[global_id]['class_name'] = class_name
+            
             # Update registry
             self.objects[global_id].update({
                 'points_accumulated': merged_points,
                 'bbox_3d': merged_bbox,
                 'last_seen_frame': frame_idx,
-                'observation_count': self.objects[global_id].get('observation_count', 0) + 1
+                'observation_count': self.objects[global_id].get('observation_count', 0) + 1,
+                'visible_current_frame': True
             })
             
-            # Store for current frame
+            # Store for current frame (for temporal continuity next frame)
             current_frame_objects[global_id] = self.objects[global_id]
             
-            # Build result object
+            # Build LIGHTWEIGHT result object (for edge prediction - NO heavy PCDs)
             result_obj = {
                 'global_id': global_id,
-                'yolo_track_id': yolo_id,
                 'track_id': global_id,  # For compatibility with existing code
-                'points': points,  # Current frame points
-                'points_accumulated': merged_points,
-                'bbox_3d': merged_bbox,
-                'match_source': match_source
+                'yolo_track_id': yolo_id,
+                'class_name': self.objects[global_id].get('class_name'),
+                'bbox_3d': merged_bbox,  # Only bbox, not PCD
+                'visible_current_frame': True,
+                'match_source': match_source,
+                'observation_count': self.objects[global_id]['observation_count']
             }
             processed_objects.append(result_obj)
         
@@ -314,14 +354,72 @@ class GlobalObjectRegistry:
             self.yolo_to_global = {k: v for k, v in self.yolo_to_global.items() if v != gid}
     
     def get_all_objects(self) -> dict:
-        """Return all objects in the registry."""
+        """Return all objects in the registry (includes PCDs for reconstruction)."""
         return self.objects
     
+    def get_visible_objects(self) -> dict:
+        """Return only objects visible in current frame."""
+        return {
+            gid: obj for gid, obj in self.objects.items()
+            if obj.get('visible_current_frame', False)
+        }
+    
+    def get_invisible_objects(self) -> dict:
+        """Return objects NOT visible in current frame (but tracked)."""
+        return {
+            gid: obj for gid, obj in self.objects.items()
+            if not obj.get('visible_current_frame', False)
+        }
+    
     def get_active_objects(self, frame_idx: int, max_inactive_frames: int = 10) -> dict:
-        """Return objects seen recently."""
+        """Return objects seen recently (within max_inactive_frames)."""
         return {
             gid: obj for gid, obj in self.objects.items()
             if frame_idx - obj.get('last_seen_frame', 0) <= max_inactive_frames
+        }
+    
+    def get_object_pcd(self, global_id: int) -> np.ndarray:
+        """Get accumulated point cloud for a specific object (for visualization)."""
+        if global_id in self.objects:
+            return self.objects[global_id].get('points_accumulated')
+        return None
+    
+    def get_object_bbox(self, global_id: int) -> dict:
+        """Get 3D bbox for a specific object (for edge prediction)."""
+        if global_id in self.objects:
+            return self.objects[global_id].get('bbox_3d')
+        return None
+    
+    def get_all_pcds_for_visualization(self) -> list:
+        """
+        Get all accumulated PCDs with their track_ids for visualization.
+        Returns list of dicts with 'global_id', 'points', 'class_name', 'visible'.
+        """
+        result = []
+        for gid, obj in self.objects.items():
+            result.append({
+                'global_id': gid,
+                'points': obj.get('points_accumulated'),
+                'class_name': obj.get('class_name'),
+                'bbox_3d': obj.get('bbox_3d'),
+                'visible_current_frame': obj.get('visible_current_frame', False),
+                'observation_count': obj.get('observation_count', 0)
+            })
+        return result
+    
+    def get_visible_ids(self) -> set:
+        """Return set of global_ids visible in current frame."""
+        return self._visible_this_frame.copy()
+    
+    def get_tracking_summary(self) -> dict:
+        """Get summary statistics for tracking."""
+        visible = len(self._visible_this_frame)
+        total = len(self.objects)
+        return {
+            'total_objects': total,
+            'visible_objects': visible,
+            'invisible_objects': total - visible,
+            'current_frame': self.current_frame
         }
 
 
@@ -1137,11 +1235,17 @@ def create_3d_objects_with_tracking(
     frame_idx,
     o3_nb_neighbors,
     o3std_ratio,
-    object_registry: GlobalObjectRegistry
+    object_registry: GlobalObjectRegistry,
+    class_names: list = None
 ):
     """
     Enhanced version of create_3d_objects that uses GlobalObjectRegistry for tracking.
     Provides consistent object IDs across frames even when camera moves away and returns.
+    
+    Key design:
+    - PCDs are stored in registry (not returned) for reconstruction
+    - Only lightweight bbox objects are returned for edge prediction
+    - Visibility status is updated for all objects
     
     Args:
         track_ids: YOLO track IDs
@@ -1153,16 +1257,17 @@ def create_3d_objects_with_tracking(
         o3_nb_neighbors: Open3D outlier removal param
         o3std_ratio: Open3D outlier removal param
         object_registry: GlobalObjectRegistry instance
+        class_names: Optional list of class names corresponding to track_ids
     
     Returns:
-        frame_objs: List of processed objects with global IDs
-        graph: NetworkX graph with nodes having global IDs
+        frame_objs: List of LIGHTWEIGHT objects (bbox only) for edge prediction
+        graph: NetworkX graph with nodes having global IDs and bbox data
     """
     
     # Step 1: Extract detections from current frame
     detections = []
     
-    for t_id, m_clean in zip(track_ids, masks_clean):
+    for idx, (t_id, m_clean) in enumerate(zip(track_ids, masks_clean)):
         if m_clean is None:
             continue
         
@@ -1189,22 +1294,163 @@ def create_3d_objects_with_tracking(
         # Compute initial bbox (will be recomputed after merging)
         bbox_3d = compute_3d_bboxes(points_world)
         
+        # Get class name if available
+        class_name = None
+        if class_names is not None and idx < len(class_names):
+            class_name = class_names[idx]
+        
         detections.append({
             'yolo_track_id': int(t_id),
             'points': points_world,
-            'bbox_3d': bbox_3d
+            'bbox_3d': bbox_3d,
+            'class_name': class_name
         })
     
     # Step 2: Process through registry for consistent tracking
+    # Returns LIGHTWEIGHT objects (bbox only, no PCDs)
     frame_objs = object_registry.process_frame(frame_idx, detections)
     
-    # Step 3: Build graph with global IDs
+    # Step 3: Build graph with global IDs (lightweight, for edge prediction)
     graph = nx.MultiDiGraph()
     for obj in frame_objs:
         global_id = obj['global_id']
+        # Store only lightweight data in graph node
         graph.add_node(global_id, data=obj)
     
     return frame_objs, graph
+
+
+def visualize_reconstruction(
+    object_registry: GlobalObjectRegistry,
+    frame_index: int,
+    show_visible_only: bool = False,
+    show_aabb: bool = True,
+    show_obb: bool = False,
+    width: int = 1280,
+    height: int = 720,
+    point_size: float = 2.0,
+    visible_alpha: float = 1.0,
+    invisible_alpha: float = 0.3
+):
+    """
+    Visualize all reconstructed point clouds from the registry.
+    
+    Objects visible in current frame are shown with full opacity.
+    Objects not visible are shown with reduced opacity (ghosted).
+    
+    Args:
+        object_registry: GlobalObjectRegistry with accumulated PCDs
+        frame_index: Current frame index (for title)
+        show_visible_only: If True, only show objects visible in current frame
+        show_aabb: Show axis-aligned bounding boxes
+        show_obb: Show oriented bounding boxes
+        width, height: Window dimensions
+        point_size: Size of points in visualization
+        visible_alpha: Alpha for visible objects (1.0 = opaque)
+        invisible_alpha: Alpha for invisible objects (0.3 = ghosted)
+    """
+    all_vis_data = object_registry.get_all_pcds_for_visualization()
+    
+    if not all_vis_data:
+        print("[visualize_reconstruction] No objects to visualize.")
+        return
+    
+    # Filter if needed
+    if show_visible_only:
+        all_vis_data = [d for d in all_vis_data if d['visible_current_frame']]
+    
+    if not all_vis_data:
+        print("[visualize_reconstruction] No visible objects to visualize.")
+        return
+    
+    # Determine global bounds
+    gmin = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    gmax = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    
+    for obj_data in all_vis_data:
+        pts = obj_data.get('points')
+        if pts is not None and len(pts) > 0:
+            gmin = np.minimum(gmin, np.min(pts, axis=0))
+            gmax = np.maximum(gmax, np.max(pts, axis=0))
+    
+    if not np.all(np.isfinite(gmin)) or not np.all(np.isfinite(gmax)):
+        print("[visualize_reconstruction] No valid points found.")
+        return
+    
+    diag = float(np.linalg.norm(gmax - gmin)) if np.all(np.isfinite(gmax - gmin)) else 1.0
+    
+    # Create visualizer
+    vis = o3d.visualization.Visualizer()
+    summary = object_registry.get_tracking_summary()
+    title = f"Reconstruction - Frame {frame_index} | Visible: {summary['visible_objects']}/{summary['total_objects']}"
+    vis.create_window(window_name=title, width=width, height=height, visible=True)
+    
+    opt = vis.get_render_option()
+    opt.background_color = np.array([0.1, 0.1, 0.1])
+    opt.point_size = float(point_size)
+    
+    # Add coordinate frame
+    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1 * diag, origin=[0, 0, 0])
+    vis.add_geometry(coord)
+    
+    # Add all objects
+    for obj_data in all_vis_data:
+        global_id = obj_data['global_id']
+        pts = obj_data.get('points')
+        bbox_3d = obj_data.get('bbox_3d')
+        is_visible = obj_data.get('visible_current_frame', False)
+        class_name = obj_data.get('class_name', '')
+        
+        if pts is None or len(pts) == 0:
+            continue
+        
+        # Generate color based on track_id
+        color = _yoloe_utils__generate_color(global_id)
+        
+        # Adjust alpha based on visibility
+        if not is_visible:
+            # Make invisible objects more transparent (darker)
+            color = [c * invisible_alpha for c in color]
+        
+        # Create point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        pcd.colors = o3d.utility.Vector3dVector(np.tile(color, (len(pts), 1)))
+        vis.add_geometry(pcd)
+        
+        # Add bounding boxes
+        if show_aabb and bbox_3d and bbox_3d.get('aabb'):
+            aabb_ls = _yoloe_utils__create_aabb_lineset(bbox_3d['aabb'])
+            if aabb_ls:
+                # Red for visible, gray for invisible
+                box_color = [1.0, 0.0, 0.0] if is_visible else [0.5, 0.5, 0.5]
+                aabb_ls.colors = o3d.utility.Vector3dVector([box_color] * len(aabb_ls.lines))
+                vis.add_geometry(aabb_ls)
+        
+        if show_obb and bbox_3d and bbox_3d.get('obb'):
+            obb_ls = _yoloe_utils__create_obb_lineset(bbox_3d['obb'])
+            if obb_ls:
+                box_color = [0.0, 1.0, 0.0] if is_visible else [0.3, 0.5, 0.3]
+                obb_ls.colors = o3d.utility.Vector3dVector([box_color] * len(obb_ls.lines))
+                vis.add_geometry(obb_ls)
+    
+    # Fit view
+    gbox = o3d.geometry.AxisAlignedBoundingBox(gmin, gmax)
+    vis.add_geometry(gbox)
+    vis.poll_events()
+    vis.update_renderer()
+    ctr = vis.get_view_control()
+    ctr.set_lookat(gbox.get_center())
+    ctr.set_front([-1.0, -1.0, -1.0])
+    ctr.set_up([0.0, 0.0, 1.0])
+    ctr.set_zoom(1.0)
+    vis.remove_geometry(gbox, reset_bounding_box=False)
+    
+    print(f"[visualize_reconstruction] Showing {len(all_vis_data)} objects. "
+          f"Visible: {summary['visible_objects']}, Invisible: {summary['invisible_objects']}")
+    print("[visualize_reconstruction] Controls: mouse rotate, wheel zoom, right-button pan, R reset, Q quit")
+    vis.run()
+    vis.destroy_window()
 
 
 def _yoloe_utils__generate_color(track_id: int):
