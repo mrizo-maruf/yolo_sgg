@@ -20,11 +20,15 @@ def main(cfg):
     # - Stores accumulated PCDs centrally (for reconstruction)
     # - Returns lightweight bbox objects (for edge prediction)
     # - Tracks visibility status for all objects
+    # - Volume ratio check prevents matching small objects to large containers
+    # - Reprojection check includes objects visible in camera but missed by YOLO
     object_registry = GlobalObjectRegistry(
         overlap_threshold=float(cfg.get('tracking_overlap_threshold', 0.5)),
         distance_threshold=float(cfg.get('tracking_distance_threshold', 0.5)),
         max_points_per_object=int(cfg.get('max_accumulated_points', 10000)),
-        inactive_frames_limit=int(cfg.get('tracking_inactive_limit', 0))  # 0 = never remove
+        inactive_frames_limit=int(cfg.get('tracking_inactive_limit', 0)),  # 0 = never remove
+        volume_ratio_threshold=float(cfg.get('tracking_volume_ratio_threshold', 0.1)),  # Prevent room-object confusion
+        reprojection_visibility_threshold=float(cfg.get('reprojection_visibility_threshold', 0.2))  # 20% bbox visible
     )
 
     # Metrics accumulation
@@ -130,12 +134,16 @@ def main(cfg):
         # Print tracking info if enabled
         if cfg.get('print_tracking_info', False):
             summary = object_registry.get_tracking_summary()
-            print(f"  [Track] Frame {frame_idx}: Visible={summary['visible_objects']}, "
-                  f"Total={summary['total_objects']}, Invisible={summary['invisible_objects']}")
+            yolo_detected = sum(1 for obj in frame_objs if obj.get('match_source') != 'reprojection')
+            reproj_visible = sum(1 for obj in frame_objs if obj.get('match_source') == 'reprojection')
+            print(f"  [Track] Frame {frame_idx}: YOLO detected={yolo_detected}, "
+                  f"Reprojection visible={reproj_visible}, Total in frame={len(frame_objs)}, "
+                  f"Registry total={summary['total_objects']}")
             for obj in frame_objs:
                 class_str = f" ({obj['class_name']})" if obj.get('class_name') else ""
+                reproj_str = f", visibility={obj.get('reprojection_visibility', 0):.1%}" if obj.get('match_source') == 'reprojection' else ""
                 print(f"    YOLO_ID={obj['yolo_track_id']} -> GLOBAL_ID={obj['global_id']}{class_str} "
-                      f"(source: {obj['match_source']}, obs_count: {obj['observation_count']})")
+                      f"(source: {obj['match_source']}, obs_count: {obj['observation_count']}{reproj_str})")
 
         # Edge predictor SceneVerse (uses lightweight bbox objects)
         t_edges_start = time.perf_counter()
@@ -258,6 +266,8 @@ if __name__ == "__main__":
         'tracking_overlap_threshold': 0.3,  # 3D IoU threshold for matching
         'tracking_distance_threshold': 0.5,  # Max centroid distance (meters)
         'tracking_inactive_limit': 0,  # Frames before removing unseen objects (0 = keep forever)
+        'tracking_volume_ratio_threshold': 0.1,  # Min volume ratio to match (prevents room-object confusion)
+        'reprojection_visibility_threshold': 0.2,  # Min bbox fraction visible to include undetected objects (0.2 = 20%)
         'print_tracking_info': False,  # Print per-frame tracking details
     })
     main(cfg)

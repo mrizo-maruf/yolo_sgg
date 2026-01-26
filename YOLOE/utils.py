@@ -60,6 +60,17 @@ class GlobalObjectRegistry:
     3. Global registry lookup (re-observation after occlusion)
     4. New object assignment
     
+    Anti-Containment Logic:
+    - Volume ratio check: Objects with vastly different volumes (>10x) are not matched
+    - Size similarity check: Individual dimensions must be within 5x of each other
+    - This prevents matching small objects (chair, table) to large containers (room, cabinet)
+    
+    Reprojection-Based Visibility:
+    - YOLO detection alone is unreliable (may miss visible objects)
+    - Objects with >=20% of their 3D bbox visible in camera view are considered "present"
+    - These objects participate in edge prediction even if YOLO didn't detect them
+    - This handles cases where YOLO misses objects that are clearly in view
+    
     Object structure:
     {
         'global_id': int,
@@ -77,18 +88,30 @@ class GlobalObjectRegistry:
                  overlap_threshold: float = 0.3,
                  distance_threshold: float = 0.5,
                  max_points_per_object: int = 10000,
-                 inactive_frames_limit: int = 0):
+                 inactive_frames_limit: int = 0,
+                 volume_ratio_threshold: float = 0.1,
+                 reprojection_visibility_threshold: float = 0.2):
         """
         Args:
             overlap_threshold: 3D IoU threshold for matching
             distance_threshold: Max centroid distance (meters) for candidate matching
             max_points_per_object: Cap accumulated points per object
             inactive_frames_limit: Remove objects not seen for this many frames (0 = never remove)
+            volume_ratio_threshold: Min volume ratio (smaller/larger) to consider objects
+                                    as potential matches. Prevents matching small objects
+                                    to large containers (room/cabinet). Default 0.1 means
+                                    volumes can differ by at most 10x.
+            reprojection_visibility_threshold: Min fraction of object bbox that must be
+                                               visible in camera view to consider object
+                                               as "present" even if YOLO didn't detect it.
+                                               Default 0.2 means 20% of bbox must be visible.
         """
         self.overlap_threshold = overlap_threshold
         self.distance_threshold = distance_threshold
         self.max_points_per_object = max_points_per_object
         self.inactive_frames_limit = inactive_frames_limit
+        self.volume_ratio_threshold = volume_ratio_threshold
+        self.reprojection_visibility_threshold = reprojection_visibility_threshold
         
         # Global object storage: global_id -> object_data
         self.objects = {}
@@ -117,7 +140,9 @@ class GlobalObjectRegistry:
     def _compute_overlap_score(self, pcd1: np.ndarray, pcd2: np.ndarray, 
                                 bbox1: dict, bbox2: dict) -> tuple:
         """
-        Compute overlap score between two objects using both IoU and centroid distance.
+        Compute overlap score between two objects using IoU, centroid distance,
+        and volume ratio check to prevent matching objects of very different sizes
+        (e.g., small object inside a room).
         
         Returns:
             (iou_score, centroid_distance, is_candidate)
@@ -125,21 +150,46 @@ class GlobalObjectRegistry:
         if pcd1 is None or pcd2 is None or len(pcd1) == 0 or len(pcd2) == 0:
             return 0.0, float('inf'), False
         
-        # Get centroids from bbox or compute from points
+        # Get centroids and extents from bbox or compute from points
         if bbox1 and 'obb' in bbox1 and bbox1['obb']:
             center1 = np.array(bbox1['obb']['center'])
+            extent1 = np.array(bbox1['obb'].get('extent', [1, 1, 1]))
         else:
             center1 = np.mean(pcd1, axis=0)
+            extent1 = np.max(pcd1, axis=0) - np.min(pcd1, axis=0)
         
         if bbox2 and 'obb' in bbox2 and bbox2['obb']:
             center2 = np.array(bbox2['obb']['center'])
+            extent2 = np.array(bbox2['obb'].get('extent', [1, 1, 1]))
         else:
             center2 = np.mean(pcd2, axis=0)
+            extent2 = np.max(pcd2, axis=0) - np.min(pcd2, axis=0)
         
         centroid_dist = np.linalg.norm(center1 - center2)
         
         # Quick rejection based on distance
         if centroid_dist > self.distance_threshold:
+            return 0.0, centroid_dist, False
+        
+        # === VOLUME RATIO CHECK ===
+        # Prevent matching objects of vastly different sizes (containment case)
+        # e.g., a chair inside a room should NOT match the room
+        volume1 = np.prod(np.maximum(extent1, 1e-6))  # Avoid zero
+        volume2 = np.prod(np.maximum(extent2, 1e-6))
+        
+        # Volume ratio: smaller/larger (always <= 1)
+        volume_ratio = min(volume1, volume2) / max(volume1, volume2)
+        
+        # If volumes differ by more than 10x (ratio < 0.1), likely different objects
+        # This catches the room-contains-objects case
+        if volume_ratio < self.volume_ratio_threshold:
+            return 0.0, centroid_dist, False
+        
+        # === SIZE SIMILARITY CHECK ===
+        # Compare dimensions individually - objects should have similar proportions
+        size_ratios = np.minimum(extent1, extent2) / np.maximum(extent1, extent2 + 1e-6)
+        # If any dimension differs by more than 5x, likely different objects
+        if np.any(size_ratios < 0.2):
             return 0.0, centroid_dist, False
         
         # Compute 3D IoU
@@ -148,6 +198,194 @@ class GlobalObjectRegistry:
         is_candidate = iou >= self.overlap_threshold
         
         return iou, centroid_dist, is_candidate
+    
+    def _compute_reprojection_visibility(self, bbox_3d: dict, T_w_c: np.ndarray,
+                                          image_width: int = IMAGE_WIDTH,
+                                          image_height: int = IMAGE_HEIGHT) -> float:
+        """
+        Compute what fraction of an object's 3D bbox is visible when reprojected to camera view.
+        
+        Args:
+            bbox_3d: Object's 3D bounding box with 'aabb' or 'obb'
+            T_w_c: 4x4 camera-to-world transformation matrix
+            image_width: Image width in pixels
+            image_height: Image height in pixels
+            
+        Returns:
+            Visibility fraction [0, 1]. 0 = not visible, 1 = fully visible
+        """
+        if bbox_3d is None or T_w_c is None:
+            return 0.0
+        
+        # Get 8 corners of the 3D bounding box in world coordinates
+        corners_world = self._get_bbox_corners(bbox_3d)
+        if corners_world is None or len(corners_world) == 0:
+            return 0.0
+        
+        # Transform from world to camera coordinates
+        # T_w_c is camera-to-world, so we need its inverse (world-to-camera)
+        try:
+            T_c_w = np.linalg.inv(T_w_c)
+        except np.linalg.LinAlgError:
+            return 0.0
+        
+        R = T_c_w[:3, :3]
+        t = T_c_w[:3, 3]
+        
+        corners_cam = (corners_world @ R.T) + t  # (8, 3)
+        
+        # Check if any corner is behind camera (Z <= 0)
+        z_vals = corners_cam[:, 2]
+        
+        # If all points are behind camera, not visible
+        if np.all(z_vals <= 0):
+            return 0.0
+        
+        # Project to 2D (only points in front of camera)
+        valid_mask = z_vals > 0.01  # Small epsilon to avoid division issues
+        if not np.any(valid_mask):
+            return 0.0
+        
+        corners_valid = corners_cam[valid_mask]
+        
+        # Project: u = fx * X/Z + cx, v = fy * Y/Z + cy
+        u = fx * corners_valid[:, 0] / corners_valid[:, 2] + cx
+        v = fy * corners_valid[:, 1] / corners_valid[:, 2] + cy
+        
+        # Compute 2D bounding box of projected points
+        u_min, u_max = np.min(u), np.max(u)
+        v_min, v_max = np.min(v), np.max(v)
+        
+        # Clip to image bounds
+        u_min_clipped = max(0, u_min)
+        u_max_clipped = min(image_width, u_max)
+        v_min_clipped = max(0, v_min)
+        v_max_clipped = min(image_height, v_max)
+        
+        # Compute areas
+        projected_area = max(0, u_max - u_min) * max(0, v_max - v_min)
+        visible_area = max(0, u_max_clipped - u_min_clipped) * max(0, v_max_clipped - v_min_clipped)
+        
+        if projected_area <= 0:
+            return 0.0
+        
+        # Also check if the object is within reasonable depth range
+        min_depth = np.min(corners_valid[:, 2])
+        if min_depth > MAX_DEPTH:
+            return 0.0
+        
+        visibility_fraction = visible_area / projected_area
+        
+        # Additional check: if projected bbox is entirely outside image, return 0
+        if u_max < 0 or u_min > image_width or v_max < 0 or v_min > image_height:
+            return 0.0
+        
+        return visibility_fraction
+    
+    def _get_bbox_corners(self, bbox_3d: dict) -> np.ndarray:
+        """
+        Get 8 corners of the 3D bounding box in world coordinates.
+        
+        Returns:
+            (8, 3) array of corner points, or None if bbox is invalid
+        """
+        if bbox_3d is None:
+            return None
+        
+        # Try AABB first (simpler)
+        aabb = bbox_3d.get('aabb')
+        if aabb is not None and aabb.get('min') is not None and aabb.get('max') is not None:
+            mn = np.array(aabb['min'])
+            mx = np.array(aabb['max'])
+            
+            # Generate 8 corners
+            corners = np.array([
+                [mn[0], mn[1], mn[2]],
+                [mn[0], mn[1], mx[2]],
+                [mn[0], mx[1], mn[2]],
+                [mn[0], mx[1], mx[2]],
+                [mx[0], mn[1], mn[2]],
+                [mx[0], mn[1], mx[2]],
+                [mx[0], mx[1], mn[2]],
+                [mx[0], mx[1], mx[2]],
+            ])
+            return corners
+        
+        # Fallback to OBB
+        obb = bbox_3d.get('obb')
+        if obb is not None and obb.get('center') is not None and obb.get('extent') is not None:
+            center = np.array(obb['center'])
+            extent = np.array(obb['extent'])
+            R = np.array(obb.get('R', np.eye(3)))
+            
+            # Half extents
+            half = extent / 2.0
+            
+            # Local corners (before rotation)
+            local_corners = np.array([
+                [-half[0], -half[1], -half[2]],
+                [-half[0], -half[1], +half[2]],
+                [-half[0], +half[1], -half[2]],
+                [-half[0], +half[1], +half[2]],
+                [+half[0], -half[1], -half[2]],
+                [+half[0], -half[1], +half[2]],
+                [+half[0], +half[1], -half[2]],
+                [+half[0], +half[1], +half[2]],
+            ])
+            
+            # Rotate and translate to world
+            corners = (local_corners @ R.T) + center
+            return corners
+        
+        return None
+    
+    def get_reprojection_visible_objects(self, T_w_c: np.ndarray, 
+                                          excluded_ids: set = None) -> list:
+        """
+        Get all objects that are visible by reprojection but not detected by YOLO.
+        
+        Args:
+            T_w_c: Camera-to-world transformation matrix
+            excluded_ids: Set of global_ids to exclude (already detected by YOLO)
+            
+        Returns:
+            List of lightweight object dicts for objects visible by reprojection
+        """
+        if excluded_ids is None:
+            excluded_ids = set()
+        
+        visible_by_reprojection = []
+        
+        for gid, obj in self.objects.items():
+            if gid in excluded_ids:
+                continue
+            
+            bbox_3d = obj.get('bbox_3d')
+            if bbox_3d is None:
+                continue
+            
+            visibility = self._compute_reprojection_visibility(bbox_3d, T_w_c)
+            
+            if visibility >= self.reprojection_visibility_threshold:
+                # Object is visible by reprojection but wasn't detected by YOLO
+                result_obj = {
+                    'global_id': gid,
+                    'track_id': gid,
+                    'yolo_track_id': -1,  # Not detected by YOLO
+                    'class_name': obj.get('class_name'),
+                    'bbox_3d': bbox_3d,
+                    'visible_current_frame': True,  # Visible by reprojection
+                    'match_source': 'reprojection',
+                    'observation_count': obj['observation_count'],
+                    'reprojection_visibility': visibility
+                }
+                visible_by_reprojection.append(result_obj)
+                
+                # Mark as visible in registry
+                self.objects[gid]['visible_current_frame'] = True
+                self._visible_this_frame.add(gid)
+        
+        return visible_by_reprojection
     
     def _merge_point_clouds(self, pcd_existing: np.ndarray, pcd_new: np.ndarray) -> np.ndarray:
         """Merge two point clouds with downsampling to limit size."""
@@ -1309,6 +1547,18 @@ def create_3d_objects_with_tracking(
     # Step 2: Process through registry for consistent tracking
     # Returns LIGHTWEIGHT objects (bbox only, no PCDs)
     frame_objs = object_registry.process_frame(frame_idx, detections)
+    
+    # Step 2.5: Check for objects visible by reprojection but not detected by YOLO
+    # These objects should still participate in edge prediction
+    detected_global_ids = {obj['global_id'] for obj in frame_objs}
+    
+    reprojection_visible = object_registry.get_reprojection_visible_objects(
+        T_w_c, 
+        excluded_ids=detected_global_ids
+    )
+    
+    # Add reprojection-visible objects to frame_objs
+    frame_objs.extend(reprojection_visible)
     
     # Step 3: Build graph with global IDs (lightweight, for edge prediction)
     graph = nx.MultiDiGraph()
