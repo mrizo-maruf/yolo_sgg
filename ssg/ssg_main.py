@@ -401,6 +401,26 @@ def obj_min_max(pcd):
     z_max = np.max(pcd[:,2])    
     
     return x_min, x_max, y_min, y_max, z_min, z_max
+def obj_min_max_from_bbox(bbox_3d):
+    """Extract min/max bounds from bbox_3d structure (AABB or OBB)."""
+    aabb = bbox_3d.get('aabb')
+    if aabb is not None and aabb.get('min') is not None and aabb.get('max') is not None:
+        mn = np.array(aabb['min'])
+        mx = np.array(aabb['max'])
+        return mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]
+    
+    # Fallback to OBB if AABB not available
+    obb = bbox_3d.get('obb')
+    if obb is not None and obb.get('center') is not None and obb.get('extent') is not None:
+        center = np.array(obb['center'])
+        extent = np.array(obb['extent'])
+        half_ext = extent / 2.0
+        return (center[0] - half_ext[0], center[0] + half_ext[0],
+                center[1] - half_ext[1], center[1] + half_ext[1],
+                center[2] - half_ext[2], center[2] + half_ext[2])
+    
+    return 0, 0, 0, 0, 0, 0
+
 def edges(current_graph, frame_objs, T_w_c, depth_m):
     ### init camera ###
     camera_view, camera_pos, camera_angle = view_from_pose(T_w_c)
@@ -410,15 +430,15 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     ObjNode_dict = {}
     
     # iterate objects of graph and make object node dict
+    # NOTE: frame_objs now contain lightweight bbox data only (no heavy PCDs)
 
     for node, data in current_graph.nodes(data=True):
-        # print(node)
-        # print(data['data'].keys())
-        if data['data']['bbox_3d']['obb'] is None:
+        bbox_3d = data['data'].get('bbox_3d', {})
+        
+        if bbox_3d is None or bbox_3d.get('obb') is None:
             ObjNode_dict[node] = ObjNode(
                 id=-10,
-                label="NONE",
-                # bbox=data['data']['bbox_3d'],
+                label=data['data'].get('class_name', "NONE") or "NONE",
                 position=np.array([0,0,0]),
                 x_min=0,
                 x_max=0,
@@ -428,12 +448,12 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
                 z_max=0
             )
         else:
-            x_min, x_max, y_min, y_max, z_min, z_max = obj_min_max(np.array(data['data']['points']))
+            # Extract bounds from bbox (no longer using points directly)
+            x_min, x_max, y_min, y_max, z_min, z_max = obj_min_max_from_bbox(bbox_3d)
             ObjNode_dict[node] = ObjNode(
                 id=data['data']['track_id'],
-                label="NONE",
-                # bbox=data['data']['bbox_3d'],
-                position=data['data']['bbox_3d']['obb']['center'],
+                label=data['data'].get('class_name', "NONE") or "NONE",
+                position=bbox_3d['obb']['center'],
                 x_min=x_min,
                 x_max=x_max,
                 y_min=y_min,
