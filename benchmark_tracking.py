@@ -177,9 +177,24 @@ class GTDatasetLoader:
                 raw_info = json.load(f)
                 for sem_id_str, info in raw_info.items():
                     sem_id = int(sem_id_str)
+                    # Handle different label formats
+                    label_data = info.get('label', {})
+                    if isinstance(label_data, str):
+                        cls_name = label_data
+                    elif isinstance(label_data, dict):
+                        # Try 'class' key first, then any other key
+                        cls_name = label_data.get('class', label_data.get('name', ''))
+                        if not cls_name:
+                            # Take first value from dict
+                            for k, v in label_data.items():
+                                cls_name = str(v) if v else str(k)
+                                break
+                    else:
+                        cls_name = str(label_data) if label_data else 'unknown'
+                    
                     seg_info[sem_id] = {
-                        'class': info['label']['class'],
-                        'color_bgr': tuple(info['color_bgr'])
+                        'class': cls_name,
+                        'color_bgr': tuple(info.get('color_bgr', [0, 0, 0]))
                     }
         
         return seg_map, seg_info
