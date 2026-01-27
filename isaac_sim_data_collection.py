@@ -5,7 +5,7 @@ import sys
 
 # ---------------------- Configuration ----------------------
 BACKGROUND_STAGE_PATH = "/World/env"
-scene_name = "cabinet_complex"
+scene_name = "scene_7"
 BACKGROUND_USD_PATH = f"/workspace/isaaclab/SG/is_benchmark_scenes/{scene_name}.usd"
 
 CONFIG = {"renderer": "RayTracedLighting", "headless": True, "hide_ui": False}
@@ -243,50 +243,6 @@ def _label_from_idToLabels(idToLabels: dict, sid: int):
         return f"{main_val}|{d['class']}"
     return str(main_val)
 
-# def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
-#     """
-#     Your 3D bbox dtype:
-#       ('semanticId','x_min','y_min','z_min','x_max','y_max','z_max','transform'(4,4),'occlusionRatio')
-#     We keep both AABB and transform. Filter out absurd extents (background artifacts).
-#     """
-#     data = Nd_bbox_data.get("data", None)
-#     info = Nd_bbox_data.get("info", {}) or {}
-#     idToLabels = info.get("idToLabels", {}) or {}
-#     primPaths = info.get("primPaths", None)
-
-#     boxes = []
-#     if data is None or len(data) == 0:
-#         return boxes
-
-#     # structured array rows: access by field name
-#     for idx, row in enumerate(data):
-#         sid = int(row["semanticId"])
-#         x_min = float(row["x_min"]); y_min = float(row["y_min"]); z_min = float(row["z_min"])
-#         x_max = float(row["x_max"]); y_max = float(row["y_max"]); z_max = float(row["z_max"])
-#         occ = float(row["occlusionRatio"])
-
-#         # filter NaNs / inf / absurd extents (your ~2.25e15 rows)
-#         vals = np.array([x_min, y_min, z_min, x_max, y_max, z_max], dtype=np.float64)
-#         if not np.isfinite(vals).all():
-#             continue
-#         if np.max(np.abs(vals)) > max_abs_extent:
-#             continue
-
-#         T = np.asarray(row["transform"], dtype=np.float32).tolist()  # 4x4
-
-#         label = _label_from_idToLabels(idToLabels, sid)
-#         prim = primPaths[idx] if isinstance(primPaths, (list, tuple)) and idx < len(primPaths) else None
-
-#         boxes.append({
-#             "semantic_id": sid,
-#             "label": label,
-#             "prim_path": prim,
-#             "aabb_xyzmin_xyzmax": [x_min, y_min, z_min, x_max, y_max, z_max],
-#             "transform_4x4": T,
-#             "occlusion_ratio": occ,
-#         })
-#     return boxes
-
 def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
     """Parse Replicator bounding_box_3d output and transform to WORLD coordinates.
 
@@ -422,46 +378,11 @@ print("afeter focal length:", focal_length.Get())
 
 # ---------------------- Keyframes ----------------------
 keyframes_move = [
-    # {'time': 0, 'translation': [0, 2.5, 2], 'euler_angles': [0, 30, -30]},
-    # {'time': 10, 'translation': [-2.5, 0, 2], 'euler_angles': [0, 30, 0]},
-    # {'time': 20, 'translation': [0, -2.5, 2], 'euler_angles': [0, 30, 35]},
-    # {'time': 30, 'translation': [1, 0, 3], 'euler_angles': [0, 90, 0]},
-    # {'time': 40, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 0]},
-    # {'time': 50, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 60]},
-    # {'time': 60, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 120]},
-    # {'time': 70, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 180]},
-    # {'time': 80, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 240]},
-    # {'time': 90, 'translation': [1, 0, 3], 'euler_angles': [0, 55, 360]},
-    
-    # {'time': 0, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 0]},
-    # {'time': 7, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 60]},
-    # {'time': 14, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 120]},
-    # {'time': 21, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 180]},
-    # {'time': 27, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 240]},
-    # {'time': 42, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 360]},
     
     # nav goal move
     {'time': 0, 'translation': [-3, 0, 1.5], 'euler_angles': [0, 20, 0]},
     {'time': 10, 'translation': [-1, 2, 1.5], 'euler_angles': [0, 20, -45]},
     {'time': 20, 'translation': [-1, -2, 1.5], 'euler_angles': [0, 20, 45]},
-    {'time': 30, 'translation': [2, -2, 1.5], 'euler_angles': [0, 20, 110]},
-    # {'time': 30, 'translation': [6, 6.5, 1.5], 'euler_angles': [0, 20, -10]},
-    # {'time': 40, 'translation': [6, 6.5, 1.5], 'euler_angles': [0, 20, -30]},
-    # {'time': 50, 'translation': [8, 6, 1.5], 'euler_angles': [0, 20, -80]},
-
-    # {'time': 0, 'translation': [0, 4, 1.5], 'euler_angles': [0, 20, 0]},
-    # {'time': 20, 'translation': [8, 1, 1.5], 'euler_angles': [0, 20, 40]},
-    # {'time': 30, 'translation': [9, 2, 1.5], 'euler_angles': [0, 20, 90]},
-
-
-    # {'time': 20, 'translation': [6.5, 6, 1.5], 'euler_angles': [0, 20, -40]},
-    # {'time': 30, 'translation': [7, 6, 1.5], 'euler_angles': [0, 20, -40]},
-
-    # {'time': 0, 'translation': [2, 4, 1.5], 'euler_angles': [0, 20, 0]},
-    # {'time': 10, 'translation': [7, 2, 1.5], 'euler_angles': [0, 20, 40]},
-    # {'time': 20, 'translation': [8, 3, 1.5], 'euler_angles': [0, 20, 40]}
-    
-    # {'time': 30, 'translation': [1, 0, 1.5], 'euler_angles': [0, 90, 0]},
 ]
 record_keyframe = keyframes_move
 
