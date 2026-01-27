@@ -32,7 +32,9 @@ import open3d as o3d
 # -------------------------
 # User-configurable settings
 # -------------------------
-BASE_DIR = "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex"  # folder with rgb/depth/bbox
+scene = "scene_7"
+BASE_DIR = f"/home/maribjonov_mr/IsaacSim_bench/{scene}"  # folder with rgb/depth/bbox
+TRAJ_PATH = f"/home/maribjonov_mr/IsaacSim_bench/{scene}/traj.txt"  # None -> BASE_DIR/traj.txt
 FRAME_ID = 10  # frame index (0-based)
 
 # Image + depth settings (must match how you saved data)
@@ -54,7 +56,6 @@ BBOX_FRAME = "world"  # Use "world" - boxes are now saved in world coords after 
 
 # Use traj.txt camera pose to move the point cloud into world frame
 USE_TRAJ = True
-TRAJ_PATH = "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex/traj.txt"  # None -> BASE_DIR/traj.txt
 
 # Visualization tweaks
 SWAP_YZ = False  # try True if axes look rotated

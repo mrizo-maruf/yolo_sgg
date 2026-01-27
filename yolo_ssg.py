@@ -246,9 +246,9 @@ def main(cfg):
 
 if __name__ == "__main__":
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/rgb",
-        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/depth",
-        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex/traj.txt",
+        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/scene_7/rgb",
+        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/scene_7/depth",
+        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/scene_7/traj.txt",
         'yolo_model': '/home/maribjonov_mr/yolo_bench/yoloe-11l-seg-pf.pt',
         'conf': 0.25,
         'iou': 0.5,
@@ -256,7 +256,7 @@ if __name__ == "__main__":
         'alpha': 0.7,
         'max_points_per_obj': 2000,
         'max_accumulated_points': 10000,
-        'show_pcds': False,
+        'show_pcds': True,
         'fast_mask': True,
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,
