@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
         scene_path = sys.argv[1]
     else:
         # Default scene path - update this!
-        scene_path = "./test_scene"
+        scene_path = "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex"
         print(f"Usage: python benchmark_tracking.py <scene_path>")
         print(f"       python benchmark_tracking.py <scenes_root> --multi")
         print(f"\nUsing default: {scene_path}")
