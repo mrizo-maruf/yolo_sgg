@@ -28,34 +28,8 @@ import matplotlib.pyplot as plt
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
 
-
-# Camera intrinsics (from your dataset)
-IMAGE_WIDTH = 1280
-IMAGE_HEIGHT = 720
-FOCAL_LENGTH = 50.0
-HORIZONTAL_APERTURE = 80.0
-VERTICAL_APERTURE = 45.0
-
-fx = FOCAL_LENGTH / HORIZONTAL_APERTURE * IMAGE_WIDTH   # 800.0
-fy = FOCAL_LENGTH / VERTICAL_APERTURE * IMAGE_HEIGHT    # 800.0
-cx = IMAGE_WIDTH / 2.0  # 640.0
-cy = IMAGE_HEIGHT / 2.0  # 360.0
-
-PNG_DEPTH_SCALE = 0.00015244  # From your calibration
-MIN_DEPTH = 0.01
-MAX_DEPTH = 10.0
-
-
-@dataclass
-class GTObject:
-    """Ground truth object for a single frame."""
-    track_id: int
-    class_name: str
-    mask: Optional[np.ndarray] = None  # Binary mask (H, W)
-    bbox_2d: Optional[List[float]] = None  # [x1, y1, x2, y2]
-    bbox_3d: Optional[Dict] = None  # 3D bbox info
-    prim_path: str = ""
-    visibility: float = 1.0
+# Import Isaac Sim data loader
+from isaac_sim_loader import IsaacSimDataLoader, GTObject
 
 
 @dataclass
@@ -93,276 +67,9 @@ class TrackingMetrics:
     frames_processed: int = 0
 
 
-class GTDatasetLoader:
-    """Load ground truth data from Isaac Sim benchmark dataset."""
-    
-    def __init__(self, scene_path: str):
-        self.scene_path = Path(scene_path)
-        self.rgb_dir = self.scene_path / "rgb"
-        self.depth_dir = self.scene_path / "depth"
-        self.seg_dir = self.scene_path / "seg"
-        self.bbox_dir = self.scene_path / "bbox"
-        self.traj_path = self.scene_path / "traj.txt"
-        
-        # Cache
-        self._frame_count = None
-        self._poses = None
-        
-    def get_frame_count(self) -> int:
-        """Get number of frames in the scene."""
-        if self._frame_count is None:
-            rgb_files = list(self.rgb_dir.glob("frame*.jpg"))
-            self._frame_count = len(rgb_files)
-        return self._frame_count
-    
-    def get_poses(self) -> List[np.ndarray]:
-        """Load camera poses."""
-        if self._poses is None:
-            self._poses = yutils.load_camera_poses(str(self.traj_path))
-        return self._poses
-    
-    def get_frame_paths(self, frame_idx: int) -> Dict[str, Path]:
-        """Get all paths for a specific frame."""
-        frame_num = frame_idx + 1  # 1-indexed in filenames
-        return {
-            'rgb': self.rgb_dir / f"frame{frame_num:06d}.jpg",
-            'depth': self.depth_dir / f"depth{frame_num:06d}.png",
-            'seg_png': self.seg_dir / f"semantic{frame_num:06d}.png",
-            'seg_json': self.seg_dir / f"semantic{frame_num:06d}_info.json",
-            'bbox_json': self.bbox_dir / f"bbox{frame_num:06d}.json",
-        }
-    
-    def load_depth(self, frame_idx: int) -> np.ndarray:
-        """Load depth map in meters."""
-        paths = self.get_frame_paths(frame_idx)
-        depth_path = paths['depth']
-        
-        if not depth_path.exists():
-            return None
-        
-        # Load 16-bit PNG
-        depth_raw = np.array(Image.open(depth_path))
-        
-        # Convert to meters using the calibrated scale
-        depth_m = depth_raw.astype(np.float32) * PNG_DEPTH_SCALE
-        
-        # Clamp invalid values
-        depth_m[depth_m < MIN_DEPTH] = 0.0
-        depth_m[depth_m > MAX_DEPTH] = 0.0
-        
-        return depth_m
-    
-    def load_segmentation(self, frame_idx: int) -> Tuple[np.ndarray, Dict]:
-        """
-        Load segmentation map and info.
-        
-        Returns:
-            seg_map: (H, W, 3) BGR color-coded segmentation
-            seg_info: Dict mapping semantic_id -> {class, color_bgr}
-        """
-        paths = self.get_frame_paths(frame_idx)
-        
-        # Load colored segmentation
-        seg_png_path = paths['seg_png']
-        if not seg_png_path.exists():
-            return None, {}
-        
-        seg_map = cv2.imread(str(seg_png_path), cv2.IMREAD_COLOR)  # BGR
-        
-        # Load segmentation info
-        seg_json_path = paths['seg_json']
-        seg_info = {}
-        if seg_json_path.exists():
-            with open(seg_json_path, 'r') as f:
-                raw_info = json.load(f)
-                for sem_id_str, info in raw_info.items():
-                    sem_id = int(sem_id_str)
-                    # Handle different label formats
-                    label_data = info.get('label', {})
-                    if isinstance(label_data, str):
-                        cls_name = label_data
-                    elif isinstance(label_data, dict):
-                        # Try 'class' key first, then any other key
-                        cls_name = label_data.get('class', label_data.get('name', ''))
-                        if not cls_name:
-                            # Take first value from dict
-                            for k, v in label_data.items():
-                                cls_name = str(v) if v else str(k)
-                                break
-                    else:
-                        cls_name = str(label_data) if label_data else 'unknown'
-                    
-                    seg_info[sem_id] = {
-                        'class': cls_name,
-                        'color_bgr': tuple(info.get('color_bgr', [0, 0, 0]))
-                    }
-        
-        return seg_map, seg_info
-    
-    def load_bboxes(self, frame_idx: int) -> Dict:
-        """Load 2D and 3D bounding boxes."""
-        paths = self.get_frame_paths(frame_idx)
-        bbox_path = paths['bbox_json']
-        
-        if not bbox_path.exists():
-            return {'bbox_2d': [], 'bbox_3d': []}
-        
-        with open(bbox_path, 'r') as f:
-            data = json.load(f)
-        
-        result = {
-            'bbox_2d': [],
-            'bbox_3d': []
-        }
-        
-        # Parse 2D bboxes
-        if 'bboxes' in data and 'bbox_2d_tight' in data['bboxes']:
-            for box in data['bboxes']['bbox_2d_tight']['boxes']:
-                result['bbox_2d'].append({
-                    'track_id': box.get('bbox_id', -1),
-                    'semantic_id': box.get('semantic_id', -1),
-                    'prim_path': box.get('prim_path', ''),
-                    'label': self._extract_label(box.get('label', {})),
-                    'xyxy': box.get('xyxy', [0, 0, 0, 0]),
-                    'visibility': 1.0 - box.get('visibility_or_occlusion', 0.0)
-                })
-        
-        # Parse 3D bboxes
-        if 'bboxes' in data and 'bbox_3d' in data['bboxes']:
-            for box in data['bboxes']['bbox_3d']['boxes']:
-                result['bbox_3d'].append({
-                    'track_id': box.get('track_id', box.get('bbox_id', -1)),
-                    'semantic_id': box.get('semantic_id', -1),
-                    'prim_path': box.get('prim_path', ''),
-                    'label': box.get('label', 'unknown'),
-                    'aabb': box.get('aabb_xyzmin_xyzmax', []),
-                    'transform': box.get('transform_4x4', []),
-                    'occlusion': box.get('occlusion_ratio', 0.0)
-                })
-        
-        return result
-    
-    def _extract_label(self, label_dict: Dict) -> str:
-        """Extract class label from label dict."""
-        if isinstance(label_dict, str):
-            return label_dict
-        if isinstance(label_dict, dict):
-            # Take first value
-            for k, v in label_dict.items():
-                return str(v) if v else str(k)
-        return 'unknown'
-    
-    def get_gt_objects(self, frame_idx: int) -> List[GTObject]:
-        """
-        Get all ground truth objects for a frame.
-        
-        Returns list of GTObject with masks extracted from segmentation.
-        """
-        # Load segmentation
-        seg_map, seg_info = self.load_segmentation(frame_idx)
-        if seg_map is None:
-            return []
-        
-        # Load bboxes for track_ids and labels
-        bboxes = self.load_bboxes(frame_idx)
-        
-        # Build color -> bbox mapping
-        # First, create mapping from prim_path to bbox info
-        prim_to_bbox_2d = {}
-        prim_to_bbox_3d = {}
-        
-        for box in bboxes['bbox_2d']:
-            prim_to_bbox_2d[box['prim_path']] = box
-        
-        for box in bboxes['bbox_3d']:
-            prim_to_bbox_3d[box['prim_path']] = box
-        
-        gt_objects = []
-        
-        # Extract objects from 3D bboxes (more reliable track_ids)
-        for box_3d in bboxes['bbox_3d']:
-            track_id = box_3d['track_id']
-            label = box_3d['label']
-            prim_path = box_3d['prim_path']
-            
-            # Skip background/unlabelled/walls/floor/ceiling
-            if label.lower() in ['background', 'unlabelled', 'wall', 'floor', 'ceiling']:
-                continue
-            
-            # Find corresponding 2D bbox
-            box_2d = prim_to_bbox_2d.get(prim_path, {})
-            
-            # Extract mask from segmentation using 2D bbox color matching
-            mask = self._extract_mask_for_object(seg_map, seg_info, box_2d, box_3d)
-            
-            gt_obj = GTObject(
-                track_id=track_id,
-                class_name=label,
-                mask=mask,
-                bbox_2d=box_2d.get('xyxy'),
-                bbox_3d={
-                    'aabb': box_3d['aabb'],
-                    'transform': box_3d['transform']
-                },
-                prim_path=prim_path,
-                visibility=box_2d.get('visibility', 1.0)
-            )
-            gt_objects.append(gt_obj)
-        
-        return gt_objects
-    
-    def _extract_mask_for_object(self, seg_map: np.ndarray, seg_info: Dict,
-                                  box_2d: Dict, box_3d: Dict) -> Optional[np.ndarray]:
-        """
-        Extract binary mask for an object from segmentation map.
-        
-        Strategy:
-        1. Use 2D bbox to crop region
-        2. Find dominant non-background color in that region
-        3. Create mask from that color
-        """
-        if seg_map is None:
-            return None
-        
-        H, W = seg_map.shape[:2]
-        
-        # Get 2D bbox
-        xyxy = box_2d.get('xyxy', [0, 0, W, H])
-        if xyxy is None:
-            xyxy = [0, 0, W, H]
-        x1, y1, x2, y2 = [int(v) for v in xyxy]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(W, x2), min(H, y2)
-        
-        if x2 <= x1 or y2 <= y1:
-            return None
-        
-        # Crop region
-        crop = seg_map[y1:y2, x1:x2]
-        
-        # Find unique colors in crop (excluding background black)
-        colors = crop.reshape(-1, 3)
-        unique_colors, counts = np.unique(colors, axis=0, return_counts=True)
-        
-        # Filter out background (black) and find dominant color
-        best_color = None
-        best_count = 0
-        
-        for color, count in zip(unique_colors, counts):
-            # Skip black (background)
-            if np.all(color == 0):
-                continue
-            if count > best_count:
-                best_count = count
-                best_color = color
-        
-        if best_color is None:
-            return None
-        
-        # Create full mask from this color
-        mask = np.all(seg_map == best_color, axis=2).astype(np.uint8) * 255
-        
-        return mask
+# Use IsaacSimDataLoader from separate module for GT data loading
+# The loader provides: get_frame_count(), get_poses(), get_gt_objects(), load_depth()
+# GT objects have: track_id, class_name, mask, bbox_2d, bbox_3d_aabb, visibility
 
 
 def compute_mask_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
@@ -495,8 +202,10 @@ class TrackingBenchmark:
         print(f"Scene: {scene_path}")
         print(f"{'='*60}\n")
         
-        # Load GT dataset
-        gt_loader = GTDatasetLoader(scene_path)
+        # Load GT dataset using IsaacSimDataLoader
+        gt_loader = IsaacSimDataLoader(scene_path)
+        gt_loader.print_info()
+        
         n_frames = gt_loader.get_frame_count()
         poses = gt_loader.get_poses()
         
@@ -542,7 +251,7 @@ class TrackingBenchmark:
         print("Processing frames...")
         frame_idx = 0
         for yl_res, rgb_cur_path, depth_cur_path in tqdm(results_stream, total=n_frames, desc="Benchmarking"):
-            # Load GT for this frame
+            # Load GT for this frame (using IsaacSimDataLoader)
             gt_objects = gt_loader.get_gt_objects(frame_idx)
             
             # Load depth
