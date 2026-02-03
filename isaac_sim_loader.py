@@ -145,10 +145,15 @@ class IsaacSimDataLoader:
         self.png_max_value = DEFAULT_PNG_MAX_VALUE
         self.png_depth_scale = (max_depth - min_depth) / float(self.png_max_value)
         
-        # Skip labels
-        self.skip_labels = set(l.lower() for l in (skip_labels or [
-            'background', 'unlabelled', 'wall', 'floor', 'ceiling'
-        ]))
+        # Skip labels - these should match the pipeline's skip_classes for fair comparison
+        DEFAULT_SKIP_LABELS = [
+            # Background/unlabeled
+            'background', 'unlabelled', 'unlabeled', 'unknown',
+            
+            # Structural elements
+            'wall', 'floor', 'ceiling', 'roof', 'door', 'window'
+        ]
+        self.skip_labels = set(l.lower() for l in (skip_labels if skip_labels is not None else DEFAULT_SKIP_LABELS))
         
         # Directory paths
         self.rgb_dir = self.scene_path / "rgb"
@@ -404,13 +409,15 @@ class IsaacSimDataLoader:
         return 'unknown'
     
     def get_gt_objects(self, frame_idx: int, 
-                       include_masks: bool = True) -> List[GTObject]:
+                       include_masks: bool = True,
+                       apply_filter: bool = True) -> List[GTObject]:
         """
         Get all ground truth objects for a frame.
         
         Args:
             frame_idx: Frame index
             include_masks: Whether to extract masks from segmentation
+            apply_filter: Whether to filter out skip_labels (default True)
             
         Returns:
             List of GTObject instances
@@ -427,6 +434,7 @@ class IsaacSimDataLoader:
         prim_to_bbox_2d = {box['prim_path']: box for box in bboxes['bbox_2d']}
         
         gt_objects = []
+        skipped_labels = []
         
         # Extract objects from 3D bboxes (more reliable track_ids)
         for box_3d in bboxes['bbox_3d']:
@@ -434,8 +442,9 @@ class IsaacSimDataLoader:
             label = box_3d['label']
             prim_path = box_3d['prim_path']
             
-            # Skip unwanted labels
-            if label.lower() in self.skip_labels:
+            # Skip unwanted labels if filtering is enabled
+            if apply_filter and label.lower() in self.skip_labels:
+                skipped_labels.append(label)
                 continue
             
             # Find corresponding 2D bbox
@@ -863,15 +872,37 @@ class IsaacSimDataLoader:
             status = f"✓ {n_files} files" if exists else "✗ not found"
             print(f"    {name:15s}: {status}")
         
-        # Sample first frame objects
+        # Show skip labels info
+        print(f"\n  Skip labels: {len(self.skip_labels)} patterns")
+        sample_labels = sorted(list(self.skip_labels))[:8]
+        print(f"    Examples: {', '.join(sample_labels)}...")
+        
+        # Sample first frame objects (show filtered vs unfiltered)
         if len(self) > 0:
-            objects = self.get_gt_objects(0, include_masks=False)
-            print(f"\n  Objects in first frame: {len(objects)}")
+            objects_all = self.get_gt_objects(0, include_masks=False, apply_filter=False)
+            objects_filtered = self.get_gt_objects(0, include_masks=False, apply_filter=True)
+            
+            print(f"\n  Objects in first frame:")
+            print(f"    Total (unfiltered): {len(objects_all)}")
+            print(f"    After filtering:    {len(objects_filtered)}")
+            print(f"    Filtered out:       {len(objects_all) - len(objects_filtered)}")
+            
+            # Show what was filtered
+            filtered_classes = set()
+            for obj in objects_all:
+                if obj.class_name.lower() in self.skip_labels:
+                    filtered_classes.add(obj.class_name)
+            if filtered_classes:
+                print(f"    Filtered classes:   {', '.join(sorted(filtered_classes))}")
+            
+            # Show remaining class distribution
             class_counts = {}
-            for obj in objects:
+            for obj in objects_filtered:
                 class_counts[obj.class_name] = class_counts.get(obj.class_name, 0) + 1
-            for cls, count in sorted(class_counts.items()):
-                print(f"    {cls}: {count}")
+            if class_counts:
+                print(f"\n    Remaining classes:")
+                for cls, count in sorted(class_counts.items()):
+                    print(f"      {cls}: {count}")
         
         print(f"{'='*60}\n")
 

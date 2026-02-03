@@ -587,8 +587,12 @@ class TrackingBenchmark:
         print(f"Scene: {scene_path}")
         print(f"{'='*60}\n")
         
-        # Load GT dataset using IsaacSimDataLoader
-        gt_loader = IsaacSimDataLoader(scene_path)
+        # Get skip classes from config to filter GT objects consistently with pipeline
+        skip_classes = list(self.cfg.get('skip_classes', []))
+        print(f"Using {len(skip_classes)} skip classes for GT filtering")
+        
+        # Load GT dataset using IsaacSimDataLoader with same skip labels as pipeline
+        gt_loader = IsaacSimDataLoader(scene_path, skip_labels=skip_classes if skip_classes else None)
         gt_loader.print_info()
         
         n_frames = gt_loader.get_frame_count()
