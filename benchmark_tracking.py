@@ -13,6 +13,7 @@ Additional metrics:
 
 import os
 import json
+import random
 import numpy as np
 from pathlib import Path
 from PIL import Image
@@ -24,12 +25,384 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 import matplotlib.pyplot as plt
 
+try:
+    import open3d as o3d
+    HAS_OPEN3D = True
+except ImportError:
+    HAS_OPEN3D = False
+    print("[WARN] Open3D not available. 3D visualization disabled.")
+
 # Import YOLO-SSG components
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
 
 # Import Isaac Sim data loader
 from isaac_sim_loader import IsaacSimDataLoader, GTObject
+
+
+# ============================================================================
+# DEBUG VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def generate_color_from_id(obj_id: int) -> Tuple[int, int, int]:
+    """Generate deterministic BGR color from object ID."""
+    if obj_id < 0:
+        return (128, 128, 128)  # Gray for invalid
+    random.seed(int(obj_id) * 7 + 13)
+    return (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
+
+
+def visualize_yolo_tracking_2d(
+    rgb_image: np.ndarray,
+    yolo_res,
+    masks_clean: List[np.ndarray],
+    track_ids: np.ndarray,
+    class_names: List[str],
+    frame_idx: int,
+    global_ids: List[int] = None,
+    match_sources: List[str] = None,
+    alpha: float = 0.5,
+    show: bool = True,
+    save_path: str = None
+) -> np.ndarray:
+    """
+    Visualize YOLO tracking results with masks, class names, and IDs.
+    
+    Shows:
+    - RGB image with mask overlays
+    - Bounding boxes with labels: "class_name | YOLO:X | Global:Y"
+    - Match source indicator (yolo_map, prev_frame, global_match, new)
+    
+    Args:
+        rgb_image: RGB image (H, W, 3)
+        yolo_res: YOLO result object
+        masks_clean: List of preprocessed binary masks
+        track_ids: YOLO track IDs
+        class_names: List of class names
+        frame_idx: Current frame index
+        global_ids: List of global tracking IDs (from registry)
+        match_sources: List of match source strings
+        alpha: Mask overlay transparency
+        show: Whether to display with matplotlib
+        save_path: Optional path to save visualization
+    
+    Returns:
+        Annotated image (H, W, 3) BGR
+    """
+    # Ensure RGB format and copy
+    if rgb_image.shape[2] == 3:
+        vis_img = rgb_image.copy()
+    else:
+        vis_img = cv2.cvtColor(rgb_image, cv2.COLOR_RGBA2RGB)
+    
+    H, W = vis_img.shape[:2]
+    
+    # Create mask overlay
+    overlay = vis_img.copy()
+    
+    n_objects = len(masks_clean) if masks_clean else 0
+    
+    for i in range(n_objects):
+        if masks_clean[i] is None:
+            continue
+        
+        # Get IDs
+        yolo_id = int(track_ids[i]) if track_ids is not None and i < len(track_ids) else -1
+        global_id = int(global_ids[i]) if global_ids is not None and i < len(global_ids) else -1
+        class_name = class_names[i] if class_names is not None and i < len(class_names) else "unknown"
+        match_src = match_sources[i] if match_sources is not None and i < len(match_sources) else ""
+        
+        # Generate color based on global_id (for consistency)
+        color_id = global_id if global_id >= 0 else yolo_id
+        color = generate_color_from_id(color_id)
+        
+        # Apply mask overlay
+        mask = masks_clean[i]
+        if mask.dtype != bool:
+            mask = mask > 0
+        overlay[mask] = (
+            overlay[mask] * (1 - alpha) + 
+            np.array(color[::-1]) * alpha  # BGR to RGB
+        ).astype(np.uint8)
+        
+        # Get bounding box from mask
+        ys, xs = np.where(mask)
+        if len(xs) > 0 and len(ys) > 0:
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            
+            # Draw bounding box
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color[::-1], 2)
+            
+            # Build label
+            label_parts = [class_name]
+            label_parts.append(f"Y:{yolo_id}")
+            if global_id >= 0:
+                label_parts.append(f"G:{global_id}")
+            if match_src:
+                # Shorten match source
+                src_short = match_src[:3] if len(match_src) > 3 else match_src
+                label_parts.append(f"[{src_short}]")
+            label = " | ".join(label_parts)
+            
+            # Draw label background
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(overlay, (x1, y1 - th - 8), (x1 + tw + 4, y1), color[::-1], -1)
+            cv2.putText(overlay, label, (x1 + 2, y1 - 4), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    # Add frame info
+    info_text = f"Frame {frame_idx} | Objects: {n_objects}"
+    cv2.putText(overlay, info_text, (10, 30), 
+               cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+    
+    if show:
+        plt.figure(figsize=(14, 8))
+        plt.imshow(overlay)
+        plt.title(f"YOLO Tracking - Frame {frame_idx}")
+        plt.axis('off')
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.show()
+    
+    if save_path and not show:
+        cv2.imwrite(save_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+    
+    return overlay
+
+
+def visualize_tracking_3d(
+    object_registry,
+    frame_objs: List[Dict],
+    frame_idx: int,
+    show_all_tracked: bool = True,
+    point_size: float = 2.0,
+    width: int = 1280,
+    height: int = 720,
+    non_blocking: bool = False
+):
+    """
+    Visualize 3D tracking state using Open3D.
+    
+    Color coding:
+    - BLUE bbox: Currently visible objects (detected this frame)
+    - RED bbox: Not visible / last seen / reprojection-based objects
+    - Points colored by global_id for consistency
+    
+    Args:
+        object_registry: GlobalObjectRegistry instance
+        frame_objs: List of objects detected/visible in current frame
+        frame_idx: Current frame index
+        show_all_tracked: If True, show all tracked objects; if False, only current frame
+        point_size: Size of points in visualization
+        width, height: Window dimensions
+        non_blocking: If True, don't block execution (update existing window)
+    """
+    if not HAS_OPEN3D:
+        print("[WARN] Open3D not available. Skipping 3D visualization.")
+        return
+    
+    # Get all objects from registry
+    all_objects = object_registry.get_all_objects()
+    
+    # Get currently visible IDs
+    visible_ids = set()
+    for obj in frame_objs:
+        gid = obj.get('global_id', -1)
+        if gid >= 0:
+            visible_ids.add(gid)
+    
+    # Compute global bounds
+    gmin = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    gmax = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    
+    for gid, obj_data in all_objects.items():
+        pts = obj_data.get('points_accumulated')
+        if pts is not None and len(pts) > 0:
+            gmin = np.minimum(gmin, pts.min(axis=0))
+            gmax = np.maximum(gmax, pts.max(axis=0))
+    
+    if not np.all(np.isfinite(gmin)):
+        print("[WARN] No valid points for 3D visualization.")
+        return
+    
+    diag = float(np.linalg.norm(gmax - gmin)) if np.all(np.isfinite(gmax - gmin)) else 1.0
+    
+    # Create visualizer
+    vis = o3d.visualization.Visualizer()
+    summary = object_registry.get_tracking_summary()
+    title = f"3D Tracking - Frame {frame_idx} | Visible: {len(visible_ids)}/{summary['total_objects']}"
+    vis.create_window(window_name=title, width=width, height=height, visible=True)
+    
+    opt = vis.get_render_option()
+    opt.background_color = np.array([0.05, 0.05, 0.1])  # Dark blue background
+    opt.point_size = float(point_size)
+    
+    # Add coordinate frame
+    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1 * diag, origin=[0, 0, 0])
+    vis.add_geometry(coord)
+    
+    # Add all objects
+    for gid, obj_data in all_objects.items():
+        pts = obj_data.get('points_accumulated')
+        bbox_3d = obj_data.get('bbox_3d')
+        class_name = obj_data.get('class_name', '')
+        
+        if pts is None or len(pts) == 0:
+            continue
+        
+        is_visible = gid in visible_ids
+        
+        # Generate point color based on global_id
+        random.seed(int(gid) * 7 + 13)
+        point_color = np.array([random.random(), random.random(), random.random()])
+        
+        # Reduce brightness for non-visible objects
+        if not is_visible:
+            point_color = point_color * 0.4
+        
+        # Create point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        pcd.colors = o3d.utility.Vector3dVector(np.tile(point_color, (len(pts), 1)))
+        vis.add_geometry(pcd)
+        
+        # Add bounding box
+        if bbox_3d and bbox_3d.get('aabb'):
+            aabb_data = bbox_3d['aabb']
+            mn = np.asarray(aabb_data.get('min'), dtype=np.float64)
+            mx = np.asarray(aabb_data.get('max'), dtype=np.float64)
+            
+            if mn is not None and mx is not None:
+                # Create AABB lineset
+                corners = np.array([
+                    [mn[0], mn[1], mn[2]],
+                    [mx[0], mn[1], mn[2]],
+                    [mx[0], mx[1], mn[2]],
+                    [mn[0], mx[1], mn[2]],
+                    [mn[0], mn[1], mx[2]],
+                    [mx[0], mn[1], mx[2]],
+                    [mx[0], mx[1], mx[2]],
+                    [mn[0], mx[1], mx[2]],
+                ], dtype=np.float64)
+                lines = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]
+                
+                ls = o3d.geometry.LineSet()
+                ls.points = o3d.utility.Vector3dVector(corners)
+                ls.lines = o3d.utility.Vector2iVector(lines)
+                
+                # BLUE for visible, RED for not visible
+                if is_visible:
+                    bbox_color = [0.0, 0.5, 1.0]  # Blue
+                else:
+                    bbox_color = [1.0, 0.2, 0.2]  # Red
+                
+                ls.colors = o3d.utility.Vector3dVector([bbox_color] * len(lines))
+                vis.add_geometry(ls)
+    
+    # Fit view
+    gbox = o3d.geometry.AxisAlignedBoundingBox(gmin, gmax)
+    vis.add_geometry(gbox)
+    vis.poll_events()
+    vis.update_renderer()
+    ctr = vis.get_view_control()
+    ctr.set_lookat(gbox.get_center())
+    ctr.set_front([-0.5, -0.5, -0.8])
+    ctr.set_up([0.0, 0.0, 1.0])
+    ctr.set_zoom(0.8)
+    vis.remove_geometry(gbox, reset_bounding_box=False)
+    
+    # Legend info
+    print(f"\n[3D Visualization] Frame {frame_idx}")
+    print(f"  BLUE bbox  = Currently visible ({len(visible_ids)} objects)")
+    print(f"  RED bbox   = Not visible / last seen ({summary['total_objects'] - len(visible_ids)} objects)")
+    print(f"  Controls: mouse rotate, wheel zoom, right-button pan, Q quit\n")
+    
+    vis.run()
+    vis.destroy_window()
+
+
+def visualize_tracking_comparison(
+    rgb_image: np.ndarray,
+    gt_objects: List,
+    pred_objects: List,
+    gt_to_pred: Dict[int, int],
+    frame_idx: int,
+    alpha: float = 0.4,
+    show: bool = True,
+    save_path: str = None
+) -> np.ndarray:
+    """
+    Visualize GT vs Predicted masks side by side for debugging matching.
+    
+    Args:
+        rgb_image: RGB image
+        gt_objects: List of GTObject
+        pred_objects: List of PredObject  
+        gt_to_pred: Mapping from GT track_id to pred global_id
+        frame_idx: Current frame index
+        alpha: Mask overlay transparency
+        show: Whether to display
+        save_path: Optional save path
+    """
+    H, W = rgb_image.shape[:2]
+    
+    # Create two panels: GT and Predictions
+    gt_panel = rgb_image.copy()
+    pred_panel = rgb_image.copy()
+    
+    # Draw GT masks (green tint)
+    for gt_obj in gt_objects:
+        if gt_obj.mask is None:
+            continue
+        mask = gt_obj.mask > 0 if gt_obj.mask.dtype != bool else gt_obj.mask
+        color = generate_color_from_id(gt_obj.track_id)
+        gt_panel[mask] = (gt_panel[mask] * (1 - alpha) + np.array(color[::-1]) * alpha).astype(np.uint8)
+        
+        # Add label
+        ys, xs = np.where(mask)
+        if len(xs) > 0:
+            x1, y1 = int(xs.min()), int(ys.min())
+            matched = "✓" if gt_obj.track_id in gt_to_pred else "✗"
+            label = f"GT:{gt_obj.track_id} {gt_obj.class_name} {matched}"
+            cv2.putText(gt_panel, label, (x1, y1 - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    
+    # Draw Pred masks
+    matched_pred_ids = set(gt_to_pred.values())
+    for pred_obj in pred_objects:
+        if pred_obj.mask is None:
+            continue
+        mask = pred_obj.mask > 0 if pred_obj.mask.dtype != bool else pred_obj.mask
+        color = generate_color_from_id(pred_obj.global_id)
+        pred_panel[mask] = (pred_panel[mask] * (1 - alpha) + np.array(color[::-1]) * alpha).astype(np.uint8)
+        
+        ys, xs = np.where(mask)
+        if len(xs) > 0:
+            x1, y1 = int(xs.min()), int(ys.min())
+            matched = "✓" if pred_obj.global_id in matched_pred_ids else "FP"
+            label = f"G:{pred_obj.global_id} {pred_obj.class_name or ''} {matched}"
+            cv2.putText(pred_panel, label, (x1, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
+    
+    # Combine panels
+    combined = np.hstack([gt_panel, pred_panel])
+    
+    if show:
+        fig, axes = plt.subplots(1, 2, figsize=(18, 8))
+        axes[0].imshow(gt_panel)
+        axes[0].set_title(f"Ground Truth - Frame {frame_idx}\n({len(gt_objects)} objects)")
+        axes[0].axis('off')
+        axes[1].imshow(pred_panel)
+        axes[1].set_title(f"Predictions - Frame {frame_idx}\n({len(pred_objects)} objects, {len(gt_to_pred)} matched)")
+        axes[1].axis('off')
+        plt.suptitle(f"GT vs Predictions Comparison - Frame {frame_idx}", fontsize=14)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.show()
+    
+    return combined
 
 
 @dataclass
@@ -336,6 +709,69 @@ class TrackingBenchmark:
             
             # Update metrics
             self._update_frame_metrics(frame_idx, gt_objects, pred_objects, gt_to_pred, gt_ious)
+            
+            # === DEBUG VISUALIZATION ===
+            vis_cfg = self.cfg.get('visualization', {})
+            vis_enabled = vis_cfg.get('enabled', False)
+            vis_interval = vis_cfg.get('interval', 10)  # Visualize every N frames
+            vis_save_dir = vis_cfg.get('save_dir', None)
+            
+            if vis_enabled and (frame_idx % vis_interval == 0 or frame_idx == 0):
+                # Load RGB for visualization
+                rgb_image = cv2.imread(rgb_cur_path)
+                if rgb_image is not None:
+                    rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
+                    
+                    # Prepare save paths
+                    save_2d_path = None
+                    save_3d_flag = False
+                    save_cmp_path = None
+                    if vis_save_dir:
+                        save_dir = Path(vis_save_dir)
+                        save_dir.mkdir(parents=True, exist_ok=True)
+                        save_2d_path = str(save_dir / f"tracking_2d_frame{frame_idx:06d}.png")
+                        save_cmp_path = str(save_dir / f"gt_vs_pred_frame{frame_idx:06d}.png")
+                    
+                    # 2D YOLO Tracking Visualization
+                    if vis_cfg.get('show_2d', True):
+                        global_ids = [obj['global_id'] for obj in frame_objs]
+                        match_sources = [obj.get('match_source', '') for obj in frame_objs]
+                        
+                        visualize_yolo_tracking_2d(
+                            rgb_image=rgb_image,
+                            yolo_res=yl_res,
+                            masks_clean=masks_clean,
+                            track_ids=track_ids,
+                            class_names=class_names,
+                            frame_idx=frame_idx,
+                            global_ids=global_ids,
+                            match_sources=match_sources,
+                            alpha=0.5,
+                            show=vis_cfg.get('show_windows', True),
+                            save_path=save_2d_path
+                        )
+                    
+                    # 3D Open3D Tracking Visualization
+                    if vis_cfg.get('show_3d', True) and HAS_OPEN3D:
+                        visualize_tracking_3d(
+                            object_registry=object_registry,
+                            frame_objs=frame_objs,
+                            frame_idx=frame_idx,
+                            show_all_tracked=True,
+                            point_size=vis_cfg.get('point_size', 2.0)
+                        )
+                    
+                    # GT vs Predictions Comparison
+                    if vis_cfg.get('show_comparison', False):
+                        visualize_tracking_comparison(
+                            rgb_image=rgb_image,
+                            gt_objects=gt_objects,
+                            pred_objects=pred_objects,
+                            gt_to_pred=gt_to_pred,
+                            frame_idx=frame_idx,
+                            show=vis_cfg.get('show_windows', True),
+                            save_path=save_cmp_path
+                        )
             
             frame_idx += 1
         
@@ -781,21 +1217,79 @@ if __name__ == "__main__":
         'tracking_inactive_limit': 0,
         'tracking_volume_ratio_threshold': 0.1,
         'reprojection_visibility_threshold': 0.2,
+        
+        # ============================================================
+        # DEBUG VISUALIZATION SETTINGS
+        # ============================================================
+        'visualization': {
+            'enabled': False,  # Master switch for all visualization
+            
+            # What to visualize
+            'show_2d': True,      # YOLO masks with class IDs & global IDs
+            'show_3d': True,      # Open3D: all objects with BLUE=visible, RED=not visible
+            'show_comparison': False,  # GT vs Predictions side-by-side
+            
+            # Visualization frequency
+            'interval': 10,       # Visualize every N frames (1 = every frame)
+            
+            # Display options
+            'show_windows': True,  # Show matplotlib/Open3D windows (set False for headless)
+            'point_size': 2.0,     # Point size for 3D visualization
+            
+            # Save options (optional)
+            'save_dir': None,      # Directory to save visualizations (None = don't save)
+            # Example: 'save_dir': './debug_vis'
+        }
     })
     
     # Update paths for your system
     import sys
-    if len(sys.argv) > 1:
-        scene_path = sys.argv[1]
-    else:
+    
+    # Parse command line arguments
+    scene_path = None
+    multi_mode = False
+    vis_enabled = False
+    
+    for arg in sys.argv[1:]:
+        if arg == '--multi':
+            multi_mode = True
+        elif arg == '--vis' or arg == '--visualize':
+            vis_enabled = True
+        elif arg == '--vis-3d':
+            vis_enabled = True
+            cfg.visualization.show_2d = False
+            cfg.visualization.show_3d = True
+        elif arg == '--vis-2d':
+            vis_enabled = True
+            cfg.visualization.show_2d = True
+            cfg.visualization.show_3d = False
+        elif arg.startswith('--vis-interval='):
+            cfg.visualization.interval = int(arg.split('=')[1])
+        elif arg.startswith('--vis-save='):
+            cfg.visualization.save_dir = arg.split('=')[1]
+        elif not arg.startswith('--'):
+            scene_path = arg
+    
+    # Enable visualization if flag was passed
+    if vis_enabled:
+        cfg.visualization.enabled = True
+    
+    if scene_path is None:
         # Default scene path - update this!
         scene_path = "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex"
-        print(f"Usage: python benchmark_tracking.py <scene_path>")
+        print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
         print(f"       python benchmark_tracking.py <scenes_root> --multi")
+        print(f"\nOptions:")
+        print(f"  --vis, --visualize    Enable debug visualization")
+        print(f"  --vis-2d              Enable only 2D visualization (YOLO masks)")
+        print(f"  --vis-3d              Enable only 3D visualization (Open3D)")
+        print(f"  --vis-interval=N      Visualize every N frames (default: 10)")
+        print(f"  --vis-save=DIR        Save visualizations to directory")
+        print(f"  --multi               Run multi-scene benchmark")
         print(f"\nUsing default: {scene_path}")
     
     # Check for multi-scene mode
-    if len(sys.argv) > 2 and sys.argv[2] == '--multi':
+    if multi_mode:
         # Multi-scene benchmark
         results = run_multi_scene_benchmark(scene_path, cfg)
         output_path = Path(scene_path) / "benchmark_results_all.json"
