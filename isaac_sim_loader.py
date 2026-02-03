@@ -909,5 +909,7 @@ if __name__ == "__main__":
                                    show_bbox_2d=True, show_depth=True)
     else:
         loader.print_info()
-        loader.visualize_frame(0, show_rgb=True, show_seg=True, 
-                              show_bbox_2d=True, show_depth=True)
+        for i in range(0, 20, 5):
+            loader.visualize_frame(i, show_rgb=True, show_seg=True, 
+                              show_bbox_2d=True)
+            loader.visualize_3d(i)
