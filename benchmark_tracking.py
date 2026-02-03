@@ -1677,21 +1677,23 @@ if __name__ == "__main__":
         # r"C:\path\to\scene_3",
         
         # Isaac Sim scenes:
-        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02",
-        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_complex",
-        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_complex_big",
-        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_straight",
-        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_03",
+        '/home/maribjonov_mr/IsaacSim_bench/scene_1',
+        '/home/maribjonov_mr/IsaacSim_bench/scene_2',
+        '/home/maribjonov_mr/IsaacSim_bench/scene_3',
+        '/home/maribjonov_mr/IsaacSim_bench/scene_7',
+        '/home/maribjonov_mr/IsaacSim_bench/cabinet_simple',
+        '/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex',
     ]
     
     # Output directory for multi-scene results
-    DEFAULT_OUTPUT_DIR = r"C:\rizo\yolo_sgg\benchmark_results"
+    DEFAULT_OUTPUT_DIR = '/home/maribjonov_mr/IsaacSim_bench'
     
     # Parse command line arguments
     scene_path = None
     multi_mode = False
     vis_enabled = False
-    custom_scenes = ['scene_1', 'scene_2', 'scene_3', 'scene_7', 'nk_scene_complex', 'cabinet_simple']  # For command-line specified scenes
+    # custom_scenes = ['scene_1', 'scene_2', 'scene_3', 'scene_7', 'nk_scene_complex', 'cabinet_simple']  # For command-line specified scenes
+    custom_scenes = []
     output_dir = None
     
     for arg in sys.argv[1:]:
