@@ -168,6 +168,8 @@ class GlobalObjectRegistry:
         'last_seen_frame': int,
         'observation_count': int,
         'visible_current_frame': bool,  # Visibility in current frame
+        'last_mask': np.ndarray or None,  # Last clean 2D mask (H, W) for metrics
+        'last_mask_frame': int,  # Frame when last_mask was captured
     }
     """
     
@@ -609,7 +611,9 @@ class GlobalObjectRegistry:
                     'first_seen_frame': frame_idx,
                     'last_seen_frame': frame_idx,
                     'observation_count': 0,
-                    'visible_current_frame': True
+                    'visible_current_frame': True,
+                    'last_mask': None,
+                    'last_mask_frame': -1
                 }
             
             # === Update the object ===
@@ -631,6 +635,9 @@ class GlobalObjectRegistry:
             if class_name and not self.objects[global_id].get('class_name'):
                 self.objects[global_id]['class_name'] = class_name
             
+            # Get mask from detection if provided
+            det_mask = det.get('mask', None)
+            
             # Update registry
             self.objects[global_id].update({
                 'points_accumulated': merged_points,
@@ -639,6 +646,11 @@ class GlobalObjectRegistry:
                 'observation_count': self.objects[global_id].get('observation_count', 0) + 1,
                 'visible_current_frame': True
             })
+            
+            # Update last_mask if provided
+            if det_mask is not None:
+                self.objects[global_id]['last_mask'] = det_mask.copy() if hasattr(det_mask, 'copy') else det_mask
+                self.objects[global_id]['last_mask_frame'] = frame_idx
             
             # Store for current frame (for temporal continuity next frame)
             current_frame_objects[global_id] = self.objects[global_id]
@@ -736,14 +748,34 @@ class GlobalObjectRegistry:
         """Return set of global_ids visible in current frame."""
         return self._visible_this_frame.copy()
     
+    def get_object_mask(self, global_id: int) -> np.ndarray:
+        """Get the last stored mask for an object."""
+        if global_id in self.objects:
+            return self.objects[global_id].get('last_mask', None)
+        return None
+    
+    def get_all_objects_with_masks(self) -> dict:
+        """
+        Get all objects that have masks stored.
+        
+        Returns:
+            dict: global_id -> object_data (only objects with masks)
+        """
+        return {
+            gid: obj for gid, obj in self.objects.items() 
+            if obj.get('last_mask') is not None
+        }
+    
     def get_tracking_summary(self) -> dict:
         """Get summary statistics for tracking."""
         visible = len(self._visible_this_frame)
         total = len(self.objects)
+        with_masks = sum(1 for obj in self.objects.values() if obj.get('last_mask') is not None)
         return {
             'total_objects': total,
             'visible_objects': visible,
             'invisible_objects': total - visible,
+            'objects_with_masks': with_masks,
             'current_frame': self.current_frame
         }
 
@@ -1636,7 +1668,8 @@ def create_3d_objects_with_tracking(
             'yolo_track_id': int(t_id),
             'points': points_world,
             'bbox_3d': bbox_3d,
-            'class_name': class_name
+            'class_name': class_name,
+            'mask': m_clean  # Store mask for registry-based metrics
         })
     
     # Step 2: Process through registry for consistent tracking

@@ -419,7 +419,7 @@ class PredObject:
 @dataclass
 class TrackingMetrics:
     """Metrics for tracking evaluation."""
-    # Per-object metrics
+    # Per-object metrics (per-frame based)
     per_object_iou: Dict[int, List[float]] = field(default_factory=dict)  # gt_track_id -> [IoU per frame]
     per_object_tracked: Dict[int, List[bool]] = field(default_factory=dict)  # gt_track_id -> [tracked per frame]
     per_object_pred_ids: Dict[int, List[int]] = field(default_factory=dict)  # gt_track_id -> [pred_id per frame]
@@ -438,6 +438,12 @@ class TrackingMetrics:
     
     # Frame-level
     frames_processed: int = 0
+    
+    # Registry-based metrics (computed at end using last masks from registry)
+    # gt_track_id -> global_id (best match across all frames)
+    gt_to_registry_match: Dict[int, int] = field(default_factory=dict)
+    # gt_track_id -> IoU with registry mask
+    gt_to_registry_iou: Dict[int, float] = field(default_factory=dict)
 
 
 # Use IsaacSimDataLoader from separate module for GT data loading
@@ -559,6 +565,12 @@ class TrackingBenchmark:
         # Track GT object appearances across frames
         self.gt_appearances = defaultdict(list)  # gt_track_id -> [frame_indices]
         self.gt_to_pred_history = defaultdict(list)  # gt_track_id -> [(frame_idx, pred_id, iou)]
+        
+        # Store GT objects with their last masks for registry-based metrics
+        self.gt_last_masks = {}  # gt_track_id -> (mask, frame_idx, class_name)
+        
+        # Store registry reference for final metrics
+        self.object_registry = None
     
     def run_benchmark(self, scene_path: str) -> Dict:
         """
@@ -589,6 +601,7 @@ class TrackingBenchmark:
         self.metrics = TrackingMetrics()
         self.gt_appearances = defaultdict(list)
         self.gt_to_pred_history = defaultdict(list)
+        self.gt_last_masks = {}  # Reset GT mask storage
         
         # Initialize object registry
         object_registry = GlobalObjectRegistry(
@@ -599,6 +612,9 @@ class TrackingBenchmark:
             volume_ratio_threshold=float(self.cfg.get('tracking_volume_ratio_threshold', 0.1)),
             reprojection_visibility_threshold=float(self.cfg.get('reprojection_visibility_threshold', 0.2))
         )
+        
+        # Store registry reference for final metrics
+        self.object_registry = object_registry
         
         # Prepare paths
         rgb_dir = str(gt_loader.rgb_dir)
@@ -862,6 +878,10 @@ class TrackingBenchmark:
             if gt_id not in self.metrics.per_object_class:
                 self.metrics.per_object_class[gt_id] = gt_obj.class_name
             
+            # Store last mask for registry-based metrics
+            if gt_obj.mask is not None:
+                self.gt_last_masks[gt_id] = (gt_obj.mask.copy(), frame_idx, gt_obj.class_name)
+            
             # Initialize tracking for this GT object
             if gt_id not in self.metrics.per_object_iou:
                 self.metrics.per_object_iou[gt_id] = []
@@ -1012,6 +1032,191 @@ class TrackingBenchmark:
         else:
             results['MOTP'] = 0.0
         
+        # ==========================================================================
+        # REGISTRY-BASED METRICS
+        # Uses last stored masks from GlobalObjectRegistry to compute final metrics
+        # This evaluates how well the pipeline tracks objects across all frames
+        # ==========================================================================
+        results.update(self._compute_registry_based_metrics())
+        
+        return results
+    
+    def _compute_registry_based_metrics(self) -> Dict:
+        """
+        Compute metrics using GlobalObjectRegistry's stored masks.
+        
+        This matches GT objects to registry objects using their last stored masks,
+        providing a holistic view of tracking quality based on the final pipeline output.
+        
+        Returns:
+            Dict with registry-based metrics:
+            - registry_coverage: % of GT objects matched to registry objects
+            - registry_T_mIoU: Mean mask IoU between GT and matched registry objects
+            - registry_ID_consistency: % of GT objects consistently assigned same global ID
+        """
+        results = {}
+        
+        if self.object_registry is None:
+            print("[WARN] No object registry available for registry-based metrics")
+            results['registry_coverage'] = 0.0
+            results['registry_T_mIoU'] = 0.0
+            results['registry_T_SR'] = 0.0
+            results['registry_ID_consistency'] = 0.0
+            return results
+        
+        # Get all registry objects with masks
+        registry_objects = self.object_registry.get_all_objects_with_masks()
+        
+        print(f"\n[Registry Metrics] Computing registry-based metrics...")
+        print(f"  GT objects with masks: {len(self.gt_last_masks)}")
+        print(f"  Registry objects with masks: {len(registry_objects)}")
+        
+        if not self.gt_last_masks:
+            print("[WARN] No GT masks stored for registry-based metrics")
+            results['registry_coverage'] = 0.0
+            results['registry_T_mIoU'] = 0.0
+            results['registry_T_SR'] = 0.0
+            results['registry_ID_consistency'] = 0.0
+            results['registry_matched_objects'] = 0
+            results['registry_total_gt_objects'] = 0
+            return results
+        
+        # Match GT objects to registry objects using mask IoU
+        gt_to_registry = {}  # gt_track_id -> (global_id, iou)
+        used_registry_ids = set()
+        
+        # Build IoU matrix
+        gt_ids = list(self.gt_last_masks.keys())
+        registry_ids = list(registry_objects.keys())
+        
+        if not registry_ids:
+            print("[WARN] No registry objects with masks available")
+            results['registry_coverage'] = 0.0
+            results['registry_T_mIoU'] = 0.0
+            results['registry_T_SR'] = 0.0
+            results['registry_ID_consistency'] = 0.0
+            results['registry_matched_objects'] = 0
+            results['registry_total_gt_objects'] = len(gt_ids)
+            return results
+        
+        iou_matrix = np.zeros((len(gt_ids), len(registry_ids)))
+        
+        for i, gt_id in enumerate(gt_ids):
+            gt_mask, gt_frame, gt_class = self.gt_last_masks[gt_id]
+            for j, reg_id in enumerate(registry_ids):
+                reg_obj = registry_objects[reg_id]
+                reg_mask = reg_obj.get('last_mask')
+                if reg_mask is not None:
+                    iou = compute_mask_iou(gt_mask, reg_mask)
+                    iou_matrix[i, j] = iou
+        
+        # Greedy matching by highest IoU
+        matches = []
+        for i in range(len(gt_ids)):
+            for j in range(len(registry_ids)):
+                if iou_matrix[i, j] >= 0.3:  # Threshold for valid match
+                    matches.append((i, j, iou_matrix[i, j]))
+        
+        matches.sort(key=lambda x: -x[2])  # Sort by IoU descending
+        
+        used_gt = set()
+        for gt_idx, reg_idx, iou in matches:
+            if gt_idx in used_gt or reg_idx in used_registry_ids:
+                continue
+            
+            gt_id = gt_ids[gt_idx]
+            reg_id = registry_ids[reg_idx]
+            gt_to_registry[gt_id] = (reg_id, iou)
+            used_gt.add(gt_idx)
+            used_registry_ids.add(reg_idx)
+        
+        # Store in metrics for potential later use
+        self.metrics.gt_to_registry_match = {gt_id: match[0] for gt_id, match in gt_to_registry.items()}
+        self.metrics.gt_to_registry_iou = {gt_id: match[1] for gt_id, match in gt_to_registry.items()}
+        
+        # Compute registry-based metrics
+        n_gt = len(self.gt_last_masks)
+        n_matched = len(gt_to_registry)
+        
+        # Registry Coverage: % of GT objects that have a matching registry object
+        results['registry_coverage'] = n_matched / n_gt if n_gt > 0 else 0.0
+        
+        # Registry T-mIoU: Mean mask IoU for matched GT-registry pairs
+        if gt_to_registry:
+            registry_ious = [iou for (_, iou) in gt_to_registry.values()]
+            results['registry_T_mIoU'] = float(np.mean(registry_ious))
+            results['registry_T_mIoU_std'] = float(np.std(registry_ious))
+            results['registry_T_mIoU_per_object'] = {
+                gt_id: iou for gt_id, (_, iou) in gt_to_registry.items()
+            }
+        else:
+            results['registry_T_mIoU'] = 0.0
+            results['registry_T_mIoU_std'] = 0.0
+            results['registry_T_mIoU_per_object'] = {}
+        
+        # Registry T-SR (Success Rate): GT object consistently tracked with same global_id
+        # Uses per-frame history to check if the matched registry ID was consistent
+        registry_t_sr = {}
+        for gt_id, (reg_id, _) in gt_to_registry.items():
+            # Check per-frame pred_ids for this GT object
+            pred_ids = self.metrics.per_object_pred_ids.get(gt_id, [])
+            if not pred_ids:
+                registry_t_sr[gt_id] = 0.0
+                continue
+            
+            # Count how many frames this GT was assigned the correct registry ID
+            valid_frames = [pid for pid in pred_ids if pid >= 0]
+            if not valid_frames:
+                registry_t_sr[gt_id] = 0.0
+                continue
+            
+            # Check if the most common pred_id matches the registry match
+            from collections import Counter
+            most_common = Counter(valid_frames).most_common(1)[0][0]
+            
+            # T-SR: 1 if tracked in ALL frames with the same ID, 0 otherwise
+            all_same_id = all(pid == most_common for pid in valid_frames) and most_common == reg_id
+            registry_t_sr[gt_id] = 1.0 if all_same_id else 0.0
+        
+        if registry_t_sr:
+            results['registry_T_SR'] = float(np.mean(list(registry_t_sr.values())))
+            results['registry_T_SR_per_object'] = registry_t_sr
+        else:
+            results['registry_T_SR'] = 0.0
+            results['registry_T_SR_per_object'] = {}
+        
+        # Registry ID Consistency: For matched GT objects, how consistent was the assigned ID?
+        registry_consistency = {}
+        for gt_id, (reg_id, _) in gt_to_registry.items():
+            pred_ids = self.metrics.per_object_pred_ids.get(gt_id, [])
+            valid_ids = [pid for pid in pred_ids if pid >= 0]
+            
+            if not valid_ids:
+                registry_consistency[gt_id] = 0.0
+                continue
+            
+            # Ratio of frames where GT was assigned the matched registry ID
+            consistent_frames = sum(1 for pid in valid_ids if pid == reg_id)
+            registry_consistency[gt_id] = consistent_frames / len(valid_ids)
+        
+        if registry_consistency:
+            results['registry_ID_consistency'] = float(np.mean(list(registry_consistency.values())))
+            results['registry_ID_consistency_per_object'] = registry_consistency
+        else:
+            results['registry_ID_consistency'] = 0.0
+            results['registry_ID_consistency_per_object'] = {}
+        
+        # Additional statistics
+        results['registry_matched_objects'] = n_matched
+        results['registry_total_gt_objects'] = n_gt
+        results['registry_total_tracked_objects'] = len(registry_objects)
+        
+        # Print summary
+        print(f"  Matched: {n_matched}/{n_gt} GT objects ({results['registry_coverage']*100:.1f}%)")
+        print(f"  Registry T-mIoU: {results['registry_T_mIoU']:.4f}")
+        print(f"  Registry T-SR: {results['registry_T_SR']:.4f}")
+        print(f"  Registry ID Consistency: {results['registry_ID_consistency']:.4f}")
+        
         return results
     
     def _print_results(self, metrics: Dict):
@@ -1021,7 +1226,7 @@ class TrackingBenchmark:
         print("="*60)
         
         print(f"\n{'='*40}")
-        print("MAIN METRICS")
+        print("PER-FRAME METRICS (2D Mask-Based)")
         print(f"{'='*40}")
         print(f"  T-mIoU (Temporal Mean IoU):     {metrics['T_mIoU']:.4f} ± {metrics.get('T_mIoU_std', 0):.4f}")
         print(f"  T-SR (Temporal Success Rate):  {metrics['T_SR']:.4f}")
@@ -1029,6 +1234,15 @@ class TrackingBenchmark:
         print(f"  Detection Rate:                {metrics['detection_rate']:.4f}")
         print(f"  MOTA (Multi-Object Tracking):  {metrics['MOTA']:.4f}")
         print(f"  MOTP (Mean IoU of matches):    {metrics['MOTP']:.4f}")
+        
+        print(f"\n{'='*40}")
+        print("REGISTRY-BASED METRICS (Final Pipeline Output)")
+        print(f"{'='*40}")
+        print(f"  Registry Coverage:             {metrics.get('registry_coverage', 0):.4f} ({metrics.get('registry_matched_objects', 0)}/{metrics.get('registry_total_gt_objects', 0)} GT objects)")
+        print(f"  Registry T-mIoU:               {metrics.get('registry_T_mIoU', 0):.4f} ± {metrics.get('registry_T_mIoU_std', 0):.4f}")
+        print(f"  Registry T-SR:                 {metrics.get('registry_T_SR', 0):.4f}")
+        print(f"  Registry ID Consistency:       {metrics.get('registry_ID_consistency', 0):.4f}")
+        print(f"  Total Tracked Objects:         {metrics.get('registry_total_tracked_objects', 0)}")
         
         print(f"\n{'='*40}")
         print("COUNTING STATISTICS")
@@ -1071,12 +1285,18 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
     
     all_results = {}
     aggregated = {
+        # Per-frame metrics
         'T_mIoU': [],
         'T_SR': [],
         'ID_consistency': [],
         'detection_rate': [],
         'MOTA': [],
         'MOTP': [],
+        # Registry-based metrics
+        'registry_coverage': [],
+        'registry_T_mIoU': [],
+        'registry_T_SR': [],
+        'registry_ID_consistency': [],
     }
     
     for scene_dir in scene_dirs:
@@ -1113,8 +1333,14 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
     print("OVERALL BENCHMARK RESULTS (Across All Scenes)")
     print("="*60)
     
+    print(f"\n{'='*40}")
+    print("PER-FRAME METRICS")
+    print(f"{'='*40}")
+    
     overall = {}
-    for key, values in aggregated.items():
+    per_frame_keys = ['T_mIoU', 'T_SR', 'ID_consistency', 'detection_rate', 'MOTA', 'MOTP']
+    for key in per_frame_keys:
+        values = aggregated.get(key, [])
         if values:
             overall[key] = {
                 'mean': float(np.mean(values)),
@@ -1123,6 +1349,23 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
                 'max': float(np.max(values)),
             }
             print(f"  {key:20s}: {overall[key]['mean']:.4f} ± {overall[key]['std']:.4f} "
+                  f"[{overall[key]['min']:.4f} - {overall[key]['max']:.4f}]")
+    
+    print(f"\n{'='*40}")
+    print("REGISTRY-BASED METRICS")
+    print(f"{'='*40}")
+    
+    registry_keys = ['registry_coverage', 'registry_T_mIoU', 'registry_T_SR', 'registry_ID_consistency']
+    for key in registry_keys:
+        values = aggregated.get(key, [])
+        if values:
+            overall[key] = {
+                'mean': float(np.mean(values)),
+                'std': float(np.std(values)),
+                'min': float(np.min(values)),
+                'max': float(np.max(values)),
+            }
+            print(f"  {key:25s}: {overall[key]['mean']:.4f} ± {overall[key]['std']:.4f} "
                   f"[{overall[key]['min']:.4f} - {overall[key]['max']:.4f}]")
     
     return {
