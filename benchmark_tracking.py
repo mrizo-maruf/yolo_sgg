@@ -666,6 +666,32 @@ class TrackingBenchmark:
                 n = len(masks_clean) if isinstance(masks_clean, (list, tuple)) else 0
                 track_ids = np.arange(n, dtype=np.int64)
             
+            # === FILTER OUT UNWANTED CLASSES ===
+            skip_classes = set(c.lower() for c in self.cfg.get('skip_classes', []))
+            if skip_classes and class_names is not None:
+                # Build keep mask
+                keep_indices = []
+                for i, cls_name in enumerate(class_names):
+                    if cls_name is None:
+                        keep_indices.append(i)  # Keep if no class name
+                    elif cls_name.lower() not in skip_classes:
+                        keep_indices.append(i)
+                    else:
+                        # Debug: optionally log filtered detections
+                        if self.cfg.get('debug_skip_classes', False):
+                            print(f"  [Frame {frame_idx}] Skipping class: {cls_name}")
+                
+                # Apply filter
+                if len(keep_indices) < len(class_names):
+                    filtered_count = len(class_names) - len(keep_indices)
+                    if self.cfg.get('debug_skip_classes', False):
+                        print(f"  [Frame {frame_idx}] Filtered {filtered_count} detections")
+                    
+                    # Filter all arrays
+                    masks_clean = [masks_clean[i] for i in keep_indices] if masks_clean else []
+                    track_ids = track_ids[keep_indices] if track_ids is not None else None
+                    class_names = [class_names[i] for i in keep_indices]
+            
             # Build 3D objects with tracking
             frame_objs, _ = yutils.create_3d_objects_with_tracking(
                 track_ids,
@@ -1219,6 +1245,43 @@ if __name__ == "__main__":
         'reprojection_visibility_threshold': 0.2,
         
         # ============================================================
+        # CLASSES TO SKIP/FILTER OUT
+        # ============================================================
+        # These are typically large structural elements, rooms, or spaces
+        # that shouldn't be tracked as individual objects
+        'skip_classes': [
+            # Structural elements
+            'wall', 'floor', 'ceiling', 'roof',
+            'stairway', 'stairs', 'stair', 'escalator', 'elevator',
+            
+            # Rooms and spaces
+            'room', 'kitchen', 'bathroom', 'bedroom', 'living room',
+            'dining room', 'office', 'hallway', 'corridor', 'lobby',
+            'garage', 'basement', 'attic',
+            
+            # Large venues/areas
+            'basketball court', 'tennis court', 'football field',
+            'soccer field', 'baseball field', 'stadium', 'arena',
+            'mall', 'store', 'shop', 'market', 'supermarket',
+            'restaurant', 'cafe', 'bar', 'gym', 'pool',
+            'parking lot', 'parking', 'road', 'street', 'sidewalk',
+            'highway', 'bridge', 'tunnel', 'court'
+            
+            # Outdoor elements
+            'sky', 'ground', 'grass', 'field', 'lawn',
+            'mountain', 'hill', 'river', 'lake', 'ocean', 'sea',
+            'beach', 'forest', 'tree', 'trees',
+            
+            # Building types
+            'building', 'house', 'apartment', 'skyscraper',
+            'warehouse', 'factory', 'school', 'hospital',
+            'church', 'temple', 'mosque',
+            
+            # Other large elements
+            'platform', 'stage', 'runway', 'track',
+        ],
+        
+        # ============================================================
         # DEBUG VISUALIZATION SETTINGS
         # ============================================================
         'visualization': {
@@ -1276,7 +1339,7 @@ if __name__ == "__main__":
     
     if scene_path is None:
         # Default scene path - update this!
-        scene_path = "/home/maribjonov_mr/IsaacSim_bench/cabinet_complex"
+        scene_path = "/home/maribjonov_mr/IsaacSim_bench/scene_3"
         print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
         print(f"       python benchmark_tracking.py <scenes_root> --multi")
         print(f"\nOptions:")

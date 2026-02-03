@@ -43,6 +43,93 @@ RGB_PATHS = []
 TRACKER_CFG = "botsort.yaml"
 DEVICE = "0"
 
+# ============================================================================
+# DEFAULT CLASSES TO SKIP (structural elements, rooms, large spaces)
+# ============================================================================
+DEFAULT_SKIP_CLASSES = {
+    # Structural elements
+    'wall', 'floor', 'ceiling', 'roof', 'door', 'window',
+    'stairway', 'stairs', 'stair', 'escalator', 'elevator',
+    
+    # Rooms and spaces
+    'room', 'kitchen', 'bathroom', 'bedroom', 'living room',
+    'dining room', 'office', 'hallway', 'corridor', 'lobby',
+    'garage', 'basement', 'attic',
+    
+    # Large venues/areas
+    'basketball court', 'tennis court', 'football field',
+    'soccer field', 'baseball field', 'stadium', 'arena',
+    'mall', 'store', 'shop', 'market', 'supermarket',
+    'restaurant', 'cafe', 'bar', 'gym', 'pool',
+    'parking lot', 'parking', 'road', 'street', 'sidewalk',
+    'highway', 'bridge', 'tunnel',
+    
+    # Outdoor elements
+    'sky', 'ground', 'grass', 'field', 'lawn',
+    'mountain', 'hill', 'river', 'lake', 'ocean', 'sea',
+    'beach', 'forest', 'tree', 'trees',
+    
+    # Building types
+    'building', 'house', 'apartment', 'skyscraper',
+    'warehouse', 'factory', 'school', 'hospital',
+    'church', 'temple', 'mosque',
+    
+    # Other large elements
+    'platform', 'stage', 'runway', 'track',
+}
+
+
+def filter_detections_by_class(
+    masks: list,
+    track_ids: np.ndarray,
+    class_names: list,
+    skip_classes: set = None,
+    verbose: bool = False
+) -> tuple:
+    """
+    Filter out detections belonging to unwanted classes.
+    
+    Args:
+        masks: List of binary masks
+        track_ids: Array of track IDs
+        class_names: List of class names
+        skip_classes: Set of class names to filter out (lowercase).
+                      If None, uses DEFAULT_SKIP_CLASSES.
+        verbose: If True, print filtered classes
+    
+    Returns:
+        (filtered_masks, filtered_track_ids, filtered_class_names)
+    """
+    if skip_classes is None:
+        skip_classes = DEFAULT_SKIP_CLASSES
+    else:
+        skip_classes = set(c.lower() for c in skip_classes)
+    
+    if not skip_classes or class_names is None:
+        return masks, track_ids, class_names
+    
+    keep_indices = []
+    for i, cls_name in enumerate(class_names):
+        if cls_name is None:
+            keep_indices.append(i)
+        elif cls_name.lower() not in skip_classes:
+            keep_indices.append(i)
+        elif verbose:
+            print(f"    [filter] Skipping: {cls_name}")
+    
+    if len(keep_indices) == len(class_names):
+        return masks, track_ids, class_names
+    
+    # Filter
+    filtered_masks = [masks[i] for i in keep_indices] if masks else []
+    filtered_track_ids = track_ids[keep_indices] if track_ids is not None and len(track_ids) > 0 else np.array([], dtype=np.int64)
+    filtered_class_names = [class_names[i] for i in keep_indices]
+    
+    if verbose:
+        print(f"    [filter] Kept {len(keep_indices)}/{len(class_names)} detections")
+    
+    return filtered_masks, filtered_track_ids, filtered_class_names
+
 
 class GlobalObjectRegistry:
     """
@@ -1474,7 +1561,8 @@ def create_3d_objects_with_tracking(
     o3_nb_neighbors,
     o3std_ratio,
     object_registry: GlobalObjectRegistry,
-    class_names: list = None
+    class_names: list = None,
+    skip_classes: set = None
 ):
     """
     Enhanced version of create_3d_objects that uses GlobalObjectRegistry for tracking.
@@ -1496,11 +1584,18 @@ def create_3d_objects_with_tracking(
         o3std_ratio: Open3D outlier removal param
         object_registry: GlobalObjectRegistry instance
         class_names: Optional list of class names corresponding to track_ids
+        skip_classes: Optional set of class names to filter out (uses DEFAULT_SKIP_CLASSES if None)
     
     Returns:
         frame_objs: List of LIGHTWEIGHT objects (bbox only) for edge prediction
         graph: NetworkX graph with nodes having global IDs and bbox data
     """
+    
+    # Filter out unwanted classes if class_names provided
+    if class_names is not None and skip_classes is not None:
+        masks_clean, track_ids, class_names = filter_detections_by_class(
+            masks_clean, track_ids, class_names, skip_classes, verbose=False
+        )
     
     # Step 1: Extract detections from current frame
     detections = []
