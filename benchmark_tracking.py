@@ -743,6 +743,26 @@ class TrackingBenchmark:
             vis_save_dir = vis_cfg.get('save_dir', None)
             
             if vis_enabled and (frame_idx % vis_interval == 0 or frame_idx == 0):
+                # === PRINT REGISTRY STATE ===
+                print(f"\n{'='*80}")
+                print(f"GLOBAL OBJECT REGISTRY STATE - Frame {frame_idx}")
+                print(f"{'='*80}")
+                all_tracked = object_registry.get_all_objects()
+                print(f"{'Global ID':<12} {'Class Name':<20} {'Visible':<10} {'First Seen':<12} {'Last Seen':<12} {'Obs Count':<10}")
+                print(f"{'-'*80}")
+                for gid, obj_data in sorted(all_tracked.items()):
+                    class_name = obj_data.get('class_name', 'N/A') or 'N/A'
+                    visible = obj_data.get('visible_current_frame', False)
+                    first_seen = obj_data.get('first_seen_frame', -1)
+                    last_seen = obj_data.get('last_seen_frame', -1)
+                    obs_count = obj_data.get('observation_count', 0)
+                    vis_str = "YES" if visible else "no"
+                    print(f"{gid:<12} {class_name:<20} {vis_str:<10} {first_seen:<12} {last_seen:<12} {obs_count:<10}")
+                print(f"{'-'*80}")
+                summary = object_registry.get_tracking_summary()
+                print(f"Total: {summary['total_objects']} objects | Visible: {summary['visible_objects']} | Invisible: {summary['invisible_objects']}")
+                print(f"{'='*80}\n")
+                
                 # Load RGB for visualization
                 rgb_image = cv2.imread(rgb_cur_path)
                 if rgb_image is not None:
