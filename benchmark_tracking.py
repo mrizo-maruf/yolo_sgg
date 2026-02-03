@@ -1251,7 +1251,7 @@ if __name__ == "__main__":
         # that shouldn't be tracked as individual objects
         'skip_classes': [
             # Structural elements
-            'wall', 'floor', 'ceiling', 'roof',
+            'wall', 'floor', 'ceiling', 'roof', 'kitchen floor', 'carpet'
             'stairway', 'stairs', 'stair', 'escalator', 'elevator',
             
             # Rooms and spaces
@@ -1265,7 +1265,7 @@ if __name__ == "__main__":
             'mall', 'store', 'shop', 'market', 'supermarket',
             'restaurant', 'cafe', 'bar', 'gym', 'pool',
             'parking lot', 'parking', 'road', 'street', 'sidewalk',
-            'highway', 'bridge', 'tunnel', 'court'
+            'highway', 'bridge', 'tunnel', 'court', 'courtyard',
             
             # Outdoor elements
             'sky', 'ground', 'grass', 'field', 'lawn',
