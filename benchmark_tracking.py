@@ -1340,21 +1340,31 @@ class TrackingBenchmark:
         print("\n" + "="*60)
 
 
-def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
+def run_multi_scene_benchmark(scenes: list, cfg: OmegaConf, output_dir: str = None) -> Dict:
     """
     Run benchmark on multiple scenes and aggregate results.
     
     Args:
-        scenes_root: Path to directory containing scene folders
+        scenes: List of scene paths to benchmark
         cfg: Configuration
+        output_dir: Directory to save aggregated results (default: first scene's parent)
         
     Returns:
         aggregated_metrics: Dict with per-scene and overall metrics
     """
-    scenes_root = Path(scenes_root)
-    scene_dirs = sorted([d for d in scenes_root.iterdir() if d.is_dir()])
+    # Convert to Path objects
+    scene_dirs = [Path(s) for s in scenes]
     
-    print(f"\nFound {len(scene_dirs)} potential scenes to benchmark")
+    # Filter to only existing directories
+    valid_scenes = []
+    for scene_dir in scene_dirs:
+        if scene_dir.exists() and scene_dir.is_dir():
+            valid_scenes.append(scene_dir)
+        else:
+            print(f"[WARN] Scene path does not exist: {scene_dir}")
+    
+    scene_dirs = valid_scenes
+    print(f"\nFound {len(scene_dirs)} valid scenes to benchmark")
     
     all_results = {}
     aggregated = {
@@ -1448,6 +1458,7 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
         'per_scene': all_results,
         'overall': overall,
         'num_scenes': len(all_results),
+        'output_dir': output_dir or (str(scene_dirs[0].parent) if scene_dirs else '.'),
     }
 
 
@@ -1651,10 +1662,33 @@ if __name__ == "__main__":
     # Update paths for your system
     import sys
     
+    # ============================================================
+    # DEFAULT SCENE LIST FOR MULTI-MODE BENCHMARKING
+    # ============================================================
+    # Add your scene paths here for batch benchmarking with --multi
+    DEFAULT_SCENES = [
+        # Example paths - update these for your system:
+        # r"C:\path\to\scene_1",
+        # r"C:\path\to\scene_2",
+        # r"C:\path\to\scene_3",
+        
+        # Isaac Sim scenes:
+        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02",
+        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_complex",
+        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_complex_big",
+        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02_straight",
+        r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_03",
+    ]
+    
+    # Output directory for multi-scene results
+    DEFAULT_OUTPUT_DIR = r"C:\rizo\yolo_sgg\benchmark_results"
+    
     # Parse command line arguments
     scene_path = None
     multi_mode = False
     vis_enabled = False
+    custom_scenes = ['scene_1', 'scene_2', 'scene_3', 'scene_7', 'nk_scene_complex', 'cabinet_simple']  # For command-line specified scenes
+    output_dir = None
     
     for arg in sys.argv[1:]:
         if arg == '--multi':
@@ -1673,6 +1707,11 @@ if __name__ == "__main__":
             cfg.visualization.interval = int(arg.split('=')[1])
         elif arg.startswith('--vis-save='):
             cfg.visualization.save_dir = arg.split('=')[1]
+        elif arg.startswith('--output='):
+            output_dir = arg.split('=')[1]
+        elif arg.startswith('--scene='):
+            # Add individual scene to custom list
+            custom_scenes.append(arg.split('=')[1])
         elif not arg.startswith('--'):
             scene_path = arg
     
@@ -1680,26 +1719,50 @@ if __name__ == "__main__":
     if vis_enabled:
         cfg.visualization.enabled = True
     
-    if scene_path is None:
+    if scene_path is None and not multi_mode:
         # Default scene path - update this!
-        scene_path = "/home/maribjonov_mr/IsaacSim_bench/scene_3"
+        scene_path = r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02"
         print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
-        print(f"       python benchmark_tracking.py <scenes_root> --multi")
+        print(f"       python benchmark_tracking.py --multi [options]")
         print(f"\nOptions:")
+        print(f"  --multi               Run multi-scene benchmark on DEFAULT_SCENES")
+        print(f"  --scene=PATH          Add scene to benchmark list (can use multiple times)")
+        print(f"  --output=DIR          Output directory for multi-scene results")
         print(f"  --vis, --visualize    Enable debug visualization")
         print(f"  --vis-2d              Enable only 2D visualization (YOLO masks)")
         print(f"  --vis-3d              Enable only 3D visualization (Open3D)")
         print(f"  --vis-interval=N      Visualize every N frames (default: 10)")
         print(f"  --vis-save=DIR        Save visualizations to directory")
-        print(f"  --multi               Run multi-scene benchmark")
-        print(f"\nUsing default: {scene_path}")
+        print(f"\nDefault scenes for --multi mode:")
+        for s in DEFAULT_SCENES:
+            print(f"  - {s}")
+        print(f"\nUsing default single scene: {scene_path}")
     
     # Check for multi-scene mode
     if multi_mode:
-        # Multi-scene benchmark
-        results = run_multi_scene_benchmark(scene_path, cfg)
-        output_path = Path(scene_path) / "benchmark_results_all.json"
+        # Determine which scenes to benchmark
+        if custom_scenes:
+            scenes_to_run = custom_scenes
+            print(f"\nUsing {len(custom_scenes)} custom scenes from command line")
+        else:
+            scenes_to_run = DEFAULT_SCENES
+            print(f"\nUsing {len(DEFAULT_SCENES)} default scenes")
+        
+        # Determine output directory
+        if output_dir is None:
+            output_dir = DEFAULT_OUTPUT_DIR
+        
+        # Create output directory
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Run multi-scene benchmark
+        results = run_multi_scene_benchmark(scenes_to_run, cfg, output_dir)
+        
+        # Save aggregated results
+        output_path = Path(output_dir) / "benchmark_results_all.json"
         save_results(results, str(output_path))
+        
+        print(f"\nResults saved to: {output_dir}")
     else:
         # Single scene benchmark
         benchmark = TrackingBenchmark(cfg)
