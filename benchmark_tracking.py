@@ -668,10 +668,14 @@ class TrackingBenchmark:
             
             # === FILTER OUT UNWANTED CLASSES ===
             skip_classes = set(c.lower() for c in self.cfg.get('skip_classes', []))
+            print(f"class names: {class_names}")
             if skip_classes and class_names is not None:
                 # Build keep mask
                 keep_indices = []
                 for i, cls_name in enumerate(class_names):
+                    if ('room' in cls_name) or ('shot' in cls_name) \
+                        or ('carpet' in cls_name) or ('yard' in cls_name) or ('floor' in cls_name): continue
+
                     if cls_name is None:
                         keep_indices.append(i)  # Keep if no class name
                     elif cls_name.lower() not in skip_classes:
@@ -1277,7 +1281,7 @@ if __name__ == "__main__":
             # Rooms and spaces
             'room', 'kitchen', 'bathroom', 'bedroom', 'living room',
             'dining room', 'office', 'hallway', 'corridor', 'lobby',
-            'garage', 'basement', 'attic',
+            'garage', 'basement', 'attic', 'recreation room', 'studio shot', 'hotel room',
             
             # Large venues/areas
             'basketball court', 'tennis court', 'football field',
