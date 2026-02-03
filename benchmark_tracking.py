@@ -1062,6 +1062,14 @@ class TrackingBenchmark:
             results['registry_T_mIoU'] = 0.0
             results['registry_T_SR'] = 0.0
             results['registry_ID_consistency'] = 0.0
+            results['registry_MOTA'] = 0.0
+            results['registry_MOTP'] = 0.0
+            results['registry_FN'] = 0
+            results['registry_FP'] = 0
+            results['registry_ID_switches'] = 0
+            results['registry_matched_objects'] = 0
+            results['registry_total_gt_objects'] = 0
+            results['registry_total_tracked_objects'] = 0
             return results
         
         # Get all registry objects with masks
@@ -1077,8 +1085,14 @@ class TrackingBenchmark:
             results['registry_T_mIoU'] = 0.0
             results['registry_T_SR'] = 0.0
             results['registry_ID_consistency'] = 0.0
+            results['registry_MOTA'] = 0.0
+            results['registry_MOTP'] = 0.0
+            results['registry_FN'] = 0
+            results['registry_FP'] = 0
+            results['registry_ID_switches'] = 0
             results['registry_matched_objects'] = 0
             results['registry_total_gt_objects'] = 0
+            results['registry_total_tracked_objects'] = 0
             return results
         
         # Match GT objects to registry objects using mask IoU
@@ -1095,8 +1109,14 @@ class TrackingBenchmark:
             results['registry_T_mIoU'] = 0.0
             results['registry_T_SR'] = 0.0
             results['registry_ID_consistency'] = 0.0
+            results['registry_MOTA'] = 0.0
+            results['registry_MOTP'] = 0.0
+            results['registry_FN'] = len(gt_ids)
+            results['registry_FP'] = 0
+            results['registry_ID_switches'] = 0
             results['registry_matched_objects'] = 0
             results['registry_total_gt_objects'] = len(gt_ids)
+            results['registry_total_tracked_objects'] = 0
             return results
         
         iou_matrix = np.zeros((len(gt_ids), len(registry_ids)))
@@ -1206,16 +1226,66 @@ class TrackingBenchmark:
             results['registry_ID_consistency'] = 0.0
             results['registry_ID_consistency_per_object'] = {}
         
+        # ==========================================================================
+        # REGISTRY-BASED MOTA / MOTP
+        # ==========================================================================
+        # These metrics evaluate tracking quality based on the final registry state
+        # rather than per-frame counts, giving a holistic view of pipeline performance.
+        
+        n_registry = len(registry_objects)
+        
+        # Registry FN: GT objects NOT matched to any registry object
+        registry_fn = n_gt - n_matched
+        
+        # Registry FP: Registry objects NOT matched to any GT object  
+        registry_fp = n_registry - len(used_registry_ids)
+        
+        # Registry ID Switches: For matched GT objects, count how many times
+        # the per-frame predicted ID changed (transitions between different IDs)
+        registry_id_switches = 0
+        for gt_id, (matched_reg_id, _) in gt_to_registry.items():
+            pred_ids = self.metrics.per_object_pred_ids.get(gt_id, [])
+            valid_ids = [pid for pid in pred_ids if pid >= 0]
+            
+            if len(valid_ids) >= 2:
+                # Count transitions between different IDs
+                for i in range(1, len(valid_ids)):
+                    if valid_ids[i] != valid_ids[i-1]:
+                        registry_id_switches += 1
+        
+        # Registry MOTA: Based on unique objects, not frame instances
+        # MOTA = 1 - (FN + FP + IDSW) / N_gt
+        if n_gt > 0:
+            registry_mota = 1.0 - (registry_fn + registry_fp + registry_id_switches) / n_gt
+            results['registry_MOTA'] = float(max(-1.0, registry_mota))
+        else:
+            results['registry_MOTA'] = 0.0
+        
+        # Registry MOTP: Mean IoU of matched GT-registry pairs (same as registry_T_mIoU)
+        results['registry_MOTP'] = results['registry_T_mIoU']
+        
+        # Store breakdown for analysis
+        results['registry_FN'] = registry_fn
+        results['registry_FP'] = registry_fp
+        results['registry_ID_switches'] = registry_id_switches
+        
         # Additional statistics
         results['registry_matched_objects'] = n_matched
         results['registry_total_gt_objects'] = n_gt
-        results['registry_total_tracked_objects'] = len(registry_objects)
+        results['registry_total_tracked_objects'] = n_registry
         
         # Print summary
-        print(f"  Matched: {n_matched}/{n_gt} GT objects ({results['registry_coverage']*100:.1f}%)")
-        print(f"  Registry T-mIoU: {results['registry_T_mIoU']:.4f}")
-        print(f"  Registry T-SR: {results['registry_T_SR']:.4f}")
-        print(f"  Registry ID Consistency: {results['registry_ID_consistency']:.4f}")
+        print(f"\n  Registry Matching Results:")
+        print(f"    Matched: {n_matched}/{n_gt} GT objects ({results['registry_coverage']*100:.1f}%)")
+        print(f"    FN (unmatched GT): {registry_fn}")
+        print(f"    FP (unmatched registry): {registry_fp}")
+        print(f"    ID Switches: {registry_id_switches}")
+        print(f"\n  Registry Metrics:")
+        print(f"    Registry MOTA: {results['registry_MOTA']:.4f}")
+        print(f"    Registry MOTP: {results['registry_MOTP']:.4f}")
+        print(f"    Registry T-mIoU: {results['registry_T_mIoU']:.4f}")
+        print(f"    Registry T-SR: {results['registry_T_SR']:.4f}")
+        print(f"    Registry ID Consistency: {results['registry_ID_consistency']:.4f}")
         
         return results
     
@@ -1242,6 +1312,9 @@ class TrackingBenchmark:
         print(f"  Registry T-mIoU:               {metrics.get('registry_T_mIoU', 0):.4f} ± {metrics.get('registry_T_mIoU_std', 0):.4f}")
         print(f"  Registry T-SR:                 {metrics.get('registry_T_SR', 0):.4f}")
         print(f"  Registry ID Consistency:       {metrics.get('registry_ID_consistency', 0):.4f}")
+        print(f"  Registry MOTA:                 {metrics.get('registry_MOTA', 0):.4f}")
+        print(f"  Registry MOTP:                 {metrics.get('registry_MOTP', 0):.4f}")
+        print(f"    (FN={metrics.get('registry_FN', 0)}, FP={metrics.get('registry_FP', 0)}, IDSW={metrics.get('registry_ID_switches', 0)})")
         print(f"  Total Tracked Objects:         {metrics.get('registry_total_tracked_objects', 0)}")
         
         print(f"\n{'='*40}")
@@ -1297,6 +1370,8 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
         'registry_T_mIoU': [],
         'registry_T_SR': [],
         'registry_ID_consistency': [],
+        'registry_MOTA': [],
+        'registry_MOTP': [],
     }
     
     for scene_dir in scene_dirs:
@@ -1355,7 +1430,8 @@ def run_multi_scene_benchmark(scenes_root: str, cfg: OmegaConf) -> Dict:
     print("REGISTRY-BASED METRICS")
     print(f"{'='*40}")
     
-    registry_keys = ['registry_coverage', 'registry_T_mIoU', 'registry_T_SR', 'registry_ID_consistency']
+    registry_keys = ['registry_coverage', 'registry_T_mIoU', 'registry_T_SR', 
+                     'registry_ID_consistency', 'registry_MOTA', 'registry_MOTP']
     for key in registry_keys:
         values = aggregated.get(key, [])
         if values:
