@@ -151,7 +151,7 @@ class IsaacSimDataLoader:
             'background', 'unlabelled', 'unlabeled', 'unknown',
             
             # Structural elements
-            'wall', 'floor', 'ceiling', 'roof'
+            'wall', 'floor', 'ground', 'roof'
         ]
         self.skip_labels = set(l.lower() for l in (skip_labels if skip_labels is not None else DEFAULT_SKIP_LABELS))
         
@@ -443,10 +443,14 @@ class IsaacSimDataLoader:
             prim_path = box_3d['prim_path']
             
             # Skip unwanted labels if filtering is enabled
-            if apply_filter and label.lower() in self.skip_labels:
-                skipped_labels.append(label)
-                continue
-            
+            if apply_filter:
+                for l in self.skip_labels:
+                    if l in label.lower():
+                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] SKIPPING object with label '{label}' (track_id={track_id})")
+                        skipped_labels.append(label)
+                        continue
+            print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] NOT SKIPPING object with label '{label}' (track_id={track_id})")
+
             # Find corresponding 2D bbox
             box_2d = prim_to_bbox_2d.get(prim_path, {})
             
