@@ -694,7 +694,7 @@ class TrackingBenchmark:
                 keep_indices = []
                 for i, cls_name in enumerate(class_names):
                     if ('room' in cls_name) or ('shot' in cls_name) \
-                        or ('carpet' in cls_name) or ('yard' in cls_name) or ('floor' in cls_name): continue
+                        or ('carpet' in cls_name) or ('yard' in cls_name) or ('floor' in cls_name) or ('mat' in cls_name): continue
 
                     if cls_name is None:
                         keep_indices.append(i)  # Keep if no class name
@@ -1585,7 +1585,7 @@ if __name__ == "__main__":
         'iou': 0.5,
         
         # Mask preprocessing
-        'kernel_size': 17,
+        'kernel_size': 11,
         'alpha': 0.7,
         'fast_mask': True,
         
@@ -1648,7 +1648,7 @@ if __name__ == "__main__":
             # What to visualize
             'show_2d': True,      # YOLO masks with class IDs & global IDs
             'show_3d': True,      # Open3D: all objects with BLUE=visible, RED=not visible
-            'show_comparison': False,  # GT vs Predictions side-by-side
+            'show_comparison': True,  # GT vs Predictions side-by-side
             
             # Visualization frequency
             'interval': 10,       # Visualize every N frames (1 = every frame)

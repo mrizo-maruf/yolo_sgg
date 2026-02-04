@@ -151,7 +151,7 @@ class IsaacSimDataLoader:
             'background', 'unlabelled', 'unlabeled', 'unknown',
             
             # Structural elements
-            'wall', 'floor', 'ceiling', 'roof', 'door', 'window'
+            'wall', 'floor', 'ceiling', 'roof'
         ]
         self.skip_labels = set(l.lower() for l in (skip_labels if skip_labels is not None else DEFAULT_SKIP_LABELS))
         
