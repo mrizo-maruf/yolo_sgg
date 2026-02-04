@@ -498,7 +498,6 @@ def compute_bbox_iou_2d(bbox1: List[float], bbox2: List[float]) -> float:
     
     return intersection / union
 
-
 def match_predictions_to_gt(gt_objects: List[GTObject], 
                             pred_objects: List[PredObject],
                             iou_threshold: float = 0.3) -> Tuple[Dict[int, int], Dict[int, float]]:
@@ -509,6 +508,7 @@ def match_predictions_to_gt(gt_objects: List[GTObject],
         mapping: Dict[gt_track_id, pred_global_id]
         ious: Dict[gt_track_id, iou_score]
     """
+    print(f"[DEBUG] branch_tracking.match_reds_to_gt gt we got: len {len(gt_objects)}")
     if not gt_objects or not pred_objects:
         return {}, {}
     
@@ -519,6 +519,7 @@ def match_predictions_to_gt(gt_objects: List[GTObject],
     iou_matrix = np.zeros((n_gt, n_pred))
     
     for i, gt_obj in enumerate(gt_objects):
+        print(f"[DEBUG benchmark_tracking.match_pred_to_gt] GT: t_id {gt_obj.track_id}, class_name: {gt_obj.class_name}, sem_id:{gt_obj.semantic_id}")
         for j, pred_obj in enumerate(pred_objects):
             iou = compute_mask_iou(gt_obj.mask, pred_obj.mask)
             iou_matrix[i, j] = iou
@@ -552,6 +553,7 @@ def match_predictions_to_gt(gt_objects: List[GTObject],
         used_gt.add(gt_idx)
         used_pred.add(pred_idx)
     
+    print(f"[DEBUG: benchmarking_tracking]: mappings from pred -> gt: {mapping}")
     return mapping, ious
 
 
@@ -592,8 +594,8 @@ class TrackingBenchmark:
         print(f"Using {len(skip_classes)} skip classes for GT filtering")
         
         # Load GT dataset using IsaacSimDataLoader with same skip labels as pipeline
-        gt_loader = IsaacSimDataLoader(scene_path, skip_labels=skip_classes if skip_classes else None)
-        gt_loader.print_info()
+        gt_loader = IsaacSimDataLoader(scene_path)
+        # gt_loader.print_info()
         
         n_frames = gt_loader.get_frame_count()
         poses = gt_loader.get_poses()
@@ -702,14 +704,14 @@ class TrackingBenchmark:
                         keep_indices.append(i)
                     else:
                         # Debug: optionally log filtered detections
-                        if self.cfg.get('debug_skip_classes', False):
-                            print(f"  [Frame {frame_idx}] Skipping class: {cls_name}")
+                        if self.cfg.get('debug_skip_classes', True):
+                            print(f"[DEBUG: benchmark_tracking.run_benchmark] [Frame {frame_idx}] Skipping class: {cls_name}")
                 
                 # Apply filter
                 if len(keep_indices) < len(class_names):
                     filtered_count = len(class_names) - len(keep_indices)
-                    if self.cfg.get('debug_skip_classes', False):
-                        print(f"  [Frame {frame_idx}] Filtered {filtered_count} detections")
+                    if self.cfg.get('debug_skip_classes', True):
+                        print(f"[DEBUG: benchmark_tracking.run_benchmark] [Frame {frame_idx}] Filtered {filtered_count} detections")
                     
                     # Filter all arrays
                     masks_clean = [masks_clean[i] for i in keep_indices] if masks_clean else []
@@ -1601,7 +1603,7 @@ if __name__ == "__main__":
         'tracking_inactive_limit': 0,
         'tracking_volume_ratio_threshold': 0.1,
         'reprojection_visibility_threshold': 0.2,
-        
+        'debug_skip_classes': True,
         # ============================================================
         # CLASSES TO SKIP/FILTER OUT
         # ============================================================
@@ -1610,7 +1612,7 @@ if __name__ == "__main__":
         'skip_classes': [
             # Structural elements
             'wall', 'floor', 'ceiling', 'roof', 'kitchen floor', 'carpet'
-            'stairway', 'stairs', 'stair', 'escalator', 'elevator',
+            'stairway', 'stairs', 'stair', 'escalator', 'elevator', 'resort'
             
             # Rooms and spaces
             'room', 'kitchen', 'bathroom', 'bedroom', 'living room',

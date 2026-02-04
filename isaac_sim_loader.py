@@ -444,12 +444,17 @@ class IsaacSimDataLoader:
             
             # Skip unwanted labels if filtering is enabled
             if apply_filter:
+                to_continue = False
                 for l in self.skip_labels:
                     if l in label.lower():
-                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] SKIPPING object with label '{label}' (track_id={track_id})")
+                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} SKIPPING object with label '{label}' (track_id={track_id})")
+                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} l({l}) in label({label.lower()})")
                         skipped_labels.append(label)
+                        to_continue = True
                         continue
-            print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] NOT SKIPPING object with label '{label}' (track_id={track_id})")
+                if to_continue:
+                    continue
+                print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} NOT SKIPPING object with label '{label}' (track_id={track_id})")
 
             # Find corresponding 2D bbox
             box_2d = prim_to_bbox_2d.get(prim_path, {})
@@ -476,7 +481,7 @@ class IsaacSimDataLoader:
                 color_bgr=color_bgr,
             )
             gt_objects.append(gt_obj)
-        
+        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] returning gt_object length {len(gt_objects)}")
         return gt_objects
     
     def _extract_mask_for_object(
