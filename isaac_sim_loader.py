@@ -410,7 +410,8 @@ class IsaacSimDataLoader:
     
     def get_gt_objects(self, frame_idx: int, 
                        include_masks: bool = True,
-                       apply_filter: bool = True) -> List[GTObject]:
+                       apply_filter: bool = True,
+                       debug_visualize: bool = False) -> List[GTObject]:
         """
         Get all ground truth objects for a frame.
         
@@ -418,12 +419,18 @@ class IsaacSimDataLoader:
             frame_idx: Frame index
             include_masks: Whether to extract masks from segmentation
             apply_filter: Whether to filter out skip_labels (default True)
+            debug_visualize: Whether to show debug visualization (RGB + masks + class names)
             
         Returns:
             List of GTObject instances
         """
         # Load bboxes
         bboxes = self.load_bboxes(frame_idx)
+        
+        # Load RGB for debug visualization
+        rgb_debug = None
+        if debug_visualize:
+            rgb_debug = self.load_rgb(frame_idx)
         
         # Load segmentation if needed
         seg_map, seg_info = None, {}
@@ -482,7 +489,84 @@ class IsaacSimDataLoader:
             )
             gt_objects.append(gt_obj)
         print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] returning gt_object length {len(gt_objects)}")
+        
+        # Debug visualization: RGB + semantic masks + class names
+        if debug_visualize and rgb_debug is not None:
+            self._visualize_gt_objects_debug(rgb_debug, gt_objects, frame_idx)
+        
         return gt_objects
+    
+    def _visualize_gt_objects_debug(
+        self,
+        rgb: np.ndarray,
+        gt_objects: List[GTObject],
+        frame_idx: int,
+        alpha: float = 0.5,
+        window_name: str = "GT Objects Debug"
+    ) -> None:
+        """
+        Debug visualization showing RGB + semantic masks + class names.
+        
+        Args:
+            rgb: BGR image (H, W, 3)
+            gt_objects: List of GTObject instances
+            frame_idx: Frame index for title
+            alpha: Mask overlay alpha (0-1)
+            window_name: OpenCV window name
+        """
+        if rgb is None:
+            print("DEBUG: No RGB image available for visualization")
+            return
+        
+        vis_img = rgb.copy()
+        mask_overlay = np.zeros_like(rgb)
+        
+        for obj in gt_objects:
+            # Generate consistent color based on track_id
+            np.random.seed(obj.track_id)
+            color = tuple(int(c) for c in np.random.randint(50, 255, 3))
+            
+            # Draw mask if available
+            if obj.mask is not None:
+                mask_bool = obj.mask > 0
+                mask_overlay[mask_bool] = color
+            
+            # Draw 2D bbox if available
+            if obj.bbox_2d is not None:
+                x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
+                cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
+                
+                # Draw class name label
+                label_text = f"{obj.class_name} (ID:{obj.track_id})"
+                (tw, th), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                
+                # Background rectangle for text
+                cv2.rectangle(vis_img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
+                cv2.putText(vis_img, label_text, (x1 + 2, y1 - 4), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            elif obj.mask is not None:
+                # If no bbox, place label at mask centroid
+                mask_points = np.where(obj.mask > 0)
+                if len(mask_points[0]) > 0:
+                    cy, cx = int(np.mean(mask_points[0])), int(np.mean(mask_points[1]))
+                    label_text = f"{obj.class_name} (ID:{obj.track_id})"
+                    cv2.putText(vis_img, label_text, (cx - 30, cy), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        
+        # Blend mask overlay with original image
+        vis_img = cv2.addWeighted(vis_img, 1.0, mask_overlay, alpha, 0)
+        
+        # Add frame info
+        info_text = f"Frame {frame_idx} | {len(gt_objects)} objects"
+        cv2.putText(vis_img, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                   1.0, (0, 255, 0), 2, cv2.LINE_AA)
+        
+        # Show image
+        cv2.imshow(window_name, vis_img)
+        print(f"DEBUG[Visualization] Press any key to continue, 'q' to quit visualization...")
+        key = cv2.waitKey(0) & 0xFF
+        if key == ord('q'):
+            cv2.destroyAllWindows()
     
     def _extract_mask_for_object(
         self, 
