@@ -411,7 +411,7 @@ class IsaacSimDataLoader:
     def get_gt_objects(self, frame_idx: int, 
                        include_masks: bool = True,
                        apply_filter: bool = True,
-                       debug_visualize: bool = False) -> List[GTObject]:
+                       debug_visualize: bool = True) -> List[GTObject]:
         """
         Get all ground truth objects for a frame.
         
@@ -561,6 +561,10 @@ class IsaacSimDataLoader:
         cv2.putText(vis_img, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
                    1.0, (0, 255, 0), 2, cv2.LINE_AA)
         
+        # Save image
+        out_path = f"/home/maribjonov_mr/metr/yolo_sgg/vis_frame_{frame_idx:05d}.png"
+        cv2.imwrite(out_path, vis_img)
+
         # Show image
         cv2.imshow(window_name, vis_img)
         print(f"DEBUG[Visualization] Press any key to continue, 'q' to quit visualization...")
