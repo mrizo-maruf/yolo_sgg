@@ -582,6 +582,9 @@ class IsaacSimDataLoader:
         """
         Extract binary mask for an object from segmentation map.
         
+        Uses semantic_id to look up the correct color from seg_info (most reliable).
+        Falls back to bbox-based color detection only if semantic_id lookup fails.
+        
         Returns:
             mask: Binary mask (H, W) with values 0/255
             color_bgr: The segmentation color used
@@ -591,7 +594,25 @@ class IsaacSimDataLoader:
         
         H, W = seg_map.shape[:2]
         
-        # Get 2D bbox
+        # PRIMARY METHOD: Use semantic_id to get exact color from seg_info
+        semantic_id = box_3d.get('semantic_id', -1)
+        target_color = None
+        
+        if semantic_id >= 0 and semantic_id in seg_info:
+            color_bgr = seg_info[semantic_id].get('color_bgr')
+            if color_bgr and not all(c == 0 for c in color_bgr):
+                target_color = np.array(color_bgr, dtype=np.uint8)
+                print(f"DEBUG[_extract_mask] Using semantic_id={semantic_id} -> color={color_bgr}")
+        
+        # If we have a target color from semantic_id, use it directly
+        if target_color is not None:
+            mask = np.all(seg_map == target_color, axis=2).astype(np.uint8) * 255
+            if mask.sum() > 0:
+                return mask, tuple(target_color.tolist())
+            else:
+                print(f"DEBUG[_extract_mask] semantic_id color found no pixels, falling back to bbox method")
+        
+        # FALLBACK: Find dominant color within bbox (less reliable)
         xyxy = box_2d.get('xyxy', [0, 0, W, H])
         if xyxy is None:
             xyxy = [0, 0, W, H]
@@ -602,25 +623,43 @@ class IsaacSimDataLoader:
         if x2 <= x1 or y2 <= y1:
             return None, None
         
+        # Build set of colors that belong to SKIPPED classes (to exclude them)
+        skipped_colors = set()
+        for sem_id, info in seg_info.items():
+            cls_name = info.get('class', '')
+            for skip_label in self.skip_labels:
+                if skip_label in cls_name.lower():
+                    color_tuple = tuple(info.get('color_bgr', [0, 0, 0]))
+                    if color_tuple != (0, 0, 0):
+                        skipped_colors.add(color_tuple)
+                    break
+        
         # Crop region
         crop = seg_map[y1:y2, x1:x2]
         
-        # Find unique colors in crop (excluding background black)
+        # Find unique colors in crop
         colors = crop.reshape(-1, 3)
         unique_colors, counts = np.unique(colors, axis=0, return_counts=True)
         
-        # Filter out background (black) and find dominant color
+        # Filter out background (black) and skipped colors, find dominant valid color
         best_color = None
         best_count = 0
         
         for color, count in zip(unique_colors, counts):
-            if np.all(color == 0):
+            color_tuple = tuple(color.tolist())
+            # Skip black (background)
+            if color_tuple == (0, 0, 0):
+                continue
+            # Skip colors belonging to filtered classes (wall, floor, etc.)
+            if color_tuple in skipped_colors:
+                print(f"DEBUG[_extract_mask] Skipping color {color_tuple} (belongs to skipped class)")
                 continue
             if count > best_count:
                 best_count = count
                 best_color = color
         
         if best_color is None:
+            print(f"DEBUG[_extract_mask] No valid color found in bbox for object")
             return None, None
         
         # Create full mask from this color
