@@ -1,18 +1,26 @@
 """
-Visualize IsaacSim Replicator 3D bboxes + point cloud in Open3D.
+Visualize IsaacSim Replicator data with Open3D (3D) and Matplotlib (2D).
+
+Features:
+- 3D visualization: Point cloud + 3D bounding boxes in Open3D
+- 2D visualization: RGB + semantic masks + 2D bboxes + track IDs + semantic IDs in Matplotlib
 
 Assumptions:
 - You saved per-frame:
     rgb/frameXXXXXX.jpg
     depth/depthXXXXXX.png   (uint16, mapped linearly from [MIN_DEPTH, MAX_DEPTH])
-    bbox/bboxesXXXXXX_info.json
+    bbox/bboxesXXXXXX_info.json (contains both 2D and 3D bboxes)
+    seg/semanticXXXXXX.png + semanticXXXXXX_info.json (semantic segmentation)
     traj.txt                (optional; currently ROS camera pose flattened 4x4 per frame)
 
 - Your JSON format (as in your code):
   boxes["bboxes"]["bbox_3d"]["boxes"] is a list of dicts with:
     - aabb_xyzmin_xyzmax: [x_min,y_min,z_min,x_max,y_max,z_max]
     - transform_4x4: 4x4 (optional usage)
-    - prim_path, label, track_id, etc.
+    - prim_path, label, track_id, semantic_id, etc.
+  boxes["bboxes"]["bbox_2d_tight"]["boxes"] (or bbox_2d_loose/bbox_2d) with:
+    - xyxy: [x1, y1, x2, y2]
+    - track_id, semantic_id, label, prim_path, etc.
 
 This script supports TWO common cases:
   (A) bbox extents already in WORLD coords -> set BBOX_FRAME="world"
@@ -27,6 +35,9 @@ import glob
 import numpy as np
 import cv2
 import open3d as o3d
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import hsv_to_rgb
 
 # -------------------------
 # -------------------------
@@ -61,6 +72,15 @@ USE_TRAJ = True
 SWAP_YZ = False  # try True if axes look rotated
 MAX_BOX_EDGE = 20.0  # meters; filter very large boxes
 IGNORE_PRIM_PREFIXES = ["/World/env"]
+
+# 2D Visualization settings (matplotlib)
+SHOW_2D_VIS = True  # Show matplotlib 2D visualization
+SHOW_SEMANTIC_MASK = True  # Show semantic segmentation masks
+SHOW_2D_BBOX = True  # Show 2D bounding boxes
+SHOW_TRACK_ID = True  # Show track IDs on boxes
+SHOW_SEMANTIC_ID = True  # Show semantic IDs on boxes
+MASK_ALPHA = 0.4  # Transparency of semantic masks
+SHOW_3D_VIS = True  # Show Open3D 3D visualization
 
 
 # -------------------------
@@ -105,6 +125,304 @@ def load_boxes_json(json_path: str):
         data = json.load(f)
     boxes = data["bboxes"]["bbox_3d"]["boxes"]
     return boxes
+
+
+def load_full_bbox_json(json_path: str):
+    """Load the full bbox JSON including 2D and 3D bboxes."""
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    return data
+
+
+def load_2d_bboxes(json_path: str):
+    """
+    Load 2D bounding boxes from bbox JSON.
+    
+    Returns:
+        List of dicts with keys: xyxy, track_id, semantic_id, label, prim_path
+    """
+    data = load_full_bbox_json(json_path)
+    bboxes_2d = []
+    
+    if "bboxes" not in data:
+        return bboxes_2d
+    
+    # Try different 2D bbox keys
+    for key in ["bbox_2d_tight", "bbox_2d_loose", "bbox_2d"]:
+        if key in data["bboxes"]:
+            for box in data["bboxes"][key].get("boxes", []):
+                bbox_info = {
+                    "xyxy": box.get("xyxy", [0, 0, 0, 0]),
+                    "track_id": box.get("bbox_id", box.get("track_id", -1)),
+                    "semantic_id": box.get("semantic_id", -1),
+                    "label": extract_label(box.get("label", {})),
+                    "prim_path": box.get("prim_path", ""),
+                    "occlusion": box.get("visibility_or_occlusion", box.get("occlusion", 0.0))
+                }
+                bboxes_2d.append(bbox_info)
+            break
+    
+    return bboxes_2d
+
+
+def extract_label(label_data):
+    """Extract label string from various label formats."""
+    if isinstance(label_data, str):
+        return label_data
+    if isinstance(label_data, dict):
+        # Try common keys
+        for key in ["class", "name", "label"]:
+            if key in label_data:
+                return str(label_data[key])
+        # Fallback: return first value
+        for k, v in label_data.items():
+            return str(v) if v else str(k)
+    return "unknown"
+
+
+def load_semantic_mask(seg_dir: str, frame_id: int):
+    """
+    Load semantic segmentation mask and info.
+    
+    Returns:
+        seg_map: (H, W, 3) BGR color-coded segmentation
+        seg_info: Dict mapping semantic_id -> {class, color_bgr}
+    """
+    seg_png_path = os.path.join(seg_dir, f"semantic{frame_id:06d}.png")
+    seg_json_path = os.path.join(seg_dir, f"semantic{frame_id:06d}_info.json")
+    
+    seg_map = None
+    seg_info = {}
+    
+    if os.path.exists(seg_png_path):
+        seg_map = cv2.imread(seg_png_path, cv2.IMREAD_COLOR)
+        if seg_map is not None:
+            seg_map = cv2.cvtColor(seg_map, cv2.COLOR_BGR2RGB)  # Convert to RGB for matplotlib
+    
+    if os.path.exists(seg_json_path):
+        with open(seg_json_path, "r") as f:
+            raw_info = json.load(f)
+            for sem_id_str, info in raw_info.items():
+                try:
+                    sem_id = int(sem_id_str)
+                except ValueError:
+                    continue
+                
+                label_data = info.get("label", {})
+                if isinstance(label_data, str):
+                    cls_name = label_data
+                elif isinstance(label_data, dict):
+                    cls_name = extract_label(label_data)
+                else:
+                    cls_name = str(label_data) if label_data else "unknown"
+                
+                seg_info[sem_id] = {
+                    "class": cls_name,
+                    "color_bgr": tuple(info.get("color_bgr", [0, 0, 0]))
+                }
+    
+    return seg_map, seg_info
+
+
+def generate_color_for_id(id_val: int):
+    """Generate a consistent color for a given ID using golden ratio."""
+    golden_ratio = 0.618033988749895
+    hue = (id_val * golden_ratio) % 1.0
+    saturation = 0.7 + (id_val % 3) * 0.1
+    value = 0.8 + (id_val % 2) * 0.1
+    rgb = hsv_to_rgb([hue, saturation, value])
+    return rgb
+
+
+def extract_mask_for_bbox(seg_map, bbox_2d, seg_info):
+    """
+    Extract a binary mask for a specific bbox based on dominant color in the bbox region.
+    
+    Returns:
+        Binary mask (H, W) with True where the object is
+    """
+    if seg_map is None:
+        return None
+    
+    H, W = seg_map.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in bbox_2d["xyxy"]]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W, x2), min(H, y2)
+    
+    if x2 <= x1 or y2 <= y1:
+        return None
+    
+    # Get the region inside the bbox
+    region = seg_map[y1:y2, x1:x2]
+    
+    # Find the dominant color (excluding black background)
+    region_flat = region.reshape(-1, 3)
+    non_black_mask = np.any(region_flat > 10, axis=1)
+    
+    if not np.any(non_black_mask):
+        return None
+    
+    non_black_colors = region_flat[non_black_mask]
+    
+    # Get most common color
+    unique_colors, counts = np.unique(non_black_colors, axis=0, return_counts=True)
+    dominant_color = unique_colors[np.argmax(counts)]
+    
+    # Create full-image mask for pixels matching dominant color
+    mask = np.all(seg_map == dominant_color, axis=2)
+    
+    return mask
+
+
+def visualize_2d_matplotlib(
+    rgb_path: str,
+    bboxes_2d: list,
+    seg_map: np.ndarray,
+    seg_info: dict,
+    frame_id: int,
+    show_mask: bool = True,
+    show_bbox: bool = True,
+    show_track_id: bool = True,
+    show_semantic_id: bool = True,
+    mask_alpha: float = 0.4,
+    ignore_prefixes: list = None
+):
+    """
+    Visualize RGB image with semantic masks, 2D bboxes, track IDs, and semantic IDs using matplotlib.
+    
+    Args:
+        rgb_path: Path to RGB image
+        bboxes_2d: List of 2D bbox dicts
+        seg_map: Semantic segmentation map (H, W, 3) RGB
+        seg_info: Dict mapping semantic_id -> {class, color_bgr}
+        frame_id: Frame ID for title
+        show_mask: Show semantic masks
+        show_bbox: Show 2D bounding boxes
+        show_track_id: Show track ID labels
+        show_semantic_id: Show semantic ID labels
+        mask_alpha: Transparency for mask overlay
+        ignore_prefixes: List of prim_path prefixes to ignore
+    """
+    if ignore_prefixes is None:
+        ignore_prefixes = []
+    
+    # Load RGB image
+    rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+    if rgb_bgr is None:
+        print(f"Warning: Could not load RGB image: {rgb_path}")
+        return
+    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+    
+    H, W = rgb.shape[:2]
+    
+    # Create figure with subplots
+    if show_mask and seg_map is not None:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        ax_rgb = axes[0]
+        ax_mask = axes[1]
+        ax_overlay = axes[2]
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        ax_rgb = axes[0]
+        ax_overlay = axes[1]
+        ax_mask = None
+    
+    # Panel 1: Raw RGB
+    ax_rgb.imshow(rgb)
+    ax_rgb.set_title(f"RGB - Frame {frame_id}")
+    ax_rgb.axis("off")
+    
+    # Panel 2: Semantic Mask (if available)
+    if ax_mask is not None and seg_map is not None:
+        ax_mask.imshow(seg_map)
+        ax_mask.set_title("Semantic Segmentation")
+        ax_mask.axis("off")
+    
+    # Panel 3: RGB + Masks + 2D Bboxes + Labels
+    overlay_img = rgb.copy().astype(np.float32)
+    mask_overlay = np.zeros((H, W, 3), dtype=np.float32)
+    
+    # Filter boxes
+    filtered_bboxes = []
+    for bbox in bboxes_2d:
+        prim = bbox.get("prim_path", "")
+        skip = False
+        for prefix in ignore_prefixes:
+            if prim.startswith(prefix):
+                skip = True
+                break
+        if not skip:
+            filtered_bboxes.append(bbox)
+    
+    # Draw masks
+    if show_mask and seg_map is not None:
+        for bbox in filtered_bboxes:
+            mask = extract_mask_for_bbox(seg_map, bbox, seg_info)
+            if mask is not None:
+                color = generate_color_for_id(bbox["track_id"])
+                mask_overlay[mask] = color
+        
+        # Blend mask with RGB
+        overlay_img = overlay_img * (1 - mask_alpha) + mask_overlay * mask_alpha * 255
+    
+    overlay_img = np.clip(overlay_img, 0, 255).astype(np.uint8)
+    ax_overlay.imshow(overlay_img)
+    
+    # Draw 2D bboxes and labels
+    for bbox in filtered_bboxes:
+        x1, y1, x2, y2 = bbox["xyxy"]
+        track_id = bbox["track_id"]
+        semantic_id = bbox["semantic_id"]
+        label = bbox["label"]
+        
+        color = generate_color_for_id(track_id)
+        
+        if show_bbox:
+            # Draw bbox rectangle
+            rect = patches.Rectangle(
+                (x1, y1), x2 - x1, y2 - y1,
+                linewidth=2, edgecolor=color, facecolor="none"
+            )
+            ax_overlay.add_patch(rect)
+        
+        # Build label text
+        label_parts = []
+        if show_track_id:
+            label_parts.append(f"T:{track_id}")
+        if show_semantic_id:
+            label_parts.append(f"S:{semantic_id}")
+        label_parts.append(label[:15] if len(label) > 15 else label)  # Truncate long labels
+        
+        label_text = " | ".join(label_parts)
+        
+        # Draw label background and text
+        ax_overlay.text(
+            x1 + 2, y1 - 5,
+            label_text,
+            fontsize=7,
+            color="white",
+            weight="bold",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.8)
+        )
+    
+    title = f"Frame {frame_id} - RGB + "
+    parts = []
+    if show_mask:
+        parts.append("Masks")
+    if show_bbox:
+        parts.append("2D BBoxes")
+    if show_track_id:
+        parts.append("Track IDs")
+    if show_semantic_id:
+        parts.append("Semantic IDs")
+    title += " + ".join(parts)
+    title += f" ({len(filtered_bboxes)} objects)"
+    
+    ax_overlay.set_title(title)
+    ax_overlay.axis("off")
+    
+    plt.tight_layout()
+    plt.show()
 
 def read_traj_pose(frame_id: int, traj_path: str) -> np.ndarray:
     frame_id = frame_id - 1
@@ -248,95 +566,139 @@ def main():
     rgb_path = os.path.join(base_dir, "rgb", f"frame{frame_id:06d}.jpg")
     depth_path = os.path.join(base_dir, "depth", f"depth{frame_id:06d}.png")
     bbox_path = os.path.join(base_dir, "bbox", f"bboxes{frame_id:06d}_info.json")
+    seg_dir = os.path.join(base_dir, "seg")
 
     if not os.path.exists(bbox_path):
         raise FileNotFoundError(bbox_path)
 
-    depth_m = load_depth_meters(depth_path, png_depth_scale, min_depth)
-    color_o3d = rgb_to_o3d(rgb_path)
-    depth_o3d = depth_to_o3d(depth_m)
-
-    intr = make_intrinsics(width, height, fx, fy, cx, cy)
-
-    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        color_o3d,
-        depth_o3d,
-        depth_scale=1.0,
-        depth_trunc=max_depth,
-        convert_rgb_to_intensity=False,
-    )
-
-    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intr)
-
-    if swap_yz:
-        pts = np.asarray(pcd.points)
-        pcd.points = o3d.utility.Vector3dVector(apply_swap_yz(pts))
-
-    boxes = load_boxes_json(bbox_path)
-
-    T_world_from_cam = None
-    if USE_TRAJ:
-        T_world_from_cam = read_traj_pose(frame_id, traj_path)
-        pcd.transform(T_world_from_cam)
-
-    geoms = [pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
-
-    print("\n" + "="*60)
-    print(f"DEBUG: Loaded {len(boxes)} boxes from JSON")
-    print(f"DEBUG: BBOX_FRAME = '{bbox_frame}'")
-    print(f"DEBUG: USE_TRAJ = {USE_TRAJ}")
-    if T_world_from_cam is not None:
-        print(f"DEBUG: Camera translation (from traj): {T_world_from_cam[:3, 3]}")
-    print("="*60 + "\n")
-
-    for b in boxes:
-        prim = b.get("prim_path", "")
-
-        aabb = b["aabb_xyzmin_xyzmax"]
-        xmin, ymin, zmin, xmax, ymax, zmax = map(float, aabb)
-
-        sx, sy, sz = (xmax - xmin), (ymax - ymin), (zmax - zmin)
-        if max(sx, sy, sz) > max_box_edge:
-            print(f"SKIP (too large): '{prim}' size=({sx:.2f}, {sy:.2f}, {sz:.2f})")
-            continue
-
-        # Debug: print raw data from JSON
-        T_raw = b.get("transform_4x4", None)
-        print(f"\n--- Box: '{prim}' ---")
-        print(f"  Raw AABB: [{xmin:.3f}, {ymin:.3f}, {zmin:.3f}, {xmax:.3f}, {ymax:.3f}, {zmax:.3f}]")
-        print(f"  AABB center: ({(xmin+xmax)/2:.3f}, {(ymin+ymax)/2:.3f}, {(zmin+zmax)/2:.3f})")
-        print(f"  AABB size: ({sx:.3f}, {sy:.3f}, {sz:.3f})")
-        if T_raw is not None:
-            T_arr = np.array(T_raw, dtype=np.float64).reshape(4, 4)
-            print(f"  Transform translation: {T_arr[:3, 3]}")
+    # -------------------------
+    # 2D Visualization (Matplotlib)
+    # -------------------------
+    if SHOW_2D_VIS:
+        print("\n" + "="*60)
+        print("2D VISUALIZATION (Matplotlib)")
+        print("="*60)
+        
+        # Load 2D bboxes
+        bboxes_2d = load_2d_bboxes(bbox_path)
+        print(f"Loaded {len(bboxes_2d)} 2D bounding boxes")
+        
+        # Load semantic mask
+        seg_map, seg_info = load_semantic_mask(seg_dir, frame_id)
+        if seg_map is not None:
+            print(f"Loaded semantic mask: {seg_map.shape}")
+            print(f"Semantic info: {len(seg_info)} classes")
         else:
-            print(f"  Transform: NONE/MISSING")
+            print("No semantic mask found")
+        
+        # Show 2D visualization
+        visualize_2d_matplotlib(
+            rgb_path=rgb_path,
+            bboxes_2d=bboxes_2d,
+            seg_map=seg_map,
+            seg_info=seg_info,
+            frame_id=frame_id,
+            show_mask=SHOW_SEMANTIC_MASK,
+            show_bbox=SHOW_2D_BBOX,
+            show_track_id=SHOW_TRACK_ID,
+            show_semantic_id=SHOW_SEMANTIC_ID,
+            mask_alpha=MASK_ALPHA,
+            ignore_prefixes=ignore_prefixes
+        )
 
-        if bbox_frame == "world":
-            # Assume boxes are already in world coords (e.g., from fixed data collection)
-            ls = aabb_lineset_from_minmax(xmin, ymin, zmin, xmax, ymax, zmax, swap_yz)
-            print(f"  -> Using raw AABB as world coords")
-        elif bbox_frame == "use_transform":
-            # Use transform_4x4 from the JSON to convert local AABB to world
-            T_local_to_world = np.array(b.get("transform_4x4", np.eye(4).tolist()), dtype=np.float64)
-            if T_local_to_world.shape != (4, 4):
-                T_local_to_world = T_local_to_world.reshape(4, 4)
-            ls = local_aabb_to_world_lineset(aabb, T_local_to_world, swap_yz)
-            # Compute transformed center
-            center_local = np.array([(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2, 1.0])
-            center_world = T_local_to_world @ center_local
-            print(f"  -> Transformed center: ({center_world[0]:.3f}, {center_world[1]:.3f}, {center_world[2]:.3f})")
-        else:  # camera
-            if T_world_from_cam is None:
-                raise ValueError("BBOX_FRAME='camera' needs T_world_from_cam (set --use_traj).")
-            ls = camera_aabb_to_world_lineset(aabb, T_world_from_cam, swap_yz)
-            print(f"  -> Transformed via camera pose")
+    # -------------------------
+    # 3D Visualization (Open3D)
+    # -------------------------
+    if SHOW_3D_VIS:
+        print("\n" + "="*60)
+        print("3D VISUALIZATION (Open3D)")
+        print("="*60)
+        
+        depth_m = load_depth_meters(depth_path, png_depth_scale, min_depth)
+        color_o3d = rgb_to_o3d(rgb_path)
+        depth_o3d = depth_to_o3d(depth_m)
 
-        # Color the box green for visibility
-        ls.paint_uniform_color([0, 1, 0])
-        geoms.append(ls)
+        intr = make_intrinsics(width, height, fx, fy, cx, cy)
 
-    o3d.visualization.draw_geometries(geoms)
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d,
+            depth_o3d,
+            depth_scale=1.0,
+            depth_trunc=max_depth,
+            convert_rgb_to_intensity=False,
+        )
+
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intr)
+
+        if swap_yz:
+            pts = np.asarray(pcd.points)
+            pcd.points = o3d.utility.Vector3dVector(apply_swap_yz(pts))
+
+        boxes = load_boxes_json(bbox_path)
+
+        T_world_from_cam = None
+        if USE_TRAJ:
+            T_world_from_cam = read_traj_pose(frame_id, traj_path)
+            pcd.transform(T_world_from_cam)
+
+        geoms = [pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
+
+        print("\n" + "="*60)
+        print(f"DEBUG: Loaded {len(boxes)} boxes from JSON")
+        print(f"DEBUG: BBOX_FRAME = '{bbox_frame}'")
+        print(f"DEBUG: USE_TRAJ = {USE_TRAJ}")
+        if T_world_from_cam is not None:
+            print(f"DEBUG: Camera translation (from traj): {T_world_from_cam[:3, 3]}")
+        print("="*60 + "\n")
+
+        for b in boxes:
+            prim = b.get("prim_path", "")
+
+            aabb = b["aabb_xyzmin_xyzmax"]
+            xmin, ymin, zmin, xmax, ymax, zmax = map(float, aabb)
+
+            sx, sy, sz = (xmax - xmin), (ymax - ymin), (zmax - zmin)
+            if max(sx, sy, sz) > max_box_edge:
+                print(f"SKIP (too large): '{prim}' size=({sx:.2f}, {sy:.2f}, {sz:.2f})")
+                continue
+
+            # Debug: print raw data from JSON
+            T_raw = b.get("transform_4x4", None)
+            print(f"\n--- Box: '{prim}' ---")
+            print(f"  Raw AABB: [{xmin:.3f}, {ymin:.3f}, {zmin:.3f}, {xmax:.3f}, {ymax:.3f}, {zmax:.3f}]")
+            print(f"  AABB center: ({(xmin+xmax)/2:.3f}, {(ymin+ymax)/2:.3f}, {(zmin+zmax)/2:.3f})")
+            print(f"  AABB size: ({sx:.3f}, {sy:.3f}, {sz:.3f})")
+            if T_raw is not None:
+                T_arr = np.array(T_raw, dtype=np.float64).reshape(4, 4)
+                print(f"  Transform translation: {T_arr[:3, 3]}")
+            else:
+                print(f"  Transform: NONE/MISSING")
+
+            if bbox_frame == "world":
+                # Assume boxes are already in world coords (e.g., from fixed data collection)
+                ls = aabb_lineset_from_minmax(xmin, ymin, zmin, xmax, ymax, zmax, swap_yz)
+                print(f"  -> Using raw AABB as world coords")
+            elif bbox_frame == "use_transform":
+                # Use transform_4x4 from the JSON to convert local AABB to world
+                T_local_to_world = np.array(b.get("transform_4x4", np.eye(4).tolist()), dtype=np.float64)
+                if T_local_to_world.shape != (4, 4):
+                    T_local_to_world = T_local_to_world.reshape(4, 4)
+                ls = local_aabb_to_world_lineset(aabb, T_local_to_world, swap_yz)
+                # Compute transformed center
+                center_local = np.array([(xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2, 1.0])
+                center_world = T_local_to_world @ center_local
+                print(f"  -> Transformed center: ({center_world[0]:.3f}, {center_world[1]:.3f}, {center_world[2]:.3f})")
+            else:  # camera
+                if T_world_from_cam is None:
+                    raise ValueError("BBOX_FRAME='camera' needs T_world_from_cam (set --use_traj).")
+                ls = camera_aabb_to_world_lineset(aabb, T_world_from_cam, swap_yz)
+                print(f"  -> Transformed via camera pose")
+
+            # Color the box green for visibility
+            ls.paint_uniform_color([0, 1, 0])
+            geoms.append(ls)
+
+        o3d.visualization.draw_geometries(geoms)
 
 if __name__ == "__main__":
     main()
