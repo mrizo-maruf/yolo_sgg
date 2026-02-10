@@ -167,11 +167,15 @@ def _to_py(obj):
         return [_to_py(x) for x in obj]
     return obj
 
-def build_2d_records(twod_bbox_data):
+def build_2d_records(twod_bbox_data, seg_idToLabels: dict = None):
     """
     Your 2D data rows look like:
       (semanticId, x_min, y_min, x_max, y_max, visibility_or_occlusion)
     Info has bboxIds + primPaths aligned by row index.
+    
+    Args:
+        twod_bbox_data: bounding_box_2d_tight annotator output
+        seg_idToLabels: semantic segmentation's idToLabels for mapping semantic IDs
     """
     if twod_bbox_data is None:
         return []
@@ -187,10 +191,19 @@ def build_2d_records(twod_bbox_data):
     prim_paths = info.get("primPaths", [None] * len(data))
     id_to_labels = info.get("idToLabels", {}) or {}
 
+    # Build mapping from bbox semantic_id to segmentation semantic_id
+    bbox_to_seg_id = {}
+    if seg_idToLabels:
+        bbox_to_seg_id = build_bbox_to_seg_id_mapping(id_to_labels, seg_idToLabels)
+
     records = []
     for idx, row in enumerate(data):
         # match your example ordering
-        semantic_id = int(row[0])
+        bbox_semantic_id = int(row[0])
+        
+        # Map to segmentation semantic_id for mask extraction
+        seg_semantic_id = bbox_to_seg_id.get(bbox_semantic_id, bbox_semantic_id)
+        
         x_min = float(row[1]); y_min = float(row[2])
         x_max = float(row[3]); y_max = float(row[4])
         vis_or_occ = float(row[5])
@@ -199,11 +212,12 @@ def build_2d_records(twod_bbox_data):
         prim_path = prim_paths[idx] if idx < len(prim_paths) else None
 
         # labels come as dict like {'1': {'chair': 'red'}, ...}
-        label_dict = id_to_labels.get(str(semantic_id), {})
+        label_dict = id_to_labels.get(str(bbox_semantic_id), {})
 
         records.append({
             "bbox_id": bbox_id,
-            "semantic_id": semantic_id,
+            "semantic_id": seg_semantic_id,  # USE SEGMENTATION SEMANTIC ID for mask extraction!
+            "bbox_semantic_id": bbox_semantic_id,  # Keep original for reference
             "prim_path": prim_path,
             "label": label_dict,              # keep full dict (e.g., {"chair":"red"})
             "xyxy": [x_min, y_min, x_max, y_max],
@@ -243,7 +257,69 @@ def _label_from_idToLabels(idToLabels: dict, sid: int):
         return f"{main_val}|{d['class']}"
     return str(main_val)
 
-def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
+
+def build_bbox_to_seg_id_mapping(bbox_idToLabels: dict, seg_idToLabels: dict) -> dict:
+    """
+    Build a mapping from bbox semantic_id to segmentation semantic_id by matching labels.
+    
+    The bbox annotator and semantic segmentation annotator use DIFFERENT semantic IDs!
+    We need to match them by label name.
+    
+    Returns: dict mapping bbox_semantic_id -> seg_semantic_id
+    """
+    # Build label -> seg_semantic_id mapping from segmentation data
+    label_to_seg_id = {}
+    for seg_id_str, label_dict in seg_idToLabels.items():
+        if not seg_id_str.isdigit():
+            continue
+        seg_id = int(seg_id_str)
+        
+        # Extract label string from dict like {'wall': 'wall'} or {'class': 'BACKGROUND'}
+        if isinstance(label_dict, dict):
+            for k, v in label_dict.items():
+                # Normalize: use the value (e.g., 'wall', 'bowl', 'table_small')
+                label_str = str(v).lower().replace(' ', '_').replace(',', '_')
+                label_to_seg_id[label_str] = seg_id
+                # Also map the key
+                label_to_seg_id[str(k).lower()] = seg_id
+        else:
+            label_to_seg_id[str(label_dict).lower()] = seg_id
+    
+    print(f"[DEBUG] Label to seg_id mapping: {label_to_seg_id}")
+    
+    # Build bbox_semantic_id -> seg_semantic_id mapping
+    bbox_to_seg = {}
+    for bbox_id_str, label_dict in bbox_idToLabels.items():
+        if not str(bbox_id_str).isdigit():
+            continue
+        bbox_id = int(bbox_id_str)
+        
+        if isinstance(label_dict, dict):
+            for k, v in label_dict.items():
+                # Try to find matching seg_id
+                label_v = str(v).lower().replace(' ', '_').replace(',', '_')
+                label_k = str(k).lower()
+                
+                if label_v in label_to_seg_id:
+                    bbox_to_seg[bbox_id] = label_to_seg_id[label_v]
+                    print(f"[DEBUG] Mapped bbox_semantic_id {bbox_id} -> seg_semantic_id {label_to_seg_id[label_v]} via label '{label_v}'")
+                    break
+                elif label_k in label_to_seg_id:
+                    bbox_to_seg[bbox_id] = label_to_seg_id[label_k]
+                    print(f"[DEBUG] Mapped bbox_semantic_id {bbox_id} -> seg_semantic_id {label_to_seg_id[label_k]} via key '{label_k}'")
+                    break
+                else:
+                    # Try partial matching
+                    for seg_label, seg_id in label_to_seg_id.items():
+                        if label_v in seg_label or seg_label in label_v or label_k in seg_label:
+                            bbox_to_seg[bbox_id] = seg_id
+                            print(f"[DEBUG] Mapped bbox_semantic_id {bbox_id} -> seg_semantic_id {seg_id} via partial match '{label_v}' ~ '{seg_label}'")
+                            break
+    
+    return bbox_to_seg
+
+
+def build_3d_boxes(Nd_bbox_data, seg_idToLabels: dict = None, max_abs_extent: float = 1e6):
     """Parse Replicator bounding_box_3d output and transform to WORLD coordinates.
 
     The annotator returns:
@@ -252,6 +328,10 @@ def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
       Example: [[1,0,0,0], [0,1,0,0], [0,0,1,0], [tx,ty,tz,1]]
     
     We transform the 8 AABB corners to world space using this transform.
+    
+    Args:
+        Nd_bbox_data: bounding_box_3d annotator output
+        seg_idToLabels: semantic segmentation's idToLabels for mapping semantic IDs
     """
 
     data = Nd_bbox_data.get("data", None)
@@ -262,12 +342,21 @@ def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
     bboxIds = np.asarray(info.get("bboxIds", np.arange(len(data) if data is not None else 0)), dtype=np.uint32)
     semanticOcclusion = info.get("semanticOcclusion", None)
 
+    # Build mapping from bbox semantic_id to segmentation semantic_id
+    bbox_to_seg_id = {}
+    if seg_idToLabels:
+        bbox_to_seg_id = build_bbox_to_seg_id_mapping(idToLabels, seg_idToLabels)
+        print(f"[DEBUG] Final bbox_to_seg mapping: {bbox_to_seg_id}")
+
     boxes = []
     if data is None or len(data) == 0:
         return boxes
 
     for idx, row in enumerate(data):
-        sid = int(row["semanticId"])
+        bbox_semantic_id = int(row["semanticId"])
+        
+        # Map to segmentation semantic_id for mask extraction
+        seg_semantic_id = bbox_to_seg_id.get(bbox_semantic_id, bbox_semantic_id)
 
         # Local AABB extents (in object frame)
         x_min_local = float(row["x_min"]); y_min_local = float(row["y_min"]); z_min_local = float(row["z_min"])
@@ -322,19 +411,23 @@ def build_3d_boxes(Nd_bbox_data, max_abs_extent: float = 1e6):
         z_max_world = float(np.max(corners_world[:, 2]))
 
         bbox_id = int(bboxIds[idx]) if idx < len(bboxIds) else idx
-        label = _label_from_idToLabels(idToLabels, sid)
+        label = _label_from_idToLabels(idToLabels, bbox_semantic_id)
 
         boxes.append({
             "track_id": bbox_id,
             "bbox_id": bbox_id,
             "prim_path": prim_path,
-            "semantic_id": sid,
+            "semantic_id": seg_semantic_id,  # USE SEGMENTATION SEMANTIC ID for mask extraction!
+            "bbox_semantic_id": bbox_semantic_id,  # Keep original bbox semantic_id for reference
             "label": label,
             "aabb_xyzmin_xyzmax": [x_min_world, y_min_world, z_min_world,
                                    x_max_world, y_max_world, z_max_world],  # NOW IN WORLD COORDS
             "transform_4x4": T_world_local.tolist(),  # Column-major transform
             "occlusion_ratio": occ,
         })
+        
+        print(f"[DEBUG] Object '{label}': bbox_semantic_id={bbox_semantic_id} -> seg_semantic_id={seg_semantic_id}")
+        
     return boxes
 # ---------------------- Camera ----------------------
 camera = Camera(
@@ -479,9 +572,13 @@ while simulation_app.is_running():
     seg_ann = rep.AnnotatorRegistry.get_annotator("semantic_segmentation")
     seg_ann.attach([render_product_path])
     seg_data = seg_ann.get_data()
-    print(f"seg_data keys: {seg_data['info']}")
-    seg_info_from_seg = seg_data['info']['idToLabels']  # Keep original for reference
     seg_image = seg_data['data'].astype(np.uint8)
+    # CRITICAL: Use semantic segmentation's own idToLabels for color mapping
+    # seg_image contains semantic IDs that match seg_data['info']['idToLabels']
+    seg_info = seg_data['info'].get('idToLabels', {})
+    
+    print(f"[DEBUG] Semantic seg idToLabels: {seg_info}")
+    print(f"[DEBUG] Unique semantic IDs in image: {np.unique(seg_image)}")
 
     threed_bbox = rep.AnnotatorRegistry.get_annotator("bounding_box_3d")
     threed_bbox.attach([render_product_path])
@@ -491,10 +588,8 @@ while simulation_app.is_running():
     twod_bbox.attach([render_product_path])
     twod_bbox_data = twod_bbox.get_data()
     
-    # IMPORTANT: Use bbox annotator's idToLabels for consistency
-    # This ensures semantic_id in semantic.json matches semantic_id in bbox.json
-    seg_info = twod_bbox_data['info'].get('idToLabels', {}) or threed_bbox_data['info'].get('idToLabels', {})
-    print(f"[DEBUG] Using idToLabels from bbox annotator (not segmentation) for consistency")
+    print(f"[DEBUG] Bbox 3D idToLabels: {threed_bbox_data['info'].get('idToLabels', {})}")
+    print(f"[DEBUG] Bbox 2D idToLabels: {twod_bbox_data['info'].get('idToLabels', {})}")
     base_dir_rgb = base_dir+"rgb"
     base_dir_seg = base_dir+"seg"
     base_dir_depth = base_dir+"depth"
@@ -549,10 +644,11 @@ while simulation_app.is_running():
         with open(seg_info_path, "w") as json_file:
             json.dump(enhanced_seg_info, json_file, indent=4)
 
-        # 2) parse bbox annotators
-        boxes2d = build_2d_records(twod_bbox_data)
+        # 2) parse bbox annotators - pass seg_info to map semantic IDs correctly
+        boxes2d = build_2d_records(twod_bbox_data, seg_idToLabels=seg_info)
         # Use annotator's transform (row-major) to get world coordinates
-        boxes3d = build_3d_boxes(threed_bbox_data)
+        # Pass seg_info to map bbox semantic_ids to segmentation semantic_ids
+        boxes3d = build_3d_boxes(threed_bbox_data, seg_idToLabels=seg_info)
         
         # print(boxes2d)
         # print(boxes3d)
