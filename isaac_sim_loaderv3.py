@@ -36,7 +36,7 @@ class FrameData:
     # Optional extras if you want them later
     rgb: Optional[np.ndarray] = None   # HxWx3 BGR
     depth: Optional[np.ndarray] = None # HxW uint16 or float (depends on your decode)
-    cam_transform_4x4: List[np.ndarray] = None  # from traj.txt
+    cam_transform_4x4: Optional[np.ndarray] = None  # from traj.txt, 4x4 matrix
 
 # -----------------------------
 # Loader
@@ -194,10 +194,10 @@ class IsaacSimSceneLoader:
         rgb = self._read_rgb_bgr(self._rgb_path(frame_idx)) if self.load_rgb else None
         depth = self._read_depth(self._depth_path(frame_idx)) if self.load_depth else None
 
-        # Load camera transform from trajectory data (frame_idx is 1-based)
+        # Load camera transform from trajectory data (frame_idx is 1-based, list is 0-based)
         cam_transform_4x4 = None
         if self.traj_data is not None and len(self.traj_data) >= frame_idx:
-            cam_transform_4x4 = self.traj_data[frame_idx]["cam_transform_4x4"]
+            cam_transform_4x4 = self.traj_data[frame_idx - 1]["cam_transform_4x4"]
         
         return FrameData(
             frame_idx=frame_idx,

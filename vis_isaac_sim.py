@@ -36,11 +36,15 @@ CY = IMAGE_HEIGHT / 2.0
 # Depth parameters (must match your data capture)
 MIN_DEPTH = 0.01
 MAX_DEPTH = 10.0
+PNG_MAX_VALUE = 65535  # Depth is stored as uint16
 
 # Visualization settings
 MASK_ALPHA = 0.4  # Transparency for semantic masks
 SWAP_YZ = False  # Swap Y-Z axes in 3D visualization if needed
 MAX_BOX_EDGE = 20.0  # Filter out very large boxes (meters)
+
+# Bbox interpretation: "world" if already in world coords, "camera" if in camera frame, "use_transform" to use object's transform_4x4
+BBOX_FRAME = "world"  # Set to "world" if bboxes are already in world coords after data collection fix
 
 # Skip labels for cleaner visualization
 SKIP_LABELS = {'wall', 'floor', 'ground', 'ceiling', 'background'}
@@ -64,6 +68,28 @@ def make_intrinsics(width: int, height: int, fx: float, fy: float, cx: float, cy
     intr = o3d.camera.PinholeCameraIntrinsic()
     intr.set_intrinsics(width, height, fx, fy, cx, cy)
     return intr
+
+
+def convert_depth_to_meters(depth_uint16: np.ndarray, png_max_value: float, min_depth: float, max_depth: float) -> np.ndarray:
+    """
+    Convert uint16 depth image to meters.
+    
+    Args:
+        depth_uint16: Depth image in uint16 format (0-65535)
+        png_max_value: Maximum value in PNG (typically 65535)
+        min_depth: Minimum depth in meters
+        max_depth: Maximum depth in meters
+    
+    Returns:
+        Depth in meters as float32
+    """
+    if depth_uint16.ndim == 3:
+        depth_uint16 = depth_uint16[:, :, 0]
+    
+    png_depth_scale = (max_depth - min_depth) / float(png_max_value)
+    depth_meters = depth_uint16.astype(np.float32) * png_depth_scale + min_depth
+    
+    return depth_meters
 
 
 def create_point_cloud(rgb_bgr: np.ndarray, depth: np.ndarray, intrinsics, max_depth: float):
@@ -239,11 +265,23 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4, skip_labels: se
 
 def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float, 
                  swap_yz: bool = False, max_box_edge: float = 20.0,
-                 skip_labels: set = None):
+                 skip_labels: set = None, bbox_frame: str = "world",
+                 png_max_value: float = 65535, min_depth: float = 0.01):
     """
     Visualize frame in 3D using Open3D.
     
     Shows point cloud with RGB colors and 3D bounding boxes.
+    
+    Args:
+        frame_data: FrameData object
+        intrinsics: Open3D camera intrinsics
+        max_depth: Maximum depth for truncation
+        swap_yz: Whether to swap Y and Z axes
+        max_box_edge: Maximum bbox edge size (filter out larger boxes)
+        skip_labels: Set of labels to skip
+        bbox_frame: "world", "camera", or "use_transform" - how to interpret bbox coords
+        png_max_value: Max value for uint16 depth
+        min_depth: Minimum depth in meters
     """
     if skip_labels is None:
         skip_labels = set()
@@ -252,17 +290,21 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
         print("  [3D VIS] No RGB or depth data available")
         return
     
-    # Create point cloud
-    pcd = create_point_cloud(frame_data.rgb, frame_data.depth, intrinsics, max_depth)
+    # Convert depth from uint16 to meters
+    depth_meters = convert_depth_to_meters(frame_data.depth, png_max_value, min_depth, max_depth)
     
-    # Apply Y-Z swap if needed
+    # Create point cloud
+    pcd = create_point_cloud(frame_data.rgb, depth_meters, intrinsics, max_depth)
+    
+    # Apply Y-Z swap if needed (do this BEFORE camera transform)
     if swap_yz:
         pts = np.asarray(pcd.points)
         pcd.points = o3d.utility.Vector3dVector(apply_swap_yz(pts))
     
-    # Apply camera transform if available
-    if frame_data.cam_transform_4x4 is not None:
-        pcd.transform(frame_data.cam_transform_4x4)
+    # Apply camera transform if available to move point cloud to world frame
+    T_world_from_cam = frame_data.cam_transform_4x4
+    if T_world_from_cam is not None:
+        pcd.transform(T_world_from_cam)
     
     # Prepare geometries list
     geoms = [pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
@@ -285,23 +327,47 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
                   f"size=({sx:.2f}, {sy:.2f}, {sz:.2f})")
             continue
         
-        # Create bbox corners
-        corners = aabb_to_corners(obj.box_3d_aabb_xyzmin_xyzmax)
+        # Create bbox lineset based on frame interpretation
+        if bbox_frame == "world":
+            # Bboxes are already in world coords - use AABB directly
+            corners = aabb_to_corners(obj.box_3d_aabb_xyzmin_xyzmax)
+            
+            # Apply Y-Z swap if needed
+            if swap_yz:
+                corners = apply_swap_yz(corners)
+            
+            ls = create_bbox_lineset(corners, color=generate_color_for_id(obj.track_id))
+            
+        elif bbox_frame == "use_transform":
+            # Use object's transform_4x4 to convert local AABB to world
+            corners = aabb_to_corners(obj.box_3d_aabb_xyzmin_xyzmax)
+            corners_world = transform_corners(corners, obj.box_3d_transform_4x4)
+            
+            # Apply Y-Z swap if needed
+            if swap_yz:
+                corners_world = apply_swap_yz(corners_world)
+            
+            ls = create_bbox_lineset(corners_world, color=generate_color_for_id(obj.track_id))
+            
+        elif bbox_frame == "camera":
+            # Bboxes are in camera frame - transform using camera pose
+            if T_world_from_cam is None:
+                print(f"    SKIP: '{obj.class_name}' T:{obj.track_id} - no camera transform available")
+                continue
+            
+            corners = aabb_to_corners(obj.box_3d_aabb_xyzmin_xyzmax)
+            corners_world = transform_corners(corners, T_world_from_cam)
+            
+            # Apply Y-Z swap if needed
+            if swap_yz:
+                corners_world = apply_swap_yz(corners_world)
+            
+            ls = create_bbox_lineset(corners_world, color=generate_color_for_id(obj.track_id))
+            
+        else:
+            print(f"    SKIP: Unknown bbox_frame: {bbox_frame}")
+            continue
         
-        # Transform corners using object's transform
-        corners_world = transform_corners(corners, obj.box_3d_transform_4x4)
-        
-        # Apply camera transform if available
-        if frame_data.cam_transform_4x4 is not None:
-            corners_world = transform_corners(corners_world, frame_data.cam_transform_4x4)
-        
-        # Apply Y-Z swap if needed
-        if swap_yz:
-            corners_world = apply_swap_yz(corners_world)
-        
-        # Create lineset
-        color = generate_color_for_id(obj.track_id)
-        ls = create_bbox_lineset(corners_world, color=color)
         geoms.append(ls)
         
         print(f"    Box: '{obj.class_name}' T:{obj.track_id} S:{obj.semantic_id} "
@@ -388,7 +454,10 @@ def main():
                 max_depth=MAX_DEPTH,
                 swap_yz=SWAP_YZ,
                 max_box_edge=MAX_BOX_EDGE,
-                skip_labels=SKIP_LABELS
+                skip_labels=SKIP_LABELS,
+                bbox_frame=BBOX_FRAME,
+                png_max_value=PNG_MAX_VALUE,
+                min_depth=MIN_DEPTH
             )
         
         print(f"\nFrame {frame_idx} complete. Close visualization windows to continue...")
