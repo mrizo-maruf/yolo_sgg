@@ -415,6 +415,18 @@ class IsaacSimDataLoader:
         """
         Get all ground truth objects for a frame.
         
+        IMPORTANT: Objects are loaded based on 3D bboxes first.
+        Only objects with valid 3D bboxes are included. Segmentation masks
+        are extracted using semantic_id from 3D bbox to look up color in seg_info.
+        
+        Flow:
+        1. Load 3D bboxes (source of truth for object list)
+        2. Apply skip_labels filter (wall, floor, etc.)
+        3. For each remaining 3D bbox object:
+           a. Use semantic_id to look up color in seg_info
+           b. Extract mask by matching that color in segmentation map
+           c. Find matching 2D bbox by prim_path (for bbox_2d field)
+        
         Args:
             frame_idx: Frame index
             include_masks: Whether to extract masks from segmentation
@@ -422,10 +434,17 @@ class IsaacSimDataLoader:
             debug_visualize: Whether to show debug visualization (RGB + masks + class names)
             
         Returns:
-            List of GTObject instances
+            List of GTObject instances (only objects with 3D bboxes)
         """
-        # Load bboxes
+        # Load bboxes - 3D bboxes are the source of truth
         bboxes = self.load_bboxes(frame_idx)
+        
+        if not bboxes['bbox_3d']:
+            print(f"DEBUG[get_gt_objects] Frame {frame_idx}: No 3D bboxes found")
+            return []
+        
+        print(f"DEBUG[get_gt_objects] Frame {frame_idx}: Found {len(bboxes['bbox_3d'])} 3D bboxes, "
+              f"{len(bboxes['bbox_2d'])} 2D bboxes")
         
         # Load RGB for debug visualization
         rgb_debug = None
@@ -436,63 +455,86 @@ class IsaacSimDataLoader:
         seg_map, seg_info = None, {}
         if include_masks:
             seg_map, seg_info = self.load_segmentation(frame_idx)
+            if seg_map is not None:
+                print(f"DEBUG[get_gt_objects] Loaded segmentation map: {seg_map.shape}")
+            else:
+                print(f"DEBUG[get_gt_objects] No segmentation map found")
         
-        # Build mappings
+        # Build prim_path -> 2D bbox mapping for fast lookup
         prim_to_bbox_2d = {box['prim_path']: box for box in bboxes['bbox_2d']}
         
         gt_objects = []
-        skipped_labels = []
+        skipped_by_filter = []
+        skipped_no_2d_bbox = []
         
-        # Extract objects from 3D bboxes (more reliable track_ids)
+        # ITERATE OVER 3D BBOXES - these define which objects exist
         for box_3d in bboxes['bbox_3d']:
             track_id = box_3d['track_id']
-            label = box_3d['label']
+            label = box_3d['label'] or 'unknown'
             prim_path = box_3d['prim_path']
+            semantic_id = box_3d.get('semantic_id', -1)
             
-            # Skip unwanted labels if filtering is enabled
+            # Validate 3D bbox has required data
+            aabb = box_3d.get('aabb')
+            if aabb is None or len(aabb) != 6:
+                print(f"DEBUG[get_gt_objects] Skipping {prim_path}: invalid 3D bbox")
+                continue
+            
+            # Apply skip_labels filter BEFORE extracting masks (optimization)
             if apply_filter:
-                to_continue = False
-                for l in self.skip_labels:
-                    if l in label.lower():
-                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} SKIPPING object with label '{label}' (track_id={track_id})")
-                        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} l({l}) in label({label.lower()})")
-                        skipped_labels.append(label)
-                        to_continue = True
-                        continue
-                if to_continue:
+                should_skip = False
+                for skip_label in self.skip_labels:
+                    if skip_label in label.lower():
+                        skipped_by_filter.append((track_id, label))
+                        should_skip = True
+                        break
+                if should_skip:
                     continue
-                print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] fr={frame_idx} NOT SKIPPING object with label '{label}' (track_id={track_id})")
-
-            # Find corresponding 2D bbox
+            
+            # Find corresponding 2D bbox by prim_path
             box_2d = prim_to_bbox_2d.get(prim_path, {})
             
-            # Extract mask
+            if not box_2d:
+                skipped_no_2d_bbox.append((track_id, label, prim_path))
+                # Still include object but note it has no 2D bbox
+                print(f"DEBUG[get_gt_objects] Warning: No 2D bbox for {prim_path} (track_id={track_id})")
+            
+            # Extract mask using semantic_id from 3D bbox
             mask = None
             color_bgr = None
             if include_masks and seg_map is not None:
                 mask, color_bgr = self._extract_mask_for_object(
-                    seg_map, seg_info, box_2d, box_3d
+                    seg_map, seg_info, box_3d
                 )
             
             gt_obj = GTObject(
                 track_id=track_id,
                 class_name=label,
-                semantic_id=box_3d.get('semantic_id', -1),
+                semantic_id=semantic_id,  # Keep for reference but don't rely on it for matching
                 mask=mask,
-                bbox_2d=box_2d.get('xyxy'),
-                bbox_3d_aabb=box_3d.get('aabb'),
+                bbox_2d=box_2d.get('xyxy') if box_2d else None,
+                bbox_3d_aabb=aabb,
                 bbox_3d_transform=box_3d.get('transform'),
                 prim_path=prim_path,
-                visibility=box_2d.get('visibility', 1.0),
+                visibility=box_2d.get('visibility', 1.0) if box_2d else 1.0,
                 occlusion=box_3d.get('occlusion', 0.0),
                 color_bgr=color_bgr,
             )
             gt_objects.append(gt_obj)
-        print(f"DEBUG[IsaacSimDataLoader.get_gt_objects] returning gt_object length {len(gt_objects)}")
+        
+        # Summary debug output
+        print(f"DEBUG[get_gt_objects] Frame {frame_idx} Summary:")
+        print(f"  - Total 3D bboxes: {len(bboxes['bbox_3d'])}")
+        print(f"  - Skipped by filter: {len(skipped_by_filter)}")
+        print(f"  - Missing 2D bbox: {len(skipped_no_2d_bbox)}")
+        print(f"  - Final GT objects: {len(gt_objects)}")
+        
+        if skipped_by_filter:
+            print(f"  - Filtered labels: {[l for _, l in skipped_by_filter[:5]]}{'...' if len(skipped_by_filter) > 5 else ''}")
         
         # Debug visualization: RGB + semantic masks + class names
-        if debug_visualize and rgb_debug is not None:
-            self._visualize_gt_objects_debug(rgb_debug, gt_objects, frame_idx)
+        # if debug_visualize and rgb_debug is not None:
+        #     self._visualize_gt_objects_debug(rgb_debug, gt_objects, frame_idx)
         
         return gt_objects
     
@@ -576,14 +618,18 @@ class IsaacSimDataLoader:
         self, 
         seg_map: np.ndarray, 
         seg_info: Dict,
-        box_2d: Dict, 
         box_3d: Dict
     ) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int, int]]]:
         """
         Extract binary mask for an object from segmentation map.
         
-        Uses semantic_id to look up the correct color from seg_info (most reliable).
-        Falls back to bbox-based color detection only if semantic_id lookup fails.
+        Uses semantic_id from 3D bbox to look up color in seg_info, then extracts
+        the mask by matching that color in the segmentation map.
+        
+        Args:
+            seg_map: (H, W, 3) BGR segmentation map
+            seg_info: Dict mapping semantic_id -> {class, color_bgr}
+            box_3d: 3D bbox dict containing semantic_id, label, prim_path, etc.
         
         Returns:
             mask: Binary mask (H, W) with values 0/255
@@ -592,80 +638,43 @@ class IsaacSimDataLoader:
         if seg_map is None:
             return None, None
         
-        H, W = seg_map.shape[:2]
-        
-        # PRIMARY METHOD: Use semantic_id to get exact color from seg_info
+        # Get object info
+        prim_path = box_3d.get('prim_path', 'unknown')
+        label = box_3d.get('label', 'unknown')
+        track_id = box_3d.get('track_id', -1)
         semantic_id = box_3d.get('semantic_id', -1)
-        target_color = None
         
-        if semantic_id >= 0 and semantic_id in seg_info:
-            color_bgr = seg_info[semantic_id].get('color_bgr')
-            if color_bgr and not all(c == 0 for c in color_bgr):
-                target_color = np.array(color_bgr, dtype=np.uint8)
-                print(f"DEBUG[_extract_mask] Using semantic_id={semantic_id} -> color={color_bgr}")
-        
-        # If we have a target color from semantic_id, use it directly
-        if target_color is not None:
-            mask = np.all(seg_map == target_color, axis=2).astype(np.uint8) * 255
-            if mask.sum() > 0:
-                return mask, tuple(target_color.tolist())
-            else:
-                print(f"DEBUG[_extract_mask] semantic_id color found no pixels, falling back to bbox method")
-        
-        # FALLBACK: Find dominant color within bbox (less reliable)
-        xyxy = box_2d.get('xyxy', [0, 0, W, H])
-        if xyxy is None:
-            xyxy = [0, 0, W, H]
-        x1, y1, x2, y2 = [int(v) for v in xyxy]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(W, x2), min(H, y2)
-        
-        if x2 <= x1 or y2 <= y1:
+        # Look up color from seg_info using semantic_id
+        if semantic_id not in seg_info:
+            print(f"DEBUG[_extract_mask] semantic_id={semantic_id} not in seg_info for {prim_path}")
             return None, None
         
-        # Build set of colors that belong to SKIPPED classes (to exclude them)
-        skipped_colors = set()
-        for sem_id, info in seg_info.items():
-            cls_name = info.get('class', '')
-            for skip_label in self.skip_labels:
-                if skip_label in cls_name.lower():
-                    color_tuple = tuple(info.get('color_bgr', [0, 0, 0]))
-                    if color_tuple != (0, 0, 0):
-                        skipped_colors.add(color_tuple)
-                    break
-        
-        # Crop region
-        crop = seg_map[y1:y2, x1:x2]
-        
-        # Find unique colors in crop
-        colors = crop.reshape(-1, 3)
-        unique_colors, counts = np.unique(colors, axis=0, return_counts=True)
-        
-        # Filter out background (black) and skipped colors, find dominant valid color
-        best_color = None
-        best_count = 0
-        
-        for color, count in zip(unique_colors, counts):
-            color_tuple = tuple(color.tolist())
-            # Skip black (background)
-            if color_tuple == (0, 0, 0):
-                continue
-            # Skip colors belonging to filtered classes (wall, floor, etc.)
-            if color_tuple in skipped_colors:
-                print(f"DEBUG[_extract_mask] Skipping color {color_tuple} (belongs to skipped class)")
-                continue
-            if count > best_count:
-                best_count = count
-                best_color = color
-        
-        if best_color is None:
-            print(f"DEBUG[_extract_mask] No valid color found in bbox for object")
+        color_bgr = seg_info[semantic_id].get('color_bgr')
+        if color_bgr is None:
+            print(f"DEBUG[_extract_mask] No color_bgr for semantic_id={semantic_id}")
             return None, None
         
-        # Create full mask from this color
-        mask = np.all(seg_map == best_color, axis=2).astype(np.uint8) * 255
+        color_bgr = tuple(color_bgr)
         
-        return mask, tuple(best_color.tolist())
+        # Skip black (background) color
+        if color_bgr == (0, 0, 0):
+            print(f"DEBUG[_extract_mask] Skipping black color for {prim_path}")
+            return None, None
+        
+        # Create mask by matching the color in segmentation map
+        color_array = np.array(color_bgr, dtype=np.uint8)
+        mask = np.all(seg_map == color_array, axis=2).astype(np.uint8) * 255
+        
+        # Verify mask has pixels
+        pixel_count = mask.sum() // 255
+        if pixel_count == 0:
+            print(f"DEBUG[_extract_mask] Mask has no pixels for {prim_path} (semantic_id={semantic_id}, color={color_bgr})")
+            return None, None
+        
+        print(f"DEBUG[_extract_mask] Extracted mask for {prim_path} (track_id={track_id}, "
+              f"semantic_id={semantic_id}), color={color_bgr}, pixels={pixel_count}")
+        
+        return mask, color_bgr
     
     def get_frame_data(self, frame_idx: int, 
                        load_rgb: bool = True,

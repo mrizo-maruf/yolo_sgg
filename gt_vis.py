@@ -84,6 +84,12 @@ SHOW_SEMANTIC_ID = True  # Show semantic IDs on boxes
 MASK_ALPHA = 0.4  # Transparency of semantic masks
 SHOW_3D_VIS = True  # Show Open3D 3D visualization
 
+# Labels to skip when extracting masks (e.g., structural elements)
+SKIP_LABELS = {
+    'wall', 'floor', 'ground', 'ceiling', 'roof',
+    'background', 'unlabeled', 'unknown'
+}
+
 
 # -------------------------
 # Helpers
@@ -236,42 +242,80 @@ def generate_color_for_id(id_val: int):
     return rgb
 
 
-def extract_mask_for_bbox(seg_map, bbox_2d, seg_info):
+def extract_mask_for_bbox(seg_map, bbox_2d, seg_info, skip_labels=None):
     """
     Extract a binary mask for a specific bbox based on dominant color in the bbox region.
     
+    This uses the 2D bbox region to find the object's color, which is more reliable
+    than relying on semantic_id (which may differ between segmentation and bbox annotators).
+    
+    Args:
+        seg_map: Semantic segmentation map (H, W, 3) RGB
+        bbox_2d: Dict with 'xyxy' key containing [x1, y1, x2, y2]
+        seg_info: Dict mapping semantic_id -> {class, color_bgr}
+        skip_labels: Optional set of labels to skip (e.g., {'wall', 'floor'})
+    
     Returns:
-        Binary mask (H, W) with True where the object is
+        Binary mask (H, W) with True where the object is, or None if extraction fails
     """
     if seg_map is None:
         return None
     
+    if skip_labels is None:
+        skip_labels = set()
+    
     H, W = seg_map.shape[:2]
-    x1, y1, x2, y2 = [int(v) for v in bbox_2d["xyxy"]]
+    xyxy = bbox_2d.get("xyxy")
+    if xyxy is None:
+        return None
+    
+    x1, y1, x2, y2 = [int(v) for v in xyxy]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(W, x2), min(H, y2)
     
     if x2 <= x1 or y2 <= y1:
         return None
     
+    # Build set of colors to skip (colors belonging to wall, floor, etc.)
+    skipped_colors = set()
+    for sem_id, info in seg_info.items():
+        cls_name = info.get('class', '')
+        for skip_label in skip_labels:
+            if skip_label in cls_name.lower():
+                color = info.get('color_bgr')
+                if color and tuple(color) != (0, 0, 0):
+                    # Convert BGR to RGB for comparison with seg_map
+                    skipped_colors.add((color[2], color[1], color[0]))
+                break
+    
     # Get the region inside the bbox
     region = seg_map[y1:y2, x1:x2]
     
-    # Find the dominant color (excluding black background)
+    # Find unique colors and their counts
     region_flat = region.reshape(-1, 3)
-    non_black_mask = np.any(region_flat > 10, axis=1)
+    unique_colors, counts = np.unique(region_flat, axis=0, return_counts=True)
     
-    if not np.any(non_black_mask):
+    # Find dominant color (excluding black and skipped colors)
+    best_color = None
+    best_count = 0
+    
+    for color, count in zip(unique_colors, counts):
+        color_tuple = tuple(color.tolist())
+        # Skip black/very dark (background)
+        if all(c < 10 for c in color_tuple):
+            continue
+        # Skip colors belonging to filtered classes
+        if color_tuple in skipped_colors:
+            continue
+        if count > best_count:
+            best_count = count
+            best_color = color
+    
+    if best_color is None:
         return None
     
-    non_black_colors = region_flat[non_black_mask]
-    
-    # Get most common color
-    unique_colors, counts = np.unique(non_black_colors, axis=0, return_counts=True)
-    dominant_color = unique_colors[np.argmax(counts)]
-    
     # Create full-image mask for pixels matching dominant color
-    mask = np.all(seg_map == dominant_color, axis=2)
+    mask = np.all(seg_map == best_color, axis=2)
     
     return mask
 
@@ -287,7 +331,8 @@ def visualize_2d_matplotlib(
     show_track_id: bool = True,
     show_semantic_id: bool = True,
     mask_alpha: float = 0.4,
-    ignore_prefixes: list = None
+    ignore_prefixes: list = None,
+    skip_labels: set = None
 ):
     """
     Visualize RGB image with semantic masks, 2D bboxes, track IDs, and semantic IDs using matplotlib.
@@ -304,9 +349,12 @@ def visualize_2d_matplotlib(
         show_semantic_id: Show semantic ID labels
         mask_alpha: Transparency for mask overlay
         ignore_prefixes: List of prim_path prefixes to ignore
+        skip_labels: Set of labels to skip when extracting masks (e.g., {'wall', 'floor'})
     """
     if ignore_prefixes is None:
         ignore_prefixes = []
+    if skip_labels is None:
+        skip_labels = set()
     
     # Load RGB image
     rgb_bgr = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
@@ -366,7 +414,7 @@ def visualize_2d_matplotlib(
     # Draw masks
     if show_mask and seg_map is not None:
         for bbox in filtered_bboxes:
-            mask = extract_mask_for_bbox(seg_map, bbox, seg_info)
+            mask = extract_mask_for_bbox(seg_map, bbox, seg_info, skip_labels)
             if mask is not None:
                 color = generate_color_for_id(bbox["track_id"])
                 mask_overlay[mask] = color
@@ -612,7 +660,8 @@ def main():
             show_track_id=SHOW_TRACK_ID,
             show_semantic_id=SHOW_SEMANTIC_ID,
             mask_alpha=MASK_ALPHA,
-            ignore_prefixes=ignore_prefixes
+            ignore_prefixes=ignore_prefixes,
+            skip_labels=SKIP_LABELS
         )
 
     # -------------------------
