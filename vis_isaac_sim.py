@@ -182,6 +182,91 @@ def apply_swap_yz(points: np.ndarray) -> np.ndarray:
     return p
 
 
+def visualize_2d_individual_objects(frame_data: FrameData, mask_alpha: float = 0.6):
+    """
+    Visualize each object's mask individually.
+    Shows one object at a time with its mask, bbox, and info.
+    Press 'q' to move to next object, 'Esc' to skip to next frame.
+    """
+    if frame_data.rgb is None:
+        print("  [2D VIS] No RGB data available")
+        return
+    
+    # Convert BGR to RGB for matplotlib
+    rgb = cv2.cvtColor(frame_data.rgb, cv2.COLOR_BGR2RGB)
+    H, W = rgb.shape[:2]
+    
+    objects = frame_data.gt_objects
+    
+    if len(objects) == 0:
+        print("  [2D VIS] No objects to visualize")
+        return
+    
+    print(f"\n  [2D VIS] Showing {len(objects)} objects individually. Press 'q' for next object, 'Esc' to skip frame.")
+    
+    for obj_idx, obj in enumerate(objects, 1):
+        # Create figure
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        ax_rgb = axes[0]
+        ax_mask = axes[1]
+        ax_overlay = axes[2]
+        
+        # Panel 1: Raw RGB
+        ax_rgb.imshow(rgb)
+        ax_rgb.set_title(f"RGB - Frame {frame_data.frame_idx}")
+        ax_rgb.axis("off")
+        
+        # Panel 2: Object mask only
+        mask_img = np.zeros((H, W, 3), dtype=np.uint8)
+        if obj.mask is not None and np.any(obj.mask):
+            color = generate_color_for_id(obj.track_id)
+            mask_img[obj.mask] = (np.array(color) * 255).astype(np.uint8)
+        ax_mask.imshow(mask_img)
+        ax_mask.set_title(f"Object Mask ({np.sum(obj.mask) if obj.mask is not None else 0} pixels)")
+        ax_mask.axis("off")
+        
+        # Panel 3: RGB + Mask overlay + BBox
+        overlay_img = rgb.copy().astype(np.float32)
+        mask_overlay = np.zeros((H, W, 3), dtype=np.float32)
+        
+        color = generate_color_for_id(obj.track_id)
+        if obj.mask is not None and np.any(obj.mask):
+            mask_overlay[obj.mask] = color
+        
+        # Blend
+        overlay_img = overlay_img * (1 - mask_alpha) + mask_overlay * mask_alpha * 255
+        overlay_img = np.clip(overlay_img, 0, 255).astype(np.uint8)
+        
+        ax_overlay.imshow(overlay_img)
+        
+        # Draw 2D bbox
+        if obj.bbox2d_xyxy is not None:
+            x1, y1, x2, y2 = obj.bbox2d_xyxy
+            rect = patches.Rectangle(
+                (x1, y1), x2 - x1, y2 - y1,
+                linewidth=3, edgecolor=color, facecolor="none"
+            )
+            ax_overlay.add_patch(rect)
+        
+        ax_overlay.set_title("RGB + Mask + BBox")
+        ax_overlay.axis("off")
+        
+        # Overall title with object info
+        fig.suptitle(
+            f"Frame {frame_data.frame_idx} | Object {obj_idx}/{len(objects)}\n"
+            f"Track ID: {obj.track_id} | Semantic ID: {obj.semantic_id} | Class: '{obj.class_name}'\n"
+            f"Visibility: {obj.visibility:.2f if obj.visibility is not None else 'N/A'} | "
+            f"Occlusion: {obj.occlusion:.2f if obj.occlusion is not None else 'N/A'} | "
+            f"Mask pixels: {np.sum(obj.mask) if obj.mask is not None else 0}",
+            fontsize=12, fontweight='bold'
+        )
+        
+        plt.tight_layout()
+        plt.show()
+        
+        print(f"    Showed object {obj_idx}/{len(objects)}: '{obj.class_name}' (T:{obj.track_id}, S:{obj.semantic_id})")
+
+
 def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
     """
     Visualize frame in 2D using matplotlib.
@@ -435,9 +520,9 @@ def main():
         # Print frame information
         print_frame_info(frame_data)
         
-        # 2D Visualization
+        # 2D Visualization - Individual objects
         if frame_data.rgb is not None:
-            visualize_2d(frame_data, mask_alpha=MASK_ALPHA)
+            visualize_2d_individual_objects(frame_data, mask_alpha=MASK_ALPHA)
         
         # 3D Visualization
         if frame_data.rgb is not None and frame_data.depth is not None:
