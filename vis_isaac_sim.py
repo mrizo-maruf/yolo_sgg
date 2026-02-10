@@ -23,7 +23,7 @@ from isaac_sim_loaderv3 import IsaacSimSceneLoader, FrameData, GTObject
 # -------------------------
 # Configuration
 # -------------------------
-SCENE_DIR = "/home/maribjonov_mr/IsaacSim_bench/scene_7"  # Relative to workspace or absolute path
+SCENE_DIR = "/home/maribjonov_mr/IsaacSim_bench/scene_1"  # Relative to workspace or absolute path
 
 # Camera intrinsics (must match your data capture)
 IMAGE_WIDTH = 1280

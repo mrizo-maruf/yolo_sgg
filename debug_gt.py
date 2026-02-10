@@ -13,9 +13,9 @@ from pathlib import Path
 # -------------------------
 # Configuration - EDIT THESE
 # -------------------------
-SEG_INFO_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_7/seg/semantic000001_info.json"
-SEG_PNG = "/home/maribjonov_mr/IsaacSim_bench/scene_7/seg/semantic000001.png"
-BBOX_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_7/bbox/bboxes000001_info.json"
+SEG_INFO_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_1/seg/semantic000002_info.json"
+SEG_PNG = "/home/maribjonov_mr/IsaacSim_bench/scene_1/seg/semantic000002.png"
+BBOX_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_1/bbox/bboxes000002_info.json"
 
 
 def load_seg_data():
