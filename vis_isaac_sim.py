@@ -355,8 +355,7 @@ def main():
     loader = IsaacSimSceneLoader(
         scene_dir=scene_dir,
         load_rgb=True,
-        load_depth=True,
-        load_seg=True
+        load_depth=True
     )
     
     print(f"Found {len(loader.frame_indices)} frames")

@@ -193,7 +193,6 @@ class IsaacSimSceneLoader:
 
         rgb = self._read_rgb_bgr(self._rgb_path(frame_idx)) if self.load_rgb else None
         depth = self._read_depth(self._depth_path(frame_idx)) if self.load_depth else None
-        seg = seg_img if self.load_seg else None
 
         # Load camera transform from trajectory data (frame_idx is 1-based)
         cam_transform_4x4 = None
@@ -205,7 +204,6 @@ class IsaacSimSceneLoader:
             gt_objects=gt_objects,
             rgb=rgb,
             depth=depth,
-            seg=seg,
             cam_transform_4x4=cam_transform_4x4,
         )
 
