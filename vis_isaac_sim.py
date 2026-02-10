@@ -254,7 +254,7 @@ def visualize_2d_individual_objects(frame_data: FrameData, mask_alpha: float = 0
         # Overall title with object info
         fig.suptitle(
             f"Frame {frame_data.frame_idx} | Object {obj_idx}/{len(objects)}\n",
-            # f"Track ID: {obj.track_id} | Semantic ID: {obj.semantic_id} | Class: '{obj.class_name}'\n",
+            # f"Track ID: {obj.track_id} | Instance ID: {obj.instance_id} | Class: '{obj.class_name}'\n",
             # f"Visibility: {obj.visibility:.2f if obj.visibility is not None else 'N/A'} | ",
             # f"Occlusion: {obj.occlusion:.2f if obj.occlusion is not None else 'N/A'} | ",
             # f"Mask pixels: {np.sum(obj.mask) if obj.mask is not None else 0}",
@@ -264,7 +264,7 @@ def visualize_2d_individual_objects(frame_data: FrameData, mask_alpha: float = 0
         plt.tight_layout()
         plt.show()
         
-        print(f"    Showed object {obj_idx}/{len(objects)}: '{obj.class_name}' (T:{obj.track_id}, S:{obj.semantic_id})")
+        print(f"    Showed object {obj_idx}/{len(objects)}: '{obj.class_name}' (T:{obj.track_id}, I:{obj.instance_id})")
 
 
 def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
@@ -324,7 +324,7 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
             ax_overlay.add_patch(rect)
             
             # Draw label
-            label_text = f"T:{obj.track_id} | S:{obj.semantic_id} | {obj.class_name}"
+            label_text = f"T:{obj.track_id} | I:{obj.instance_id} | {obj.class_name}"
             ax_overlay.text(
                 x1 + 2, y1 - 5,
                 label_text,
@@ -447,7 +447,7 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
         
         geoms.append(ls)
         
-        print(f"    Box: '{obj.class_name}' T:{obj.track_id} S:{obj.semantic_id} "
+        print(f"    Box: '{obj.class_name}' T:{obj.track_id} I:{obj.instance_id} "
               f"center=({(xmin+xmax)/2:.2f}, {(ymin+ymax)/2:.2f}, {(zmin+zmax)/2:.2f}) "
               f"size=({sx:.2f}, {sy:.2f}, {sz:.2f})")
     
@@ -480,7 +480,7 @@ def print_frame_info(frame_data: FrameData):
         occ_info = f"{obj.occlusion:.2f}" if obj.occlusion is not None else "N/A"
         mask_pixels = np.sum(obj.mask) if obj.mask is not None else 0
         
-        print(f"    {i:2d}. Track:{obj.track_id:3d} Sem:{obj.semantic_id:3d} "
+        print(f"    {i:2d}. Track:{obj.track_id:3d} Inst:{obj.instance_id:3d} "
               f"'{obj.class_name:15s}' | 2D BBox:{bbox_info:3s} | "
               f"Vis:{vis_info:5s} Occ:{occ_info:5s} | Mask:{mask_pixels:6d}px")
 

@@ -15,8 +15,9 @@ import numpy as np
 @dataclass(frozen=True)
 class GTObject:
     track_id: int
-    semantic_id: int
+    instance_id: int  # instance ID from segmentation (unique per object)
     class_name: str
+    prim_path: Optional[str]  # USD prim path, e.g., "/World/env/bowl"
 
     bbox2d_xyxy: Optional[Tuple[float, float, float, float]]  # (x1,y1,x2,y2)
     box_3d_aabb_xyzmin_xyzmax: Tuple[float, float, float, float, float, float]
@@ -134,14 +135,16 @@ class IsaacSimSceneLoader:
         bbox2d_by_bbox_id = self._parse_bbox2d_tight(bbox_data)
         bbox3d_list = self._parse_bbox3d(bbox_data)
 
-        # semantic_id -> color_bgr (tuple)
-        color_by_semantic_id = self._parse_semantic_color_map(seg_info)
+        # instance_id -> color_bgr (tuple) for mask extraction
+        color_by_instance_id = self._parse_instance_color_map(seg_info)
 
         gt_objects: List[GTObject] = []
         for b3d in bbox3d_list:
             bbox_id = b3d["bbox_id"]
             track_id = int(b3d["track_id"])
-            semantic_id = int(b3d["semantic_id"])
+            # Use instance_id (from instance segmentation) for mask lookup
+            instance_id = int(b3d.get("instance_id", b3d["semantic_id"]))
+            prim_path = b3d.get("prim_path", None)
 
             # class name: prefer b3d["label"] (string), else derive from 2D label dict, else fallback
             class_name = self._infer_class_name(b3d=b3d, b2d=bbox2d_by_bbox_id.get(bbox_id))
@@ -175,10 +178,11 @@ class IsaacSimSceneLoader:
             occlusion = b3d.get("occlusion_ratio", None)
             occlusion = float(occlusion) if occlusion is not None else None
 
-            # Mask extraction: ONLY for objects with 3D bbox (we're iterating 3D list already)
-            color = color_by_semantic_id.get(semantic_id, None)
+            # Mask extraction: use instance_id to look up color from segmentation
+            color = color_by_instance_id.get(instance_id, None)
             if color is None:
-                # If missing mapping, make empty mask (or raise; your choice)
+                # If missing mapping, make empty mask
+                print(f"  [LOADER] WARNING: No color mapping for instance_id={instance_id}, class='{class_name}'")
                 mask = np.zeros(seg_img.shape[:2], dtype=bool)
             else:
                 # seg_img is BGR; color is (b,g,r)
@@ -187,8 +191,9 @@ class IsaacSimSceneLoader:
             gt_objects.append(
                 GTObject(
                     track_id=track_id,
-                    semantic_id=semantic_id,
+                    instance_id=instance_id,
                     class_name=class_name,
+                    prim_path=prim_path,
                     bbox2d_xyxy=bbox2d_xyxy,
                     box_3d_aabb_xyzmin_xyzmax=aabb_xyzmin_xyzmax,
                     box_3d_transform_4x4=T,
@@ -313,20 +318,21 @@ class IsaacSimSceneLoader:
         return b3d
 
     @staticmethod
-    def _parse_semantic_color_map(seg_info: Dict[str, Any]) -> Dict[int, Tuple[int, int, int]]:
+    def _parse_instance_color_map(seg_info: Dict[str, Any]) -> Dict[int, Tuple[int, int, int]]:
         """
-        seg_info keys are strings ("0","1",...), each has color_bgr.
-        Returns semantic_id(int) -> (b,g,r)
+        seg_info keys are instance IDs as strings ("0","1","12",...).
+        Each entry has: prim_path, label, color_bgr.
+        Returns instance_id(int) -> (b,g,r) color tuple.
         """
         out: Dict[int, Tuple[int, int, int]] = {}
         for k, v in seg_info.items():
             if not str(k).isdigit():
                 continue
-            sid = int(k)
+            instance_id = int(k)
             color = v.get("color_bgr", None)
             if color is None or len(color) != 3:
                 continue
-            out[sid] = (int(color[0]), int(color[1]), int(color[2]))
+            out[instance_id] = (int(color[0]), int(color[1]), int(color[2]))
         return out
 
     @staticmethod
