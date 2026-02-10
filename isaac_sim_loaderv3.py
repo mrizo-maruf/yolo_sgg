@@ -2,7 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -58,6 +58,7 @@ class IsaacSimSceneLoader:
         scene_dir: str,
         load_rgb: bool = False,
         load_depth: bool = False,
+        skip_labels: Optional[Set[str]] = None,
     ):
         self.scene_dir = Path(scene_dir)
         if not self.scene_dir.exists():
@@ -74,6 +75,7 @@ class IsaacSimSceneLoader:
 
         self.load_rgb = load_rgb
         self.load_depth = load_depth
+        self.skip_labels = skip_labels if skip_labels is not None else set()
 
         # Optional: infer available frame indices from bbox files (robust)
         self.frame_indices = self._discover_frames()
@@ -191,6 +193,11 @@ class IsaacSimSceneLoader:
                 )
             )
 
+        # Filter out objects based on skip_labels
+        if self.skip_labels:
+            gt_objects = [obj for obj in gt_objects 
+                         if obj.class_name.lower() not in self.skip_labels]
+        
         rgb = self._read_rgb_bgr(self._rgb_path(frame_idx)) if self.load_rgb else None
         depth = self._read_depth(self._depth_path(frame_idx)) if self.load_depth else None
 

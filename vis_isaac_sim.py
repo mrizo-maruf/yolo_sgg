@@ -182,15 +182,12 @@ def apply_swap_yz(points: np.ndarray) -> np.ndarray:
     return p
 
 
-def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4, skip_labels: set = None):
+def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
     """
     Visualize frame in 2D using matplotlib.
     
     Shows RGB with semantic masks overlay, 2D bboxes, and labels.
     """
-    if skip_labels is None:
-        skip_labels = set()
-    
     if frame_data.rgb is None:
         print("  [2D VIS] No RGB data available")
         return
@@ -214,11 +211,9 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4, skip_labels: se
     mask_overlay = np.zeros((H, W, 3), dtype=np.float32)
     
     # Count objects
-    valid_objects = [obj for obj in frame_data.gt_objects 
-                     if obj.class_name.lower() not in skip_labels]
+    valid_objects = frame_data.gt_objects  # Objects already filtered by loader
     
-    print(f"  [2D VIS] Total objects: {len(frame_data.gt_objects)}, "
-          f"Shown: {len(valid_objects)}, Skipped: {len(frame_data.gt_objects) - len(valid_objects)}")
+    print(f"  [2D VIS] Objects shown: {len(valid_objects)}")
     
     # Draw masks and bboxes
     for obj in valid_objects:
@@ -265,7 +260,7 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4, skip_labels: se
 
 def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float, 
                  swap_yz: bool = False, max_box_edge: float = 20.0,
-                 skip_labels: set = None, bbox_frame: str = "world",
+                 bbox_frame: str = "world",
                  png_max_value: float = 65535, min_depth: float = 0.01):
     """
     Visualize frame in 3D using Open3D.
@@ -278,14 +273,10 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
         max_depth: Maximum depth for truncation
         swap_yz: Whether to swap Y and Z axes
         max_box_edge: Maximum bbox edge size (filter out larger boxes)
-        skip_labels: Set of labels to skip
         bbox_frame: "world", "camera", or "use_transform" - how to interpret bbox coords
         png_max_value: Max value for uint16 depth
         min_depth: Minimum depth in meters
     """
-    if skip_labels is None:
-        skip_labels = set()
-    
     if frame_data.rgb is None or frame_data.depth is None:
         print("  [3D VIS] No RGB or depth data available")
         return
@@ -310,11 +301,9 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
     geoms = [pcd, o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
     
     # Count objects
-    valid_objects = [obj for obj in frame_data.gt_objects 
-                     if obj.class_name.lower() not in skip_labels]
+    valid_objects = frame_data.gt_objects  # Objects already filtered by loader
     
-    print(f"  [3D VIS] Total objects: {len(frame_data.gt_objects)}, "
-          f"Shown: {len(valid_objects)}, Skipped: {len(frame_data.gt_objects) - len(valid_objects)}")
+    print(f"  [3D VIS] Objects shown: {len(valid_objects)}")
     
     # Add 3D bounding boxes
     for obj in valid_objects:
@@ -421,7 +410,8 @@ def main():
     loader = IsaacSimSceneLoader(
         scene_dir=scene_dir,
         load_rgb=True,
-        load_depth=True
+        load_depth=True,
+        skip_labels=SKIP_LABELS
     )
     
     print(f"Found {len(loader.frame_indices)} frames")
@@ -444,7 +434,7 @@ def main():
         
         # 2D Visualization
         if frame_data.rgb is not None:
-            visualize_2d(frame_data, mask_alpha=MASK_ALPHA, skip_labels=SKIP_LABELS)
+            visualize_2d(frame_data, mask_alpha=MASK_ALPHA)
         
         # 3D Visualization
         if frame_data.rgb is not None and frame_data.depth is not None:
@@ -454,7 +444,6 @@ def main():
                 max_depth=MAX_DEPTH,
                 swap_yz=SWAP_YZ,
                 max_box_edge=MAX_BOX_EDGE,
-                skip_labels=SKIP_LABELS,
                 bbox_frame=BBOX_FRAME,
                 png_max_value=PNG_MAX_VALUE,
                 min_depth=MIN_DEPTH
