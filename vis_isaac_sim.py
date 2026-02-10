@@ -253,11 +253,11 @@ def visualize_2d_individual_objects(frame_data: FrameData, mask_alpha: float = 0
         
         # Overall title with object info
         fig.suptitle(
-            f"Frame {frame_data.frame_idx} | Object {obj_idx}/{len(objects)}\n"
-            f"Track ID: {obj.track_id} | Semantic ID: {obj.semantic_id} | Class: '{obj.class_name}'\n"
-            f"Visibility: {obj.visibility:.2f if obj.visibility is not None else 'N/A'} | "
-            f"Occlusion: {obj.occlusion:.2f if obj.occlusion is not None else 'N/A'} | "
-            f"Mask pixels: {np.sum(obj.mask) if obj.mask is not None else 0}",
+            f"Frame {frame_data.frame_idx} | Object {obj_idx}/{len(objects)}\n",
+            # f"Track ID: {obj.track_id} | Semantic ID: {obj.semantic_id} | Class: '{obj.class_name}'\n",
+            # f"Visibility: {obj.visibility:.2f if obj.visibility is not None else 'N/A'} | ",
+            # f"Occlusion: {obj.occlusion:.2f if obj.occlusion is not None else 'N/A'} | ",
+            # f"Mask pixels: {np.sum(obj.mask) if obj.mask is not None else 0}",
             fontsize=12, fontweight='bold'
         )
         
