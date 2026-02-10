@@ -37,6 +37,8 @@ class FrameData:
     rgb: Optional[np.ndarray] = None   # HxWx3 BGR
     depth: Optional[np.ndarray] = None # HxW uint16 or float (depends on your decode)
     cam_transform_4x4: Optional[np.ndarray] = None  # from traj.txt, 4x4 matrix
+    seg: Optional[np.ndarray] = None   # HxWx3 BGR semantic segmentation (for visualization)
+    skipped_semantic_ids: Optional[Set[int]] = None  # IDs of skipped objects
 
 # -----------------------------
 # Loader
@@ -193,10 +195,31 @@ class IsaacSimSceneLoader:
                 )
             )
 
-        # Filter out objects based on skip_labels
+        # Debug: print all class names before filtering
+        print(f"  [LOADER] Frame {frame_idx}: Found {len(gt_objects)} objects before filtering")
+        if gt_objects:
+            class_names = [obj.class_name for obj in gt_objects]
+            print(f"  [LOADER] Class names: {class_names}")
+        
+        # Filter out objects based on skip_labels (substring matching)
+        skipped_semantic_ids = set()
         if self.skip_labels:
-            gt_objects = [obj for obj in gt_objects 
-                         if obj.class_name.lower() not in self.skip_labels]
+            print(f"  [LOADER] Skip labels (substring match): {self.skip_labels}")
+            filtered_objects = []
+            
+            for obj in gt_objects:
+                class_name_lower = obj.class_name.lower()
+                # Skip if any skip_label appears as substring in class_name
+                should_skip = any(skip_label in class_name_lower for skip_label in self.skip_labels)
+                if not should_skip:
+                    filtered_objects.append(obj)
+                else:
+                    print(f"  [LOADER] SKIPPED: '{obj.class_name}' (track_id={obj.track_id}, semantic_id={obj.semantic_id})")
+                    skipped_semantic_ids.add(obj.semantic_id)
+            
+            print(f"  [LOADER] After filtering: {len(filtered_objects)} objects remain")
+            print(f"  [LOADER] Skipped semantic_ids: {skipped_semantic_ids}")
+            gt_objects= filtered_objects
         
         rgb = self._read_rgb_bgr(self._rgb_path(frame_idx)) if self.load_rgb else None
         depth = self._read_depth(self._depth_path(frame_idx)) if self.load_depth else None
@@ -212,6 +235,8 @@ class IsaacSimSceneLoader:
             rgb=rgb,
             depth=depth,
             cam_transform_4x4=cam_transform_4x4,
+            seg=seg_img,
+            skipped_semantic_ids=skipped_semantic_ids if skipped_semantic_ids else None,
         )
 
     # ---------- internals ----------

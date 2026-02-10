@@ -187,6 +187,7 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
     Visualize frame in 2D using matplotlib.
     
     Shows RGB with semantic masks overlay, 2D bboxes, and labels.
+    Only pixels from kept objects are painted (skipped objects are excluded).
     """
     if frame_data.rgb is None:
         print("  [2D VIS] No RGB data available")
@@ -221,8 +222,10 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
         color = generate_color_for_id(obj.track_id)
         
         # Add mask to overlay
-        if obj.mask is not None:
+        if obj.mask is not None and np.any(obj.mask):
+            # Only paint pixels that have non-zero mask
             mask_overlay[obj.mask] = color
+            print(f"  [2D VIS] Painted {np.sum(obj.mask)} pixels for object '{obj.class_name}' (T:{obj.track_id})")
         
         # Draw 2D bbox
         if obj.bbox2d_xyxy is not None:
