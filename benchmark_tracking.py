@@ -498,17 +498,234 @@ def compute_bbox_iou_2d(bbox1: List[float], bbox2: List[float]) -> float:
     
     return intersection / union
 
+def visualize_matching(
+    rgb_image: np.ndarray,
+    gt_objects: List[GTObject],
+    pred_objects: List[PredObject],
+    mapping: Dict[int, int],  # gt_track_id -> pred_global_id
+    ious: Dict[int, float],   # gt_track_id -> iou
+    frame_idx: int = 0,
+    alpha: float = 0.5,
+    save_path: str = None,
+    show: bool = True
+) -> np.ndarray:
+    """
+    Visualize GT-to-Prediction matching with masks and connection lines.
+    
+    Layout: 3-panel view
+    - Left: GT masks with track_id labels
+    - Middle: RGB with both overlaid + matching lines
+    - Right: Pred masks with global_id labels
+    
+    Color coding:
+    - GREEN border: Matched GT
+    - RED border: Unmatched GT (false negative)
+    - BLUE border: Matched Pred
+    - ORANGE border: Unmatched Pred (false positive)
+    """
+    if rgb_image is None:
+        print("[WARN] No RGB image for matching visualization")
+        return None
+    
+    H, W = rgb_image.shape[:2]
+    
+    # Create three panels
+    gt_panel = rgb_image.copy()
+    combined_panel = rgb_image.copy()
+    pred_panel = rgb_image.copy()
+    
+    # Build lookup for predictions by global_id
+    pred_by_gid = {p.global_id: p for p in pred_objects}
+    matched_pred_ids = set(mapping.values())
+    matched_gt_ids = set(mapping.keys())
+    
+    # Collect centroids for drawing lines
+    gt_centroids = {}  # gt_track_id -> (cx, cy)
+    pred_centroids = {}  # pred_global_id -> (cx, cy)
+    
+    # === Draw GT masks ===
+    for gt_obj in gt_objects:
+        if gt_obj.mask is None:
+            continue
+        
+        mask = gt_obj.mask > 0 if gt_obj.mask.dtype != bool else gt_obj.mask
+        is_matched = gt_obj.track_id in matched_gt_ids
+        
+        # Generate color from track_id
+        np.random.seed(gt_obj.track_id * 7 + 13)
+        color = tuple(int(c) for c in np.random.randint(50, 255, 3))
+        
+        # Apply mask overlay
+        gt_panel[mask] = (gt_panel[mask] * (1 - alpha) + np.array(color) * alpha).astype(np.uint8)
+        combined_panel[mask] = (combined_panel[mask] * (1 - 0.3) + np.array(color) * 0.3).astype(np.uint8)
+        
+        # Get centroid
+        ys, xs = np.where(mask)
+        if len(xs) > 0:
+            cx, cy = int(np.mean(xs)), int(np.mean(ys))
+            gt_centroids[gt_obj.track_id] = (cx, cy)
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            
+            # Border color: green if matched, red if not
+            border_color = (0, 255, 0) if is_matched else (0, 0, 255)
+            cv2.rectangle(gt_panel, (x1, y1), (x2, y2), border_color, 2)
+            
+            # Label
+            iou_val = ious.get(gt_obj.track_id, 0.0)
+            matched_pred = mapping.get(gt_obj.track_id, -1)
+            if is_matched:
+                label = f"GT:{gt_obj.track_id} -> P:{matched_pred} IoU:{iou_val:.2f}"
+            else:
+                label = f"GT:{gt_obj.track_id} ({gt_obj.class_name}) [UNMATCHED]"
+            
+            # Draw label with background
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(gt_panel, (x1, y1 - th - 6), (x1 + tw + 4, y1), border_color, -1)
+            cv2.putText(gt_panel, label, (x1 + 2, y1 - 4),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    # === Draw Pred masks ===
+    for pred_obj in pred_objects:
+        if pred_obj.mask is None:
+            continue
+        
+        mask = pred_obj.mask > 0 if pred_obj.mask.dtype != bool else pred_obj.mask
+        is_matched = pred_obj.global_id in matched_pred_ids
+        
+        # Generate color from global_id
+        np.random.seed(pred_obj.global_id * 7 + 13)
+        color = tuple(int(c) for c in np.random.randint(50, 255, 3))
+        
+        # Apply mask overlay
+        pred_panel[mask] = (pred_panel[mask] * (1 - alpha) + np.array(color) * alpha).astype(np.uint8)
+        combined_panel[mask] = (combined_panel[mask] * (1 - 0.3) + np.array([0, 165, 255]) * 0.3).astype(np.uint8)
+        
+        # Get centroid
+        ys, xs = np.where(mask)
+        if len(xs) > 0:
+            cx, cy = int(np.mean(xs)), int(np.mean(ys))
+            pred_centroids[pred_obj.global_id] = (cx, cy)
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            
+            # Border color: blue if matched, orange if not (false positive)
+            border_color = (255, 165, 0) if is_matched else (0, 128, 255)
+            cv2.rectangle(pred_panel, (x1, y1), (x2, y2), border_color, 2)
+            
+            # Find which GT matched this pred
+            matched_gt = None
+            for gt_id, pred_id in mapping.items():
+                if pred_id == pred_obj.global_id:
+                    matched_gt = gt_id
+                    break
+            
+            if is_matched:
+                label = f"P:{pred_obj.global_id} <- GT:{matched_gt}"
+            else:
+                label = f"P:{pred_obj.global_id} ({pred_obj.class_name or ''}) [FP]"
+            
+            # Draw label
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(pred_panel, (x1, y1 - th - 6), (x1 + tw + 4, y1), border_color, -1)
+            cv2.putText(pred_panel, label, (x1 + 2, y1 - 4),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    # === Draw matching lines on combined panel ===
+    for gt_id, pred_id in mapping.items():
+        if gt_id in gt_centroids and pred_id in pred_centroids:
+            gt_pt = gt_centroids[gt_id]
+            pred_pt = pred_centroids[pred_id]
+            iou_val = ious.get(gt_id, 0.0)
+            
+            # Line color based on IoU quality
+            if iou_val >= 0.7:
+                line_color = (0, 255, 0)  # Green - good match
+            elif iou_val >= 0.5:
+                line_color = (0, 255, 255)  # Yellow - ok match
+            else:
+                line_color = (0, 165, 255)  # Orange - poor match
+            
+            cv2.line(combined_panel, gt_pt, pred_pt, line_color, 2, cv2.LINE_AA)
+            
+            # Draw IoU value at midpoint
+            mid_pt = ((gt_pt[0] + pred_pt[0]) // 2, (gt_pt[1] + pred_pt[1]) // 2)
+            cv2.putText(combined_panel, f"{iou_val:.2f}", mid_pt,
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(combined_panel, f"{iou_val:.2f}", mid_pt,
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, line_color, 1, cv2.LINE_AA)
+    
+    # === Summary stats ===
+    n_matched = len(mapping)
+    n_unmatched_gt = len(gt_objects) - n_matched
+    n_unmatched_pred = len(pred_objects) - n_matched
+    avg_iou = np.mean(list(ious.values())) if ious else 0.0
+    
+    # Add headers
+    cv2.putText(gt_panel, f"GT Objects: {len(gt_objects)} (Matched: {n_matched}, FN: {n_unmatched_gt})", 
+               (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(combined_panel, f"Frame {frame_idx} | Matches: {n_matched} | Avg IoU: {avg_iou:.3f}", 
+               (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(pred_panel, f"Pred Objects: {len(pred_objects)} (Matched: {n_matched}, FP: {n_unmatched_pred})", 
+               (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+    
+    # Combine into single image
+    combined = np.hstack([gt_panel, combined_panel, pred_panel])
+    
+    if show:
+        # Use matplotlib for better display
+        fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+        
+        axes[0].imshow(cv2.cvtColor(gt_panel, cv2.COLOR_BGR2RGB))
+        axes[0].set_title(f"Ground Truth\n{len(gt_objects)} objects ({n_matched} matched, {n_unmatched_gt} FN)", fontsize=12)
+        axes[0].axis('off')
+        
+        axes[1].imshow(cv2.cvtColor(combined_panel, cv2.COLOR_BGR2RGB))
+        axes[1].set_title(f"Matching Visualization - Frame {frame_idx}\n{n_matched} matches, Avg IoU: {avg_iou:.3f}", fontsize=12)
+        axes[1].axis('off')
+        
+        axes[2].imshow(cv2.cvtColor(pred_panel, cv2.COLOR_BGR2RGB))
+        axes[2].set_title(f"Predictions\n{len(pred_objects)} objects ({n_matched} matched, {n_unmatched_pred} FP)", fontsize=12)
+        axes[2].axis('off')
+        
+        plt.suptitle(f"GT-to-Prediction Matching - Frame {frame_idx}", fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved matching visualization to: {save_path}")
+        
+        plt.show()
+    
+    if save_path and not show:
+        cv2.imwrite(save_path, combined)
+        print(f"Saved matching visualization to: {save_path}")
+    
+    return combined
+
+
 def match_predictions_to_gt(gt_objects: List[GTObject], 
                             pred_objects: List[PredObject],
-                            iou_threshold: float = 0.3) -> Tuple[Dict[int, int], Dict[int, float]]:
+                            iou_threshold: float = 0.3,
+                            rgb_image: np.ndarray = None,
+                            frame_idx: int = 0,
+                            visualize: bool = False,
+                            save_path: str = None) -> Tuple[Dict[int, int], Dict[int, float]]:
     """
     Match predicted objects to ground truth using greedy matching.
+    
+    Args:
+        gt_objects: List of ground truth objects
+        pred_objects: List of predicted objects
+        iou_threshold: Minimum IoU for a valid match
+        rgb_image: Optional RGB image for visualization
+        frame_idx: Frame index for visualization title
+        visualize: Whether to show matching visualization
+        save_path: Optional path to save visualization
     
     Returns:
         mapping: Dict[gt_track_id, pred_global_id]
         ious: Dict[gt_track_id, iou_score]
     """
-    print(f"[DEBUG] branch_tracking.match_reds_to_gt gt we got: len {len(gt_objects)}")
+    print(f"[DEBUG] match_predictions_to_gt: GT={len(gt_objects)}, Pred={len(pred_objects)}")
     if not gt_objects or not pred_objects:
         return {}, {}
     
@@ -519,7 +736,7 @@ def match_predictions_to_gt(gt_objects: List[GTObject],
     iou_matrix = np.zeros((n_gt, n_pred))
     
     for i, gt_obj in enumerate(gt_objects):
-        print(f"[DEBUG benchmark_tracking.match_pred_to_gt] GT: t_id {gt_obj.track_id}, class_name: {gt_obj.class_name}, sem_id:{gt_obj.semantic_id}")
+        print(f"  GT[{i}]: track_id={gt_obj.track_id}, class={gt_obj.class_name}, sem_id={gt_obj.semantic_id}")
         for j, pred_obj in enumerate(pred_objects):
             iou = compute_mask_iou(gt_obj.mask, pred_obj.mask)
             iou_matrix[i, j] = iou
@@ -552,8 +769,33 @@ def match_predictions_to_gt(gt_objects: List[GTObject],
         
         used_gt.add(gt_idx)
         used_pred.add(pred_idx)
+        
+        print(f"  MATCH: GT:{gt_obj.track_id} ({gt_obj.class_name}) <-> Pred:{pred_obj.global_id} ({pred_obj.class_name}) IoU={iou:.3f}")
     
-    print(f"[DEBUG: benchmarking_tracking]: mappings from pred -> gt: {mapping}")
+    # Report unmatched
+    unmatched_gt = [gt_objects[i] for i in range(n_gt) if i not in used_gt]
+    unmatched_pred = [pred_objects[j] for j in range(n_pred) if j not in used_pred]
+    
+    if unmatched_gt:
+        print(f"  UNMATCHED GT (FN): {[(g.track_id, g.class_name) for g in unmatched_gt]}")
+    if unmatched_pred:
+        print(f"  UNMATCHED Pred (FP): {[(p.global_id, p.class_name) for p in unmatched_pred]}")
+    
+    print(f"[DEBUG] Final mapping: {mapping}")
+    
+    # === VISUALIZATION ===
+    if visualize and rgb_image is not None:
+        visualize_matching(
+            rgb_image=rgb_image,
+            gt_objects=gt_objects,
+            pred_objects=pred_objects,
+            mapping=mapping,
+            ious=ious,
+            frame_idx=frame_idx,
+            save_path=save_path,
+            show=True
+        )
+    
     return mapping, ious
 
 
@@ -756,17 +998,36 @@ class TrackingBenchmark:
                 )
                 pred_objects.append(pred_obj)
             
-            # Match predictions to GT
-            gt_to_pred, gt_ious = match_predictions_to_gt(gt_objects, pred_objects, iou_threshold=0.3)
-            
-            # Update metrics
-            self._update_frame_metrics(frame_idx, gt_objects, pred_objects, gt_to_pred, gt_ious)
-            
-            # === DEBUG VISUALIZATION ===
+            # === DEBUG VISUALIZATION CONFIG ===
             vis_cfg = self.cfg.get('visualization', {})
             vis_enabled = vis_cfg.get('enabled', False)
             vis_interval = vis_cfg.get('interval', 10)  # Visualize every N frames
             vis_save_dir = vis_cfg.get('save_dir', None)
+            should_visualize = vis_enabled and (frame_idx % vis_interval == 0 or frame_idx == 0)
+            
+            # Load RGB for visualization if needed
+            rgb_image = None
+            if should_visualize:
+                rgb_image = cv2.imread(rgb_cur_path)
+            
+            # Prepare save path for matching visualization
+            match_vis_save_path = None
+            if vis_save_dir and should_visualize:
+                os.makedirs(vis_save_dir, exist_ok=True)
+                match_vis_save_path = os.path.join(vis_save_dir, f"matching_frame_{frame_idx:05d}.png")
+            
+            # Match predictions to GT (with optional visualization)
+            gt_to_pred, gt_ious = match_predictions_to_gt(
+                gt_objects, pred_objects, 
+                iou_threshold=0.3,
+                rgb_image=rgb_image,
+                frame_idx=frame_idx,
+                visualize=should_visualize,
+                save_path=match_vis_save_path
+            )
+            
+            # Update metrics
+            self._update_frame_metrics(frame_idx, gt_objects, pred_objects, gt_to_pred, gt_ious)
             
             if vis_enabled and (frame_idx % vis_interval == 0 or frame_idx == 0):
                 # === PRINT REGISTRY STATE ===
@@ -1645,7 +1906,7 @@ if __name__ == "__main__":
         # DEBUG VISUALIZATION SETTINGS
         # ============================================================
         'visualization': {
-            'enabled': False,  # Master switch for all visualization
+            'enabled': True,  # Master switch for all visualization
             
             # What to visualize
             'show_2d': True,      # YOLO masks with class IDs & global IDs
@@ -1660,7 +1921,7 @@ if __name__ == "__main__":
             'point_size': 2.0,     # Point size for 3D visualization
             
             # Save options (optional)
-            'save_dir': None,      # Directory to save visualizations (None = don't save)
+            'save_dir': "/home/maribjonov_mr/metr/yolo_sgg",      # Directory to save visualizations (None = don't save)
             # Example: 'save_dir': './debug_vis'
         }
     })
