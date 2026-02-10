@@ -71,7 +71,9 @@ USE_TRAJ = True
 # Visualization tweaks
 SWAP_YZ = False  # try True if axes look rotated
 MAX_BOX_EDGE = 20.0  # meters; filter very large boxes
-IGNORE_PRIM_PREFIXES = ["/World/env"]
+# Prim paths to ignore (be specific - e.g. "/World/env/ground" not "/World/env")
+# Set to empty list [] to show all objects
+IGNORE_PRIM_PREFIXES = []  # Was ["/World/env"] which filtered everything
 
 # 2D Visualization settings (matplotlib)
 SHOW_2D_VIS = True  # Show matplotlib 2D visualization
@@ -344,6 +346,7 @@ def visualize_2d_matplotlib(
     
     # Filter boxes
     filtered_bboxes = []
+    skipped_count = 0
     for bbox in bboxes_2d:
         prim = bbox.get("prim_path", "")
         skip = False
@@ -351,8 +354,14 @@ def visualize_2d_matplotlib(
             if prim.startswith(prefix):
                 skip = True
                 break
-        if not skip:
+        if skip:
+            skipped_count += 1
+        else:
             filtered_bboxes.append(bbox)
+    
+    print(f"[2D VIS] Total boxes: {len(bboxes_2d)}, Kept: {len(filtered_bboxes)}, Skipped: {skipped_count}")
+    if len(filtered_bboxes) == 0 and len(bboxes_2d) > 0:
+        print(f"[WARNING] All boxes filtered out! Check IGNORE_PRIM_PREFIXES: {ignore_prefixes}")
     
     # Draw masks
     if show_mask and seg_map is not None:

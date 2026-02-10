@@ -480,22 +480,21 @@ while simulation_app.is_running():
     seg_ann.attach([render_product_path])
     seg_data = seg_ann.get_data()
     print(f"seg_data keys: {seg_data['info']}")
-    seg_info = seg_data['info']['idToLabels']
+    seg_info_from_seg = seg_data['info']['idToLabels']  # Keep original for reference
     seg_image = seg_data['data'].astype(np.uint8)
 
     threed_bbox = rep.AnnotatorRegistry.get_annotator("bounding_box_3d")
     threed_bbox.attach([render_product_path])
     threed_bbox_data = threed_bbox.get_data()
-    # print(f"==============Type threed_bbox_data: {type(threed_bbox_data)}, dir: {dir(threed_bbox_data)}")
-    # print(threed_bbox_data['data'])
-    # print(threed_bbox_data['info'])
     
     twod_bbox = rep.AnnotatorRegistry.get_annotator("bounding_box_2d_tight")
     twod_bbox.attach([render_product_path])
     twod_bbox_data = twod_bbox.get_data()
-    # print(f"==============Type Nd_bbox_data: {type(twod_bbox_data)}, dir: {dir(twod_bbox_data)}")
-    # print(twod_bbox_data['data'])
-    # print(twod_bbox_data['info'])
+    
+    # IMPORTANT: Use bbox annotator's idToLabels for consistency
+    # This ensures semantic_id in semantic.json matches semantic_id in bbox.json
+    seg_info = twod_bbox_data['info'].get('idToLabels', {}) or threed_bbox_data['info'].get('idToLabels', {})
+    print(f"[DEBUG] Using idToLabels from bbox annotator (not segmentation) for consistency")
     base_dir_rgb = base_dir+"rgb"
     base_dir_seg = base_dir+"seg"
     base_dir_depth = base_dir+"depth"
