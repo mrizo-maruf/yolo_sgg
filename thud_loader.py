@@ -193,16 +193,43 @@ class THUDDataLoader:
         
         return definitions
     
+    def _discover_existing_frames(self) -> set:
+        """Discover frame indices from actual files on disk.
+        
+        Returns:
+            Set of frame indices that have actual RGB files on disk.
+        """
+        existing_frames = set()
+        
+        # Scan RGB directory for actual files
+        if self.rgb_dir.exists():
+            for rgb_file in self.rgb_dir.glob("rgb_*.png"):
+                match = re.search(r'rgb_(\d+)\.png', rgb_file.name, re.IGNORECASE)
+                if match:
+                    existing_frames.add(int(match.group(1)))
+        
+        return existing_frames
+    
     def _parse_capture_files(self):
         """Parse all captures_XXX.json files and build frame index.
         
         Note: Each frame may have multiple capture entries in the JSON (one for 3D bbox,
         one for 2D bbox + instance segmentation, etc.). We merge all annotations for each frame.
+        Only frames that have actual files on disk are included.
         """
         capture_files = sorted(self.label_dir.glob("captures_*.json"))
         
         if not capture_files:
             raise FileNotFoundError(f"No capture files found in {self.label_dir}")
+        
+        # First, discover what frames actually exist on disk
+        existing_frames = self._discover_existing_frames()
+        
+        if self.verbose:
+            print(f"  Found {len(existing_frames)} actual RGB files on disk")
+        
+        # Parse JSON annotations
+        json_frame_data = {}  # frame_idx -> annotations data
         
         for capture_file in capture_files:
             with open(capture_file, 'r') as f:
@@ -214,21 +241,41 @@ class THUDDataLoader:
                 frame_idx = self._extract_frame_index(filename)
                 
                 if frame_idx is not None:
-                    if frame_idx not in self.frame_data:
+                    if frame_idx not in json_frame_data:
                         # First capture for this frame - store base data
-                        self.frame_data[frame_idx] = {
+                        json_frame_data[frame_idx] = {
                             'sensor': capture.get('sensor', {}),
                             'annotations': []
                         }
                     
                     # Merge annotations from this capture
                     annotations = capture.get('annotations', [])
-                    self.frame_data[frame_idx]['annotations'].extend(annotations)
+                    json_frame_data[frame_idx]['annotations'].extend(annotations)
+        
+        # Now, only keep frames that have actual files on disk
+        # If no existing_frames found (empty RGB dir), fall back to JSON frame indices
+        if existing_frames:
+            for frame_idx in existing_frames:
+                if frame_idx in json_frame_data:
+                    self.frame_data[frame_idx] = json_frame_data[frame_idx]
+                else:
+                    # Frame exists on disk but no JSON annotation - create empty annotation
+                    self.frame_data[frame_idx] = {
+                        'sensor': {},
+                        'annotations': []
+                    }
+        else:
+            # Fallback: use JSON frame indices (original behavior)
+            self.frame_data = json_frame_data
         
         self.frame_indices = sorted(self.frame_data.keys())
         
         if self.verbose:
             print(f"  Parsed {len(capture_files)} capture files")
+            if existing_frames:
+                json_only = len(json_frame_data) - len([f for f in json_frame_data if f in existing_frames])
+                if json_only > 0:
+                    print(f"  [INFO] {json_only} JSON frames have no matching files on disk")
     
     def _extract_frame_index(self, filename: str) -> Optional[int]:
         """Extract frame index from filename like 'RGBxxx/rgb_2.png' or 'InstanceSegmentation.../Instance_2.png'."""
