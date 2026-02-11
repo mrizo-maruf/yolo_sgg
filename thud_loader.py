@@ -194,7 +194,11 @@ class THUDDataLoader:
         return definitions
     
     def _parse_capture_files(self):
-        """Parse all captures_XXX.json files and build frame index."""
+        """Parse all captures_XXX.json files and build frame index.
+        
+        Note: Each frame may have multiple capture entries in the JSON (one for 3D bbox,
+        one for 2D bbox + instance segmentation, etc.). We merge all annotations for each frame.
+        """
         capture_files = sorted(self.label_dir.glob("captures_*.json"))
         
         if not capture_files:
@@ -209,8 +213,17 @@ class THUDDataLoader:
                 filename = capture.get('filename', '')
                 frame_idx = self._extract_frame_index(filename)
                 
-                if frame_idx is not None and frame_idx not in self.frame_data:
-                    self.frame_data[frame_idx] = capture
+                if frame_idx is not None:
+                    if frame_idx not in self.frame_data:
+                        # First capture for this frame - store base data
+                        self.frame_data[frame_idx] = {
+                            'sensor': capture.get('sensor', {}),
+                            'annotations': []
+                        }
+                    
+                    # Merge annotations from this capture
+                    annotations = capture.get('annotations', [])
+                    self.frame_data[frame_idx]['annotations'].extend(annotations)
         
         self.frame_indices = sorted(self.frame_data.keys())
         
@@ -218,8 +231,17 @@ class THUDDataLoader:
             print(f"  Parsed {len(capture_files)} capture files")
     
     def _extract_frame_index(self, filename: str) -> Optional[int]:
-        """Extract frame index from filename like 'RGBxxx/rgb_2.png'."""
-        match = re.search(r'rgb_(\d+)\.png', filename)
+        """Extract frame index from filename like 'RGBxxx/rgb_2.png' or 'InstanceSegmentation.../Instance_2.png'."""
+        # Try rgb pattern first
+        match = re.search(r'rgb_(\d+)\.png', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        # Try instance pattern
+        match = re.search(r'Instance_(\d+)\.png', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        # Try depth pattern
+        match = re.search(r'depth_(\d+)\.png', filename, re.IGNORECASE)
         if match:
             return int(match.group(1))
         return None
@@ -478,6 +500,46 @@ class THUDDataLoader:
             )
             gt_objects.append(gt_obj)
         
+        # Also process 3D bbox objects that don't have 2D bboxes
+        for inst_id, bbox_3d_data in bbox_3d_by_id.items():
+            if inst_id in processed_ids:
+                continue
+            processed_ids.add(inst_id)
+            
+            label_id = bbox_3d_data.get('label_id', -1)
+            class_name = bbox_3d_data.get('label_name', 'unknown')
+            
+            trans = bbox_3d_data.get('translation', {})
+            bbox_3d_center = [trans.get('x', 0), trans.get('y', 0), trans.get('z', 0)]
+            
+            size = bbox_3d_data.get('size', {})
+            bbox_3d_size = [size.get('x', 0), size.get('y', 0), size.get('z', 0)]
+            
+            rot = bbox_3d_data.get('rotation', {})
+            bbox_3d_rotation = [rot.get('x', 0), rot.get('y', 0), rot.get('z', 0), rot.get('w', 1)]
+            
+            # Get instance color (may also be available for 3D-only objects)
+            color = instance_colors.get(inst_id)
+            
+            # Extract mask from instance segmentation image
+            mask = None
+            if instance_img is not None and color is not None:
+                mask = self._extract_instance_mask(instance_img, color)
+            
+            gt_obj = GTObject(
+                track_id=inst_id,
+                class_name=class_name,
+                label_id=label_id,
+                mask=mask,
+                bbox_2d=None,  # No 2D bbox for this object
+                bbox_3d_center=bbox_3d_center,
+                bbox_3d_size=bbox_3d_size,
+                bbox_3d_rotation=bbox_3d_rotation,
+                color_rgba=color,
+                visibility=1.0
+            )
+            gt_objects.append(gt_obj)
+        
         return gt_objects
     
     def _extract_instance_mask(self, instance_img: np.ndarray, 
@@ -528,7 +590,9 @@ class THUDDataLoader:
         
         for frame_idx, capture in self.frame_data.items():
             for ann in capture.get('annotations', []):
-                if ann.get('id') == 'bounding box':
+                ann_id = ann.get('id', '')
+                # Check all annotation types that have instance_id
+                if ann_id in ('bounding box', 'bounding box 3D', 'instance segmentation'):
                     for v in ann.get('values', []):
                         inst_id = v.get('instance_id')
                         if inst_id is not None:
@@ -540,6 +604,7 @@ class THUDDataLoader:
         """Get list of all class names in the dataset."""
         classes = set()
         for label_map in [self.label_definitions['bounding_box'],
+                         self.label_definitions['bounding_box_3d'],
                          self.label_definitions['instance_segmentation']]:
             classes.update(label_map.values())
         return sorted(list(classes))
