@@ -5,13 +5,13 @@ import sys
 
 # ---------------------- Configuration ----------------------
 BACKGROUND_STAGE_PATH = "/World/env"
-scene_name = "scene_7"
+scene_name = "scene_1"
 BACKGROUND_USD_PATH = f"/workspace/isaaclab/SG/is_benchmark_scenes/{scene_name}.usd"
 keyframes_move = [
-    # nav goal move
-    {'time': 0, 'translation': [-3, 0, 1.5], 'euler_angles': [0, 20, 0]},
-    {'time': 10, 'translation': [-1, 2, 1.5], 'euler_angles': [0, 20, -45]},
-    {'time': 20, 'translation': [-1, -2, 1.5], 'euler_angles': [0, 20, 45]},
+    {'time': 0, 'translation': [0, 4, 1.5], 'euler_angles': [0, 20, 0]},
+    {'time': 10, 'translation': [4.5, 4, 1.5], 'euler_angles': [0, 20, 20]},
+    {'time': 20, 'translation': [6.5, 6, 1.5], 'euler_angles': [0, 20, -40]},
+    {'time': 30, 'translation': [7, 5.5, 1.5], 'euler_angles': [0, 20, -40]},
 ]
 CONFIG = {"renderer": "RayTracedLighting", "headless": True, "hide_ui": False}
 simulation_app = SimulationApp(CONFIG)
@@ -172,14 +172,117 @@ def _to_py(obj):
         return [_to_py(x) for x in obj]
     return obj
 
-def build_2d_records(twod_bbox_data, prim_path_to_instance_id: dict = None, seg_id_to_semantics: dict = None):
+
+def build_unified_id_mapping(seg_data, twod_bbox_data, threed_bbox_data, max_abs_extent: float = 1e6):
     """
-    Parse 2D bbox data and map to instance segmentation IDs via prim_path matching.
+    Build a unified mapping from prim_path to all annotation IDs.
+    Only includes 3D bbox entries that pass validation (finite values, reasonable extent).
+    
+    Returns a dict: prim_path -> {
+        'instance_seg_id': int or -1,
+        'bbox_2d_id': int or -1,
+        'bbox_2d_semantic_id': int or -1,
+        'bbox_3d_id': int or -1,
+        'bbox_3d_semantic_id': int or -1,
+        'semantic_label': dict,
+    }
+    """
+    unified = {}
+    
+    # 1. Parse instance segmentation: idToLabels maps instance_id -> prim_path
+    seg_info = seg_data.get('info', {}) or {}
+    seg_id_to_labels = seg_info.get('idToLabels', {}) or {}
+    seg_id_to_semantics = seg_info.get('idToSemantics', {}) or {}
+    
+    for inst_id_str, prim_path in seg_id_to_labels.items():
+        if not str(inst_id_str).isdigit():
+            continue
+        inst_id = int(inst_id_str)
+        if prim_path not in unified:
+            unified[prim_path] = {
+                'instance_seg_id': -1,
+                'bbox_2d_id': -1,
+                'bbox_2d_semantic_id': -1,
+                'bbox_3d_id': -1,
+                'bbox_3d_semantic_id': -1,
+                'semantic_label': {},
+            }
+        unified[prim_path]['instance_seg_id'] = inst_id
+        unified[prim_path]['semantic_label'] = seg_id_to_semantics.get(inst_id_str, {})
+    
+    # 2. Parse 2D bbox: primPaths[i] corresponds to bboxIds[i] and data[i]
+    if twod_bbox_data is not None:
+        twod_info = twod_bbox_data.get('info', {}) or {}
+        twod_data = twod_bbox_data.get('data', None)
+        twod_prim_paths = twod_info.get('primPaths', [])
+        twod_bbox_ids = np.asarray(twod_info.get('bboxIds', []), dtype=np.uint32)
+        
+        if twod_data is not None and len(twod_data) > 0:
+            twod_data = np.asarray(twod_data)
+            for idx, prim_path in enumerate(twod_prim_paths):
+                if prim_path not in unified:
+                    unified[prim_path] = {
+                        'instance_seg_id': -1,
+                        'bbox_2d_id': -1,
+                        'bbox_2d_semantic_id': -1,
+                        'bbox_3d_id': -1,
+                        'bbox_3d_semantic_id': -1,
+                        'semantic_label': {},
+                    }
+                bbox_id = int(twod_bbox_ids[idx]) if idx < len(twod_bbox_ids) else idx
+                semantic_id = int(twod_data[idx][0]) if idx < len(twod_data) else -1
+                unified[prim_path]['bbox_2d_id'] = bbox_id
+                unified[prim_path]['bbox_2d_semantic_id'] = semantic_id
+    
+    # 3. Parse 3D bbox: primPaths[i] corresponds to bboxIds[i] and data[i]
+    #    ONLY include entries that pass validation (will actually appear in output)
+    if threed_bbox_data is not None:
+        threed_info = threed_bbox_data.get('info', {}) or {}
+        threed_data = threed_bbox_data.get('data', None)
+        threed_prim_paths = threed_info.get('primPaths', [])
+        threed_bbox_ids = np.asarray(threed_info.get('bboxIds', []), dtype=np.uint32)
+        
+        if threed_data is not None and len(threed_data) > 0:
+            for idx, prim_path in enumerate(threed_prim_paths):
+                row = threed_data[idx]
+                
+                # Apply same validation as build_3d_boxes - skip invalid boxes
+                x_min_local = float(row["x_min"]); y_min_local = float(row["y_min"]); z_min_local = float(row["z_min"])
+                x_max_local = float(row["x_max"]); y_max_local = float(row["y_max"]); z_max_local = float(row["z_max"])
+                vals = np.array([x_min_local, y_min_local, z_min_local, x_max_local, y_max_local, z_max_local], dtype=np.float64)
+                
+                if (not np.isfinite(vals).all()) or (np.max(np.abs(vals)) > max_abs_extent):
+                    print(f"[DEBUG] Skipping invalid 3D bbox for '{prim_path}': vals={vals}")
+                    continue
+                
+                if prim_path not in unified:
+                    unified[prim_path] = {
+                        'instance_seg_id': -1,
+                        'bbox_2d_id': -1,
+                        'bbox_2d_semantic_id': -1,
+                        'bbox_3d_id': -1,
+                        'bbox_3d_semantic_id': -1,
+                        'semantic_label': {},
+                    }
+                bbox_id = int(threed_bbox_ids[idx]) if idx < len(threed_bbox_ids) else idx
+                semantic_id = int(row['semanticId'])
+                unified[prim_path]['bbox_3d_id'] = bbox_id
+                unified[prim_path]['bbox_3d_semantic_id'] = semantic_id
+    
+    print(f"[DEBUG] Unified ID mapping:")
+    for prim_path, ids in unified.items():
+        print(f"  {prim_path}: {ids}")
+    
+    return unified
+
+
+def build_2d_records(twod_bbox_data, unified_mapping: dict = None):
+    """
+    Parse 2D bbox data and include cross-reference IDs from unified mapping.
     
     Args:
         twod_bbox_data: bounding_box_2d_tight annotator output
-        prim_path_to_instance_id: mapping from prim_path -> instance_id
-        seg_id_to_semantics: mapping from instance_id -> semantic_labels
+        unified_mapping: mapping from prim_path -> all annotation IDs
     """
     if twod_bbox_data is None:
         return []
@@ -195,7 +298,7 @@ def build_2d_records(twod_bbox_data, prim_path_to_instance_id: dict = None, seg_
     prim_paths = info.get("primPaths", [None] * len(data))
     id_to_labels = info.get("idToLabels", {}) or {}
 
-    prim_path_to_instance_id = prim_path_to_instance_id or {}
+    unified_mapping = unified_mapping or {}
 
     records = []
     for idx, row in enumerate(data):
@@ -208,30 +311,28 @@ def build_2d_records(twod_bbox_data, prim_path_to_instance_id: dict = None, seg_
         bbox_id = int(bbox_ids[idx]) if idx < len(bbox_ids) else idx
         prim_path = prim_paths[idx] if idx < len(prim_paths) else None
 
-        # Map prim_path to instance_id for mask extraction
-        instance_id = prim_path_to_instance_id.get(prim_path, bbox_semantic_id)
-        
-        # Get semantic label from instance segmentation's idToSemantics
-        semantic_dict = {}
-        if seg_id_to_semantics:
-            semantic_dict = seg_id_to_semantics.get(str(instance_id), {})
+        # Get cross-reference IDs from unified mapping
+        ids = unified_mapping.get(prim_path, {})
+        instance_seg_id = ids.get('instance_seg_id', -1)
+        bbox_3d_id = ids.get('bbox_3d_id', -1)
+        semantic_label = ids.get('semantic_label', {})
 
         # Get label from bbox annotator
         label_dict = id_to_labels.get(str(bbox_semantic_id), {})
 
         records.append({
-            "bbox_id": bbox_id,
-            "instance_id": instance_id,  # USE INSTANCE ID for mask extraction!
-            "semantic_id": instance_id,  # For backward compatibility with loader
-            "bbox_semantic_id": bbox_semantic_id,  # Keep original for reference
+            "bbox_2d_id": bbox_id,
+            "bbox_2d_semantic_id": bbox_semantic_id,
+            "instance_seg_id": instance_seg_id,
+            "bbox_3d_id": bbox_3d_id,
             "prim_path": prim_path,
             "label": label_dict,
-            "semantic_label": semantic_dict,  # From instance segmentation
+            "semantic_label": semantic_label,
             "xyxy": [x_min, y_min, x_max, y_max],
             "visibility_or_occlusion": vis_or_occ,
         })
         
-        print(f"[DEBUG] 2D Box '{prim_path}': bbox_semantic_id={bbox_semantic_id} -> instance_id={instance_id}")
+        print(f"[DEBUG] 2D Box '{prim_path}': bbox_2d_id={bbox_id}, instance_seg_id={instance_seg_id}, bbox_3d_id={bbox_3d_id}")
 
     return records
 def _label_from_idToLabels(idToLabels: dict, sid: int):
@@ -267,7 +368,7 @@ def _label_from_idToLabels(idToLabels: dict, sid: int):
     return str(main_val)
 
 
-def build_3d_boxes(Nd_bbox_data, prim_path_to_instance_id: dict = None, seg_id_to_semantics: dict = None, max_abs_extent: float = 1e6):
+def build_3d_boxes(Nd_bbox_data, unified_mapping: dict = None, max_abs_extent: float = 1e6):
     """Parse Replicator bounding_box_3d output and transform to WORLD coordinates.
 
     The annotator returns:
@@ -276,8 +377,7 @@ def build_3d_boxes(Nd_bbox_data, prim_path_to_instance_id: dict = None, seg_id_t
     
     Args:
         Nd_bbox_data: bounding_box_3d annotator output
-        prim_path_to_instance_id: mapping from prim_path -> instance_id
-        seg_id_to_semantics: mapping from instance_id -> semantic_labels
+        unified_mapping: mapping from prim_path -> all annotation IDs
     """
 
     data = Nd_bbox_data.get("data", None)
@@ -288,7 +388,7 @@ def build_3d_boxes(Nd_bbox_data, prim_path_to_instance_id: dict = None, seg_id_t
     bboxIds = np.asarray(info.get("bboxIds", np.arange(len(data) if data is not None else 0)), dtype=np.uint32)
     semanticOcclusion = info.get("semanticOcclusion", None)
 
-    prim_path_to_instance_id = prim_path_to_instance_id or {}
+    unified_mapping = unified_mapping or {}
 
     boxes = []
     if data is None or len(data) == 0:
@@ -298,13 +398,11 @@ def build_3d_boxes(Nd_bbox_data, prim_path_to_instance_id: dict = None, seg_id_t
         bbox_semantic_id = int(row["semanticId"])
         prim_path = primPaths[idx] if idx < len(primPaths) else None
         
-        # Map prim_path to instance_id for mask extraction
-        instance_id = prim_path_to_instance_id.get(prim_path, bbox_semantic_id)
-        
-        # Get semantic label from instance segmentation's idToSemantics
-        semantic_dict = {}
-        if seg_id_to_semantics:
-            semantic_dict = seg_id_to_semantics.get(str(instance_id), {})
+        # Get cross-reference IDs from unified mapping
+        ids = unified_mapping.get(prim_path, {})
+        instance_seg_id = ids.get('instance_seg_id', -1)
+        bbox_2d_id = ids.get('bbox_2d_id', -1)
+        semantic_label = ids.get('semantic_label', {})
 
         # Local AABB extents (in object frame)
         x_min_local = float(row["x_min"]); y_min_local = float(row["y_min"]); z_min_local = float(row["z_min"])
@@ -358,20 +456,20 @@ def build_3d_boxes(Nd_bbox_data, prim_path_to_instance_id: dict = None, seg_id_t
 
         boxes.append({
             "track_id": bbox_id,
-            "bbox_id": bbox_id,
+            "bbox_3d_id": bbox_id,
+            "bbox_3d_semantic_id": bbox_semantic_id,
+            "instance_seg_id": instance_seg_id,
+            "bbox_2d_id": bbox_2d_id,
             "prim_path": prim_path,
-            "instance_id": instance_id,  # USE INSTANCE ID for mask extraction!
-            "semantic_id": instance_id,  # For backward compatibility with loader
-            "bbox_semantic_id": bbox_semantic_id,  # Keep original for reference
             "label": label,
-            "semantic_label": semantic_dict,  # From instance segmentation
+            "semantic_label": semantic_label,
             "aabb_xyzmin_xyzmax": [x_min_world, y_min_world, z_min_world,
                                    x_max_world, y_max_world, z_max_world],
             "transform_4x4": T_world_local.tolist(),
             "occlusion_ratio": occ,
         })
         
-        print(f"[DEBUG] 3D Box '{label}' ({prim_path}): bbox_semantic_id={bbox_semantic_id} -> instance_id={instance_id}")
+        print(f"[DEBUG] 3D Box '{label}' ({prim_path}): bbox_3d_id={bbox_id}, instance_seg_id={instance_seg_id}, bbox_2d_id={bbox_2d_id}")
         
     return boxes
 # ---------------------- Camera ----------------------
@@ -534,12 +632,8 @@ while simulation_app.is_running():
     print(f"[DEBUG] Bbox 3D idToLabels: {threed_bbox_data['info'].get('idToLabels', {})}")
     print(f"[DEBUG] Bbox 2D idToLabels: {twod_bbox_data['info'].get('idToLabels', {})}")
     
-    # Build prim_path -> instance_id mapping for bbox matching
-    prim_path_to_instance_id = {}
-    for inst_id_str, prim_path in seg_id_to_labels.items():
-        if inst_id_str.isdigit():
-            prim_path_to_instance_id[prim_path] = int(inst_id_str)
-    print(f"[DEBUG] Prim path to instance_id mapping: {prim_path_to_instance_id}")
+    # Build unified mapping from prim_path to all annotation IDs
+    unified_mapping = build_unified_id_mapping(seg_data, twod_bbox_data, threed_bbox_data)
     
     base_dir_rgb = base_dir+"rgb"
     base_dir_seg = base_dir+"seg"
@@ -582,7 +676,7 @@ while simulation_app.is_running():
         with open(traj_file_path, "a") as traj_file:
             traj_file.write(' '.join(map(str, T_ros.flatten())) + "\n")
 
-        # Build enhanced seg_info using instance segmentation data
+        # Build enhanced seg_info using instance segmentation data and unified mapping
         enhanced_seg_info = {}
         for inst_id_str, prim_path in seg_id_to_labels.items():
             if not str(inst_id_str).isdigit():
@@ -592,7 +686,13 @@ while simulation_app.is_running():
             # Get semantic label from idToSemantics
             semantic_dict = seg_id_to_semantics.get(inst_id_str, {})
             
+            # Get cross-reference IDs from unified mapping
+            ids = unified_mapping.get(prim_path, {})
+            
             enhanced_seg_info[inst_id_str] = {
+                "instance_seg_id": inst_id_int,
+                "bbox_2d_id": ids.get('bbox_2d_id', -1),
+                "bbox_3d_id": ids.get('bbox_3d_id', -1),
                 "prim_path": prim_path,
                 "label": semantic_dict,  # e.g., {'goal': 'bowl'}
                 "color_bgr": color_map[inst_id_int].tolist() if inst_id_int < len(color_map) else [0, 0, 0]
@@ -602,12 +702,9 @@ while simulation_app.is_running():
         with open(seg_info_path, "w") as json_file:
             json.dump(enhanced_seg_info, json_file, indent=4)
 
-        # 2) parse bbox annotators - pass prim_path_to_instance_id for direct matching
-        boxes2d = build_2d_records(twod_bbox_data, prim_path_to_instance_id=prim_path_to_instance_id,
-                                   seg_id_to_semantics=seg_id_to_semantics)
-        # Use annotator's transform (row-major) to get world coordinates
-        boxes3d = build_3d_boxes(threed_bbox_data, prim_path_to_instance_id=prim_path_to_instance_id,
-                                 seg_id_to_semantics=seg_id_to_semantics)
+        # Parse bbox annotators using unified mapping for cross-references
+        boxes2d = build_2d_records(twod_bbox_data, unified_mapping=unified_mapping)
+        boxes3d = build_3d_boxes(threed_bbox_data, unified_mapping=unified_mapping)
         
         # print(boxes2d)
         # print(boxes3d)
@@ -626,6 +723,11 @@ while simulation_app.is_running():
             json.dump(boxes, f, indent=4)
         # save json
 
+    print('='*50)
+    print(f"seg info: {seg_data['info']}")
+    print(f"2d bbox: {twod_bbox_data['info']}")
+    print(f"3d info: {threed_bbox_data['info']}")
+    print('='*50)
 
     frame_index += 1
 

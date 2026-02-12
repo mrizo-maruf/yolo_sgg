@@ -264,7 +264,8 @@ def visualize_2d_individual_objects(frame_data: FrameData, mask_alpha: float = 0
         plt.tight_layout()
         plt.show()
         
-        print(f"    Showed object {obj_idx}/{len(objects)}: '{obj.class_name}' (T:{obj.track_id}, I:{obj.instance_id})")
+        print(f"    Showed object {obj_idx}/{len(objects)}: '{obj.class_name}' "
+              f"(T:{obj.track_id}, 3d:{obj.bbox_3d_id}, 2d:{obj.bbox_2d_id}, seg:{obj.instance_seg_id})")
 
 
 def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
@@ -324,7 +325,7 @@ def visualize_2d(frame_data: FrameData, mask_alpha: float = 0.4):
             ax_overlay.add_patch(rect)
             
             # Draw label
-            label_text = f"T:{obj.track_id} | I:{obj.instance_id} | {obj.class_name}"
+            label_text = f"T:{obj.track_id} | {obj.class_name}"
             ax_overlay.text(
                 x1 + 2, y1 - 5,
                 label_text,
@@ -447,7 +448,8 @@ def visualize_3d(frame_data: FrameData, intrinsics, max_depth: float,
         
         geoms.append(ls)
         
-        print(f"    Box: '{obj.class_name}' T:{obj.track_id} I:{obj.instance_id} "
+        print(f"    Box: '{obj.class_name}' T:{obj.track_id} "
+              f"[3d:{obj.bbox_3d_id} 2d:{obj.bbox_2d_id} seg:{obj.instance_seg_id}] "
               f"center=({(xmin+xmax)/2:.2f}, {(ymin+ymax)/2:.2f}, {(zmin+zmax)/2:.2f}) "
               f"size=({sx:.2f}, {sy:.2f}, {sz:.2f})")
     
@@ -473,15 +475,16 @@ def print_frame_info(frame_data: FrameData):
         cam_pos = frame_data.cam_transform_4x4[:3, 3]
         print(f"  Camera position: ({cam_pos[0]:.3f}, {cam_pos[1]:.3f}, {cam_pos[2]:.3f})")
     
-    print(f"\n  Objects:")
+    print(f"\n  Objects (all have valid bbox_2d_id, bbox_3d_id, instance_seg_id):")
     for i, obj in enumerate(frame_data.gt_objects, 1):
         bbox_info = "Yes" if obj.bbox2d_xyxy is not None else "No"
         vis_info = f"{obj.visibility:.2f}" if obj.visibility is not None else "N/A"
         occ_info = f"{obj.occlusion:.2f}" if obj.occlusion is not None else "N/A"
         mask_pixels = np.sum(obj.mask) if obj.mask is not None else 0
         
-        print(f"    {i:2d}. Track:{obj.track_id:3d} Inst:{obj.instance_id:3d} "
-              f"'{obj.class_name:15s}' | 2D BBox:{bbox_info:3s} | "
+        print(f"    {i:2d}. Track:{obj.track_id:3d} "
+              f"[3d:{obj.bbox_3d_id:3d} 2d:{obj.bbox_2d_id:3d} seg:{obj.instance_seg_id:3d}] "
+              f"'{obj.class_name:15s}' | 2D:{bbox_info:3s} | "
               f"Vis:{vis_info:5s} Occ:{occ_info:5s} | Mask:{mask_pixels:6d}px")
 
 

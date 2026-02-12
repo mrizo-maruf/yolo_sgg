@@ -15,7 +15,11 @@ import numpy as np
 @dataclass(frozen=True)
 class GTObject:
     track_id: int
-    instance_id: int  # instance ID from segmentation (unique per object)
+    # Cross-reference IDs (all must be >= 0 for valid objects)
+    instance_seg_id: int  # instance ID from segmentation (unique per object)
+    bbox_2d_id: int       # ID from 2D bbox annotator
+    bbox_3d_id: int       # ID from 3D bbox annotator
+    
     class_name: str
     prim_path: Optional[str]  # USD prim path, e.g., "/World/env/bowl"
 
@@ -61,6 +65,7 @@ class IsaacSimSceneLoader:
         load_rgb: bool = False,
         load_depth: bool = False,
         skip_labels: Optional[Set[str]] = None,
+        require_all_ids: bool = True,  # Only load objects with all IDs >= 0
     ):
         self.scene_dir = Path(scene_dir)
         if not self.scene_dir.exists():
@@ -78,6 +83,7 @@ class IsaacSimSceneLoader:
         self.load_rgb = load_rgb
         self.load_depth = load_depth
         self.skip_labels = skip_labels if skip_labels is not None else set()
+        self.require_all_ids = require_all_ids
 
         # Optional: infer available frame indices from bbox files (robust)
         self.frame_indices = self._discover_frames()
@@ -132,7 +138,7 @@ class IsaacSimSceneLoader:
         seg_img = self._read_seg_bgr(seg_png_path)  # HxWx3 BGR
 
         # Build maps
-        bbox2d_by_bbox_id = self._parse_bbox2d_tight(bbox_data)
+        bbox2d_by_id = self._parse_bbox2d_tight(bbox_data)  # keyed by bbox_2d_id
         bbox3d_list = self._parse_bbox3d(bbox_data)
 
         # instance_id -> color_bgr (tuple) for mask extraction
@@ -140,21 +146,29 @@ class IsaacSimSceneLoader:
 
         gt_objects: List[GTObject] = []
         for b3d in bbox3d_list:
-            bbox_id = b3d["bbox_id"]
+            # Extract cross-reference IDs (new format)
+            bbox_3d_id = int(b3d.get("bbox_3d_id", -1))
+            bbox_2d_id = int(b3d.get("bbox_2d_id", -1))
+            instance_seg_id = int(b3d.get("instance_seg_id", -1))
             track_id = int(b3d["track_id"])
-            # Use instance_id (from instance segmentation) for mask lookup
-            instance_id = int(b3d.get("instance_id", b3d["semantic_id"]))
             prim_path = b3d.get("prim_path", None)
 
+            # Filter: require all IDs to be valid (>= 0) if enabled
+            if self.require_all_ids:
+                if bbox_3d_id < 0 or bbox_2d_id < 0 or instance_seg_id < 0:
+                    print(f"  [LOADER] SKIPPING object '{prim_path}': incomplete IDs "
+                          f"(3d={bbox_3d_id}, 2d={bbox_2d_id}, seg={instance_seg_id})")
+                    continue
+
             # class name: prefer b3d["label"] (string), else derive from 2D label dict, else fallback
-            class_name = self._infer_class_name(b3d=b3d, b2d=bbox2d_by_bbox_id.get(bbox_id))
+            b2d = bbox2d_by_id.get(bbox_2d_id)  # Look up 2D box by bbox_2d_id
+            class_name = self._infer_class_name(b3d=b3d, b2d=b2d)
             class_name_lower = class_name.lower()
             if any(skip_label in class_name_lower for skip_label in self.skip_labels):
-                print(f"[DEBUG IsaacSimSceneLoader.get_frame_data]: SKIPPING GT CLASS {class_name_lower}")
+                print(f"  [LOADER] SKIPPING GT CLASS '{class_name_lower}'")
                 continue
 
-            # 2D info (optional, may not exist)
-            b2d = bbox2d_by_bbox_id.get(bbox_id)
+            # 2D info (from the matched 2D box)
             bbox2d_xyxy = None
             visibility = None
             if b2d is not None:
@@ -178,11 +192,11 @@ class IsaacSimSceneLoader:
             occlusion = b3d.get("occlusion_ratio", None)
             occlusion = float(occlusion) if occlusion is not None else None
 
-            # Mask extraction: use instance_id to look up color from segmentation
-            color = color_by_instance_id.get(instance_id, None)
+            # Mask extraction: use instance_seg_id to look up color from segmentation
+            color = color_by_instance_id.get(instance_seg_id, None)
             if color is None:
                 # If missing mapping, make empty mask
-                print(f"  [LOADER] WARNING: No color mapping for instance_id={instance_id}, class='{class_name}'")
+                print(f"  [LOADER] WARNING: No color mapping for instance_seg_id={instance_seg_id}, class='{class_name}'")
                 mask = np.zeros(seg_img.shape[:2], dtype=bool)
             else:
                 # seg_img is BGR; color is (b,g,r)
@@ -191,7 +205,9 @@ class IsaacSimSceneLoader:
             gt_objects.append(
                 GTObject(
                     track_id=track_id,
-                    instance_id=instance_id,
+                    instance_seg_id=instance_seg_id,
+                    bbox_2d_id=bbox_2d_id,
+                    bbox_3d_id=bbox_3d_id,
                     class_name=class_name,
                     prim_path=prim_path,
                     bbox2d_xyxy=bbox2d_xyxy,
@@ -286,7 +302,8 @@ class IsaacSimSceneLoader:
     @staticmethod
     def _parse_bbox2d_tight(bbox_data: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         """
-        Returns bbox_id -> 2D box dict.
+        Returns bbox_2d_id -> 2D box dict.
+        Uses the new 'bbox_2d_id' field for keying.
         """
         b2d = (
             bbox_data.get("bboxes", {})
@@ -295,22 +312,25 @@ class IsaacSimSceneLoader:
         )
         out: Dict[int, Dict[str, Any]] = {}
         for b in b2d:
-            if "bbox_id" in b:
-                out[int(b["bbox_id"])] = b
+            # Use new format key 'bbox_2d_id'
+            bbox_2d_id = b.get("bbox_2d_id", b.get("bbox_id", None))
+            if bbox_2d_id is not None:
+                out[int(bbox_2d_id)] = b
         return out
 
     @staticmethod
     def _parse_bbox3d(bbox_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Returns list of 3D box dicts (each must have bbox_id, track_id, semantic_id).
+        Returns list of 3D box dicts.
+        Uses new format with bbox_3d_id, bbox_2d_id, instance_seg_id.
         """
         b3d = (
             bbox_data.get("bboxes", {})
                     .get("bbox_3d", {})
                     .get("boxes", [])
         )
-        # Optionally enforce required keys
-        required = {"bbox_id", "track_id", "semantic_id", "aabb_xyzmin_xyzmax", "transform_4x4"}
+        # Enforce required keys for new format
+        required = {"bbox_3d_id", "track_id", "aabb_xyzmin_xyzmax", "transform_4x4"}
         for i, b in enumerate(b3d):
             missing = required - set(b.keys())
             if missing:
@@ -320,9 +340,9 @@ class IsaacSimSceneLoader:
     @staticmethod
     def _parse_instance_color_map(seg_info: Dict[str, Any]) -> Dict[int, Tuple[int, int, int]]:
         """
-        seg_info keys are instance IDs as strings ("0","1","12",...).
-        Each entry has: prim_path, label, color_bgr.
-        Returns instance_id(int) -> (b,g,r) color tuple.
+        seg_info keys are instance seg IDs as strings ("0","1","12",...).
+        Each entry has: instance_seg_id, bbox_2d_id, bbox_3d_id, prim_path, label, color_bgr.
+        Returns instance_seg_id(int) -> (b,g,r) color tuple.
         """
         out: Dict[int, Tuple[int, int, int]] = {}
         for k, v in seg_info.items():

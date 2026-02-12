@@ -105,6 +105,9 @@ class THUDDataLoader:
                 Semantic/segmentation_<N>.png
                 captures_XXX.json
                 annotation_info/annotation_definitions.json
+    
+    Note: File indices may not be synchronized across RGB, Depth, and Instance.
+    The loader uses JSON captures as the source of truth for file associations.
     """
     
     def __init__(self, scene_path: str, verbose: bool = True):
@@ -133,7 +136,8 @@ class THUDDataLoader:
         self.label_definitions = self._load_annotation_definitions()
         
         # Parse capture JSON files and build frame index
-        self.frame_data = {}  # frame_idx -> capture data
+        # frame_data now stores: {frame_idx: {sensor, annotations, rgb_file, depth_file, instance_file, semantic_file}}
+        self.frame_data = {}  # frame_idx -> capture data with file paths
         self.frame_indices = []  # sorted list of available frame indices
         self._parse_capture_files()
         
@@ -142,7 +146,10 @@ class THUDDataLoader:
         
         if self.verbose:
             print(f"[THUDDataLoader] Loaded scene: {self.scene_path.name}")
-            print(f"  Frames: {len(self.frame_indices)} (range: {min(self.frame_indices)}-{max(self.frame_indices)})")
+            if self.frame_indices:
+                print(f"  Frames: {len(self.frame_indices)} (range: {min(self.frame_indices)}-{max(self.frame_indices)})")
+            else:
+                print(f"  Frames: 0 (no valid frames found)")
             print(f"  Image size: {self.image_width}x{self.image_height}")
             print(f"  Label classes: {len(self.label_definitions.get('bounding_box', {}))}")
     

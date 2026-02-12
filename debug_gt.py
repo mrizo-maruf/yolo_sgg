@@ -42,29 +42,51 @@ def load_bbox_data():
     
     # Extract 3D bboxes
     bbox_3d = bbox_data.get("bboxes", {}).get("bbox_3d", {}).get("boxes", [])
+    # Extract 2D bboxes
+    bbox_2d = bbox_data.get("bboxes", {}).get("bbox_2d_tight", {}).get("boxes", [])
     
-    print(f"\nLoaded {len(bbox_3d)} objects from bbox JSON:")
+    print(f"\nLoaded {len(bbox_3d)} 3D boxes and {len(bbox_2d)} 2D boxes from bbox JSON:")
+    print("\n3D Boxes:")
     for i, b in enumerate(bbox_3d, 1):
-        print(f"  {i}. Track:{b.get('track_id'):3d} Sem:{b.get('semantic_id'):3d} Label:'{b.get('label', 'N/A')}'")
+        print(f"  {i}. bbox_3d_id:{b.get('bbox_3d_id', 'N/A'):3} "
+              f"bbox_2d_id:{b.get('bbox_2d_id', 'N/A'):3} "
+              f"instance_seg_id:{b.get('instance_seg_id', 'N/A'):3} "
+              f"Label:'{b.get('label', 'N/A')}'")
     
-    return bbox_data, bbox_3d
+    print("\n2D Boxes:")
+    for i, b in enumerate(bbox_2d, 1):
+        print(f"  {i}. bbox_2d_id:{b.get('bbox_2d_id', 'N/A'):3} "
+              f"bbox_3d_id:{b.get('bbox_3d_id', 'N/A'):3} "
+              f"instance_seg_id:{b.get('instance_seg_id', 'N/A'):3} "
+              f"Label:{b.get('label', 'N/A')}")
+    
+    return bbox_data, bbox_3d, bbox_2d
 
 
-def visualize_semantic_masks(seg_info, seg_img):
-    """Visualize each semantic ID's mask."""
+def visualize_semantic_masks(seg_info, seg_img, only_valid_ids: bool = True):
+    """Visualize each semantic ID's mask.
+    
+    Args:
+        seg_info: Segmentation info dict
+        seg_img: Segmentation image (BGR)
+        only_valid_ids: If True, only show objects with all IDs (bbox_2d_id, bbox_3d_id) >= 0
+    """
     # Convert to RGB for display
     seg_img_rgb = cv2.cvtColor(seg_img, cv2.COLOR_BGR2RGB)
     
-    # Get all semantic IDs
-    semantic_ids = sorted([int(k) for k in seg_info.keys() if str(k).isdigit()])
+    # Get all instance IDs
+    instance_ids = sorted([int(k) for k in seg_info.keys() if str(k).isdigit()])
     
     print(f"\n{'='*70}")
-    print(f"Visualizing {len(semantic_ids)} semantic IDs")
+    print(f"Found {len(instance_ids)} instance segmentation IDs")
     print(f"{'='*70}")
     
-    for semantic_id in semantic_ids:
-        # Get label and color from JSON
-        entry = seg_info[str(semantic_id)]
+    valid_count = 0
+    skipped_count = 0
+    
+    for instance_id in instance_ids:
+        # Get entry from JSON
+        entry = seg_info[str(instance_id)]
         label_dict = entry.get("label", {})
         
         # Extract label text
@@ -72,6 +94,17 @@ def visualize_semantic_masks(seg_info, seg_img):
             label = next(iter(label_dict.values()))
         else:
             label = str(label_dict)
+        
+        # Get cross-reference IDs (new format)
+        bbox_2d_id = entry.get("bbox_2d_id", -1)
+        bbox_3d_id = entry.get("bbox_3d_id", -1)
+        
+        # Filter: only show objects with all IDs valid
+        if only_valid_ids:
+            if bbox_2d_id < 0 or bbox_3d_id < 0:
+                print(f"\nInstance ID {instance_id}: SKIPPED (incomplete IDs: 2d={bbox_2d_id}, 3d={bbox_3d_id})")
+                skipped_count += 1
+                continue
         
         color_bgr = entry.get("color_bgr", [0, 0, 0])
         color_bgr_tuple = tuple(color_bgr)
@@ -81,15 +114,17 @@ def visualize_semantic_masks(seg_info, seg_img):
         mask = np.all(seg_img == np.array(color_bgr, dtype=np.uint8), axis=2)
         pixel_count = np.sum(mask)
         
-        print(f"\nSemantic ID: {semantic_id}")
+        print(f"\nInstance ID: {instance_id}")
         print(f"  Label: '{label}'")
+        print(f"  Cross-refs: bbox_2d_id={bbox_2d_id}, bbox_3d_id={bbox_3d_id}")
         print(f"  Color BGR: {color_bgr}")
-        print(f"  Color RGB: {list(color_rgb_tuple)}")
         print(f"  Pixels: {pixel_count}")
         
         if pixel_count == 0:
             print(f"  -> SKIPPING (no pixels found)")
             continue
+        
+        valid_count += 1
         
         # Create visualization
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -117,8 +152,8 @@ def visualize_semantic_masks(seg_info, seg_img):
         
         # Overall title
         fig.suptitle(
-            f"Semantic ID: {semantic_id} | Label: '{label}'\n"
-            f"Color BGR: {color_bgr} | Color RGB: {list(color_rgb_tuple)} | Pixels: {pixel_count}",
+            f"Instance ID: {instance_id} | Label: '{label}'\n"
+            f"bbox_2d_id: {bbox_2d_id} | bbox_3d_id: {bbox_3d_id} | Pixels: {pixel_count}",
             fontsize=12,
             fontweight='bold'
         )
@@ -127,6 +162,10 @@ def visualize_semantic_masks(seg_info, seg_img):
         plt.show()
         
         print(f"  -> Shown. Close window to continue...")
+    
+    print(f"\n{'='*70}")
+    print(f"Summary: {valid_count} valid objects shown, {skipped_count} skipped (incomplete IDs)")
+    print(f"{'='*70}")
 
 
 def check_color_uniqueness(seg_info):
@@ -136,33 +175,36 @@ def check_color_uniqueness(seg_info):
     print(f"{'='*70}")
     
     color_to_ids = {}
-    for semantic_id_str, entry in seg_info.items():
-        if not semantic_id_str.isdigit():
+    for instance_id_str, entry in seg_info.items():
+        if not instance_id_str.isdigit():
             continue
         
-        semantic_id = int(semantic_id_str)
+        instance_id = int(instance_id_str)
         color_bgr = tuple(entry.get("color_bgr", [0, 0, 0]))
         
         if color_bgr not in color_to_ids:
             color_to_ids[color_bgr] = []
-        color_to_ids[color_bgr].append(semantic_id)
+        color_to_ids[color_bgr].append(instance_id)
     
     # Check for duplicates
     duplicates = {color: ids for color, ids in color_to_ids.items() if len(ids) > 1}
     
     if duplicates:
-        print(f"⚠ WARNING: Found {len(duplicates)} colors shared by multiple semantic IDs:")
+        print(f"WARNING: Found {len(duplicates)} colors shared by multiple instance IDs:")
         for color, ids in duplicates.items():
-            print(f"  Color BGR {color} -> Semantic IDs: {ids}")
-            for sid in ids:
-                label_dict = seg_info[str(sid)].get("label", {})
+            print(f"  Color BGR {color} -> Instance IDs: {ids}")
+            for iid in ids:
+                entry = seg_info[str(iid)]
+                label_dict = entry.get("label", {})
                 if isinstance(label_dict, dict) and len(label_dict) > 0:
                     label = next(iter(label_dict.values()))
                 else:
                     label = str(label_dict)
-                print(f"    - Semantic ID {sid}: '{label}'")
+                bbox_2d_id = entry.get("bbox_2d_id", -1)
+                bbox_3d_id = entry.get("bbox_3d_id", -1)
+                print(f"    - Instance {iid}: '{label}' (2d={bbox_2d_id}, 3d={bbox_3d_id})")
     else:
-        print("✓ All colors are unique - each semantic ID has a distinct color")
+        print("All colors are unique - each instance ID has a distinct color")
 
 
 def main():
@@ -172,13 +214,13 @@ def main():
     
     # Load data
     seg_info, seg_img = load_seg_data()
-    bbox_data, bbox_3d = load_bbox_data()
+    bbox_data, bbox_3d, bbox_2d = load_bbox_data()
     
     # Check color uniqueness
     check_color_uniqueness(seg_info)
     
-    # Visualize each mask
-    visualize_semantic_masks(seg_info, seg_img)
+    # Visualize each mask (only objects with all IDs valid)
+    visualize_semantic_masks(seg_info, seg_img, only_valid_ids=True)
     
     print(f"\n{'='*70}")
     print("Debug complete!")
