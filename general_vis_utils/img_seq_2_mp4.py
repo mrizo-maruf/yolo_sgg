@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
 """
-Convert a sequence of JPG images to an MP4 video.
-Usage: python make_video.py [--fps 30] [--output video.mp4]
+Convert an image sequence to an MP4 video.
+Supports JPG/JPEG/PNG files (including mixed extensions).
+
+Example:
+    python img_seq_2_mp4.py /path/to/frames --fps 10 --output general_vis_utils/output/video.mp4
 """
 import cv2
-import numpy as np
 from pathlib import Path
 import argparse
+import re
+from typing import List
+
+
+SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def natural_sort_key(path: Path):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def collect_images(folder: Path, pattern: str = "*") -> List[Path]:
+    files = [
+        file_path
+        for file_path in folder.glob(pattern)
+        if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+    return sorted(files, key=natural_sort_key)
 
 
 def make_video_from_images(
     image_folder: str,
     output_path: str = "output.mp4",
     fps: int = 30,
-    pattern: str = "*.jpg"
+    pattern: str = "*"
 ):
     """
     Create an MP4 video from a sequence of images.
@@ -22,18 +42,20 @@ def make_video_from_images(
         image_folder: Path to folder containing images
         output_path: Output video file path
         fps: Frames per second for output video
-        pattern: Glob pattern to match image files (default: *.jpg)
+        pattern: Glob pattern to pre-filter files (default: *)
     """
     folder = Path(image_folder)
     if not folder.exists():
         print(f"Error: Folder '{image_folder}' does not exist.")
         return False
     
-    # Get all images matching pattern and sort them
-    image_files = sorted(list(folder.glob(pattern)))
+    # Get all supported images matching pattern and sort them naturally
+    image_files = collect_images(folder, pattern)
     
     if len(image_files) == 0:
-        print(f"Error: No images found matching pattern '{pattern}' in '{image_folder}'")
+        print(
+            f"Error: No supported images (.jpg/.jpeg/.png) found matching pattern '{pattern}' in '{image_folder}'"
+        )
         return False
     
     print(f"Found {len(image_files)} images")
@@ -91,17 +113,47 @@ def make_video_from_images(
 
 
 def main():
-    input = '/home/rizo/mipt_ccm/yolo_ssg/UR5-Peg-In-Hole_02_complex/results'
-    output = 'output_video.mp4'
-    fps = 10
-    
-    success = make_video_from_images(
-        image_folder=input,
-        output_path=output,
-        fps=fps,
-        pattern='*.jpg'
+    parser = argparse.ArgumentParser(
+        description="Create an MP4 video from an image sequence (jpg/jpeg/png)."
     )
-    
+    parser.add_argument(
+        "image_folder",
+        type=str,
+        help="Path to the folder containing image sequence",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="output.mp4",
+        help="Output MP4 file path (default: output.mp4)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="Output video frame rate (default: 30)",
+    )
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        default="*",
+        help="Optional glob pattern to pre-filter files (default: *)",
+    )
+
+    args = parser.parse_args()
+
+    if args.fps <= 0:
+        print("Error: --fps must be a positive integer")
+        return 1
+
+    success = make_video_from_images(
+        image_folder=args.image_folder,
+        output_path=args.output,
+        fps=args.fps,
+        pattern=args.pattern,
+    )
+
     return 0 if success else 1
 
 

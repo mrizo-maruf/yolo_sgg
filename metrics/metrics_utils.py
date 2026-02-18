@@ -39,7 +39,7 @@ class MetricsCollector:
     
     def evaluate(self, scene_path: Path, iou_threshold: float = 0.5):
         """Evaluate metrics on collected data"""
-        from metrics_3d import evaluate_tracking, save_metrics
+        from metrics.metrics_3d import evaluate_tracking, save_metrics
         
         results = evaluate_tracking(
             scene_path=scene_path,
@@ -99,7 +99,7 @@ def batch_evaluate_scenes(scenes_root: Path, iou_threshold: float = 0.5):
         scenes_root: Path to folder containing multiple scene folders
         iou_threshold: IoU threshold for matching
     """
-    from metrics_3d import evaluate_tracking, save_metrics
+    from metrics.metrics_3d import evaluate_tracking, save_metrics
     import json
     
     scene_folders = [f for f in scenes_root.iterdir() if f.is_dir()]

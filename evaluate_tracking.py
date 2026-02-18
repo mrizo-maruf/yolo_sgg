@@ -5,7 +5,7 @@ Integration script to evaluate 3D tracking metrics on your tracking pipeline.
 from pathlib import Path
 from omegaconf import OmegaConf
 import networkx as nx
-from metrics_3d import evaluate_tracking, save_metrics
+from metrics.metrics_3d import evaluate_tracking, save_metrics
 
 
 def collect_graphs_from_tracking(cfg):
@@ -148,7 +148,7 @@ def main():
     
     # Step 1.5: Optional visualization of sample frames
     if cfg.get('visualize_frames', False):
-        from metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
+        from metrics.metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
         
         print("\n[1.5/3] Loading data for visualization...")
         gt_tracks = load_gt_data(

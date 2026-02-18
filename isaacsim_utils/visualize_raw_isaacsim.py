@@ -43,9 +43,9 @@ from matplotlib.colors import hsv_to_rgb
 # -------------------------
 # User-configurable settings
 # -------------------------
-scene = "scene_7"
-BASE_DIR = f"/home/maribjonov_mr/IsaacSim_bench/{scene}"  # folder with rgb/depth/bbox
-TRAJ_PATH = f"/home/maribjonov_mr/IsaacSim_bench/{scene}/traj.txt"  # None -> BASE_DIR/traj.txt
+scene = "cabinet_complex"
+BASE_DIR = f"/home/yehia/rizo/IsaacSim_Dataset/{scene}"  # folder with rgb/depth/bbox
+TRAJ_PATH = f"/home/yehia/rizo/IsaacSim_Dataset/{scene}/traj.txt"  # None -> BASE_DIR/traj.txt
 FRAME_ID = 10  # frame index (0-based)
 
 # Image + depth settings (must match how you saved data)

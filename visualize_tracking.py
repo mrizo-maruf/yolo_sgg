@@ -4,8 +4,8 @@ Useful for debugging coordinate system mismatches and scale issues.
 """
 
 from pathlib import Path
-from metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
-from metrics_utils import MetricsCollector
+from metrics.metrics_3d import load_gt_data, load_prediction_data, visualize_frame_comparison
+from metrics.metrics_utils import MetricsCollector
 import argparse
 
 

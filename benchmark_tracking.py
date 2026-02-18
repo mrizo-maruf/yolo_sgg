@@ -1873,7 +1873,7 @@ if __name__ == "__main__":
         'skip_classes': [
             # Structural elements
             'wall', 'floor', 'ceiling', 'roof', 'kitchen floor', 'carpet'
-            'stairway', 'stairs', 'stair', 'escalator', 'elevator', 'resort'
+            'stairway', 'stairs', 'stair', 'escalator', 'elevator', 'resort', 'court',
             
             # Rooms and spaces
             'room', 'kitchen', 'bathroom', 'bedroom', 'living room',
@@ -1921,7 +1921,7 @@ if __name__ == "__main__":
             'point_size': 2.0,     # Point size for 3D visualization
             
             # Save options (optional)
-            'save_dir': "/home/maribjonov_mr/metr/yolo_sgg",      # Directory to save visualizations (None = don't save)
+            'save_dir': "/home/yehia/rizo/code/yolo_sgg",      # Directory to save visualizations (None = don't save)
             # Example: 'save_dir': './debug_vis'
         }
     })
@@ -1990,7 +1990,7 @@ if __name__ == "__main__":
     
     if scene_path is None and not multi_mode:
         # Default scene path - update this!
-        scene_path = r"C:\rizo\yolo_sgg\UR5-Peg-In-Hole_02"
+        scene_path = r"/home/yehia/rizo/IsaacSim_Dataset/scene_1"
         print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
         print(f"       python benchmark_tracking.py --multi [options]")
         print(f"\nOptions:")

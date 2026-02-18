@@ -13,9 +13,9 @@ from pathlib import Path
 # -------------------------
 # Configuration - EDIT THESE
 # -------------------------
-SEG_INFO_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_1/seg/semantic000002_info.json"
-SEG_PNG = "/home/maribjonov_mr/IsaacSim_bench/scene_1/seg/semantic000002.png"
-BBOX_JSON = "/home/maribjonov_mr/IsaacSim_bench/scene_1/bbox/bboxes000002_info.json"
+SEG_INFO_JSON = "/home/yehia/rizo/IsaacSim_Dataset/scene_7/seg/semantic000002_info.json"
+SEG_PNG = "/home/yehia/rizo/IsaacSim_Dataset/scene_7/seg/semantic000002.png"
+BBOX_JSON = "/home/yehia/rizo/IsaacSim_Dataset/scene_7/bbox/bboxes000002_info.json"
 
 
 def load_seg_data():
@@ -136,7 +136,7 @@ def visualize_semantic_masks(seg_info, seg_img, only_valid_ids: bool = True):
         
         # Panel 2: Binary mask
         axes[1].imshow(mask, cmap='gray')
-        axes[1].set_title(f"Mask for Semantic ID {semantic_id}\n{pixel_count} pixels")
+        axes[1].set_title(f"Mask for Semantic ID {instance_id}\n{pixel_count} pixels")
         axes[1].axis('off')
         
         # Panel 3: Mask overlay on image

@@ -37,7 +37,7 @@ except ImportError:
     print("[WARN] Open3D not available. 3D visualization disabled.")
 
 # Import THUD data loader
-from thud_loader import THUDDataLoader, GTObject, discover_thud_scenes, get_scene_info
+from thud_utils.thud_loader import THUDDataLoader, GTObject, discover_thud_scenes, get_scene_info
 
 # Import YOLO-SSG components
 import YOLOE.utils as yutils
