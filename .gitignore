@@ -4,6 +4,7 @@
 *.pt
 *.pth
 __pycache__/
+**/.ipynb_checkpoints/
 *.pyc
 .vscode/
 *.mp4
@@ -14,4 +15,7 @@ runs/
 *.zip
 *.json
 *.csv
+<<<<<<< HEAD
 thud/
+=======
+>>>>>>> 0eb7474 (Pi3/utils)

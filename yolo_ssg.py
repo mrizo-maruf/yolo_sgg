@@ -1,6 +1,7 @@
 from omegaconf import OmegaConf
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
+from Pi3.utils import process_depth_model
 import numpy as np
 from ssg.ssg_main import edges
 import matplotlib.pyplot as plt
@@ -35,6 +36,9 @@ def main(cfg):
     timings = {'yolo': [], 'preprocess': [], 'create_3d': [], 'edges': [], 'merge': []}
     gpu_usage = {'yolo': [], 'edges': []}
     cuda_available = torch.cuda.is_available()
+
+    # 0) use depth model if need
+    cfg = process_depth_model(cfg)
 
     # 1) cache the depths (also initializes YOLOE.utils global DEPTH_PATHS)
     depth_paths = yutils.list_png_paths(depth_folder)
@@ -246,17 +250,18 @@ def main(cfg):
 
 if __name__ == "__main__":
     cfg = OmegaConf.create({
-        'rgb_dir': "/home/maribjonov_mr/IsaacSim_bench/scene_7/rgb",
-        'depth_dir': "/home/maribjonov_mr/IsaacSim_bench/scene_7/depth",
-        'traj_path': "/home/maribjonov_mr/IsaacSim_bench/scene_7/traj.txt",
-        'yolo_model': '/home/maribjonov_mr/yolo_bench/yoloe-11l-seg-pf.pt',
+        'rgb_dir': "/home/vadim/HDD2TB/vadim/MIPT_CCM/files/IsaacSim_bench/scene_7/rgb",
+        'depth_dir': "/home/vadim/HDD2TB/vadim/MIPT_CCM/files/IsaacSim_bench/scene_7/depth",
+        'traj_path': "/home/vadim/HDD2TB/vadim/MIPT_CCM/files/IsaacSim_bench/scene_7/traj.txt",
+        'yolo_model': '/home/vadim/HDD2TB/vadim/MIPT_CCM/files/yoloe-11m-seg-pf.pt',
+        'depth_model': 'yyfz233/Pi3X', # set None if you want to use original depth
         'conf': 0.25,
         'iou': 0.5,
         'kernel_size': 17,
         'alpha': 0.7,
         'max_points_per_obj': 2000,
         'max_accumulated_points': 10000,
-        'show_pcds': True,
+        'show_pcds': False,
         'fast_mask': True,
         'o3_nb_neighbors': 50,
         'o3std_ratio': 0.1,

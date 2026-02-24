@@ -1024,7 +1024,7 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
         if rgb is None:
             print(f"[WARN][prep_frames] Could not read image: {rgb_p}")
             continue
-        
+        print(f'rgb shape: {rgb.shape}')
         out = model.track(
             source=[rgb],
             tracker=TRACKER_CFG,
