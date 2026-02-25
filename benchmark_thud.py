@@ -922,6 +922,7 @@ if __name__ == "__main__":
     # Configuration
     cfg = OmegaConf.create({
         'yolo_model': 'yoloe-11l-seg-pf.pt',
+        'depth_model': 'yyfz233/Pi3X', # set None if you want to use original depth
         'conf': 0.25,
         'iou': 0.5,
         'kernel_size': 11,

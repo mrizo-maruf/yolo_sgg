@@ -7,6 +7,7 @@ import glob
 import time
 from pi3.models.pi3x import Pi3X
 from pi3.utils.basic import load_images_as_tensor
+from pi3.pipe.pi3x_vo import Pi3XVO
 
 
 def process_depth_model(cfg):
@@ -49,6 +50,10 @@ def process_depth_model(cfg):
     device = 'cuda' if cuda_available else 'cpu'
     print(f"Loading model on {device}...")
     model = Pi3X.from_pretrained(cfg.depth_model).to(device).eval()
+    
+    # Create Pi3XVO pipeline for efficient windowed inference
+    pipe = Pi3XVO(model)
+    
     t_model_end = time.perf_counter()
     timings['model_load'] = (t_model_end - t_model_start) * 1000  # ms
     
@@ -65,14 +70,26 @@ def process_depth_model(cfg):
     t_load_end = time.perf_counter()
     timings['image_load'] = (t_load_end - t_load_start) * 1000  # ms
     
-    # --- Inference ---
+    # --- Inference with Pi3XVO Pipeline ---
     t_inference_start = time.perf_counter()
-    print("Running model inference...")
+    print("Running model inference with Pi3XVO pipeline...")
     dtype = torch.bfloat16 if cuda_available and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     
+    # Pi3XVO parameters
+    chunk_size = 13  # Number of frames per chunk
+    overlap = 5      # Overlap between chunks for alignment
+    
+    print(f"Processing {imgs.shape[0]} frames with chunk_size={chunk_size}, overlap={overlap}")
+    
     with torch.no_grad():
-        with torch.amp.autocast('cuda', dtype=dtype):
-            results = model(imgs[None])
+        results = pipe(
+            imgs=imgs[None],  # Add batch dimension -> (1, N, 3, H, W)
+            chunk_size=chunk_size,
+            overlap=overlap,
+            conf_thre=0.05,
+            inject_condition=[],  # Can add ['pose', 'depth'] for conditioning
+            dtype=dtype
+        )
     
     if cuda_available:
         torch.cuda.synchronize()
@@ -86,10 +103,25 @@ def process_depth_model(cfg):
     
     print("Reconstruction complete!")
     
-    # --- Extract Depth Maps ---
+    # --- Extract Depth Maps and Camera Poses ---
     t_extract_start = time.perf_counter()
-    depth_maps = results['local_points'][..., 2]  # Shape: (1, N, H, W)
-    depth_maps = depth_maps[0]  # Remove batch dimension -> (N, H, W)
+    
+    # Extract local_points from points using camera poses (inverse transformation)
+    # For depth maps, we need local depth (Z coordinate in camera space)
+    points = results['points'][0]  # Shape: (N, H, W, 3) - global points
+    camera_poses = results['camera_poses'][0]  # Shape: (N, 4, 4)
+    
+    # Convert global points back to local camera space to get depth
+    N, H, W, _ = points.shape
+    # Homogenize points
+    points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)  # (N, H, W, 4)
+    
+    # Transform to local camera space
+    camera_poses_inv = torch.inverse(camera_poses)  # (N, 4, 4)
+    local_points = torch.einsum('nij,nhwj->nhwi', camera_poses_inv, points_homo)[..., :3]  # (N, H, W, 3)
+    
+    depth_maps = local_points[..., 2]  # Z coordinate is depth
+    
     print(f"Extracted depth maps with shape: {depth_maps.shape}")
     t_extract_end = time.perf_counter()
     timings['extract_depth'] = (t_extract_end - t_extract_start) * 1000  # ms
@@ -168,7 +200,7 @@ def process_depth_model(cfg):
         
         # Save as grayscale PNG
         img = Image.fromarray(depth_uint8, mode='L')
-        output_path = os.path.join(new_depth_dir, f'depth{i:06d}.png')
+        output_path = os.path.join(new_depth_dir, f'depth_{i:04d}.png')
         img.save(output_path)
     
     t_save_png_end = time.perf_counter()
@@ -201,11 +233,11 @@ def process_depth_model(cfg):
     
     # --- Save Camera Poses (Trajectory) ---
     t_save_traj_start = time.perf_counter()
-    camera_poses = results['camera_poses'][0]  # Remove batch dimension -> (N, 4, 4)
+    # camera_poses already extracted during inference -> (N, 4, 4)
     
     with open(new_traj_path, 'w') as f:
         for i in range(camera_poses.shape[0]):
-            pose = camera_poses[i].cpu().numpy()  # Shape: (4, 4)
+            pose = camera_poses[i].cpu().numpy()  # Shape: (4, 4) - already on CPU
             flattened = pose.flatten()  # Shape: (16,)
             f.write(' '.join(map(str, flattened)) + '\n')
     
@@ -231,13 +263,6 @@ def process_depth_model(cfg):
     print(f"  Model Load:        {timings['model_load']:.2f}")
     print(f"  Image Load:        {timings['image_load']:.2f}")
     print(f"  Inference:         {timings['inference']:.2f}")
-    # print(f"  Extract Depth:     {timings['extract_depth']:.2f}")
-    # print(f"  Convert to CPU:    {timings['convert_cpu']:.2f}")
-    # print(f"  Resize:            {timings['resize']:.2f}")
-    # print(f"  Compute Norm:      {timings['normalize_compute']:.2f}")
-    # print(f"  Save PNGs:         {timings['save_png']:.2f}")
-    # print(f"  Save Video:        {timings['save_video']:.2f}")
-    # print(f"  Save Trajectory:   {timings['save_traj']:.2f}")
     
     total_time = sum(timings.values())
     print(f"  Total Time:        {total_time:.2f}")
