@@ -42,6 +42,7 @@ from thud_utils.thud_loader import THUDDataLoader, GTObject, discover_thud_scene
 # Import YOLO-SSG components
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
+from Pi3.utils import process_depth_model
 
 
 # ============================================================================
@@ -419,6 +420,25 @@ class THUDBenchmark:
         )
         
         self.object_registry = object_registry
+
+        # Process depth with Pi3X model if configured
+        # This will update cfg.depth_dir and cfg.traj_path if depth_model is set
+        temp_cfg = OmegaConf.create({
+            'rgb_dir': rgb_dir,
+            'depth_dir': depth_dir,
+            'traj_path': str(gt_loader.scene_path / "camera_poses.txt"),  # Placeholder
+            'depth_model': self.cfg.get('depth_model', None)
+        })
+        temp_cfg = process_depth_model(temp_cfg)
+        
+        # Update depth_dir if it was changed by depth model processing
+        if temp_cfg.depth_dir != depth_dir:
+            depth_dir = temp_cfg.depth_dir
+            # Reload depth paths from new directory
+            depth_paths = sorted(Path(depth_dir).glob("*.png"),
+                                key=lambda p: int(p.stem.split('_')[-1]) if '_' in p.stem else int(p.stem))
+            print(f"Using processed depth from: {depth_dir}")
+            print(f"Updated depth images found: {len(depth_paths)}")
         
         # Prepare paths for YOLO
         rgb_dir = str(gt_loader.rgb_dir)
