@@ -421,6 +421,10 @@ class THUDBenchmark:
         
         self.object_registry = object_registry
 
+        # Prepare paths for YOLO
+        rgb_dir = str(gt_loader.rgb_dir)
+        depth_dir = str(gt_loader.depth_dir)
+
         # Process depth with Pi3X model if configured
         # This will update cfg.depth_dir and cfg.traj_path if depth_model is set
         temp_cfg = OmegaConf.create({
@@ -439,10 +443,6 @@ class THUDBenchmark:
                                 key=lambda p: int(p.stem.split('_')[-1]) if '_' in p.stem else int(p.stem))
             print(f"Using processed depth from: {depth_dir}")
             print(f"Updated depth images found: {len(depth_paths)}")
-        
-        # Prepare paths for YOLO
-        rgb_dir = str(gt_loader.rgb_dir)
-        depth_dir = str(gt_loader.depth_dir)
         
         # Get sorted RGB and depth paths
         rgb_paths = sorted(gt_loader.rgb_dir.glob("rgb_*.png"), 
@@ -942,7 +942,7 @@ if __name__ == "__main__":
     # Configuration
     cfg = OmegaConf.create({
         'yolo_model': 'yoloe-11l-seg-pf.pt',
-        'depth_model': 'yyfz233/Pi3X', # set None if you want to use original depth
+        'depth_model': None, #'yyfz233/Pi3X', # set None if you want to use original depth
         'conf': 0.25,
         'iou': 0.5,
         'kernel_size': 11,
@@ -996,7 +996,7 @@ if __name__ == "__main__":
     
     if scene_path is None and not multi_mode:
         # Default THUD path
-        default_path = "thud/Synthetic/Gym/Static/Capture_1"
+        default_path = "../files/THUD_Robot/Synthetic_Scenes/Gym/static/Capture_1"
         if Path(default_path).exists():
             scene_path = default_path
         else:
@@ -1009,7 +1009,7 @@ if __name__ == "__main__":
     
     if multi_mode:
         # Discover all THUD scenes
-        thud_root = "thud"
+        thud_root = "../files/THUD_Robot"
         scenes = discover_thud_scenes(thud_root)
         
         if not scenes:
