@@ -25,6 +25,9 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 import matplotlib.pyplot as plt
 
+SKIP_LABELS = {'wall', 'floor', 'ground', 'ceiling', 'background'}
+
+
 try:
     import open3d as o3d
     HAS_OPEN3D = True
@@ -37,7 +40,7 @@ import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
 
 # Import Isaac Sim data loader
-from isaac_sim_loader import IsaacSimDataLoader, GTObject
+from isaacsim_utils.isaac_sim_loaderv3 import IsaacSimSceneLoader, GTObject
 
 
 # ============================================================================
@@ -835,12 +838,15 @@ class TrackingBenchmark:
         skip_classes = list(self.cfg.get('skip_classes', []))
         print(f"Using {len(skip_classes)} skip classes for GT filtering")
         
-        # Load GT dataset using IsaacSimDataLoader with same skip labels as pipeline
-        gt_loader = IsaacSimDataLoader(scene_path)
+        # Load GT dataset using IsaacSimSceneLoader with same skip labels as pipeline
+        gt_loader = IsaacSimSceneLoader(scene_path, skip_labels=SKIP_LABELS)
         # gt_loader.print_info()
         
-        n_frames = gt_loader.get_frame_count()
-        poses = gt_loader.get_poses()
+        frame_indices = gt_loader.frame_indices
+        n_frames = len(frame_indices)
+
+        poses = yutils.load_camera_poses("/home/yehia/rizo/IsaacSim_Dataset/cabinet_complex/traj.txt")
+        # poses = gt_loader.get_poses()
         
         print(f"Total frames: {n_frames}")
         print(f"Poses loaded: {len(poses)}")
@@ -1990,7 +1996,7 @@ if __name__ == "__main__":
     
     if scene_path is None and not multi_mode:
         # Default scene path - update this!
-        scene_path = r"/home/yehia/rizo/IsaacSim_Dataset/scene_1"
+        scene_path = r"/home/yehia/rizo/IsaacSim_Dataset/cabinet_complex"
         print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
         print(f"       python benchmark_tracking.py --multi [options]")
         print(f"\nOptions:")
