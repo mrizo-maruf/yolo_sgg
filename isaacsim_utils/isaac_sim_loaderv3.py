@@ -92,6 +92,39 @@ class IsaacSimSceneLoader:
 
     # ---------- public API ----------
 
+    def get_classes(self) -> List[str]:
+        """
+        Returns a sorted list of unique class names across all frames in this scene.
+        Respects skip_labels and require_all_ids filters.
+        """
+        classes: Set[str] = set()
+        for frame_idx in self.frame_indices:
+            bbox_path = self._bbox_json_path(frame_idx)
+            bbox_data = self._read_json(bbox_path)
+
+            bbox2d_by_id = self._parse_bbox2d_tight(bbox_data)
+            bbox3d_list = self._parse_bbox3d(bbox_data)
+
+            for b3d in bbox3d_list:
+                bbox_3d_id = int(b3d.get("bbox_3d_id", -1))
+                bbox_2d_id = int(b3d.get("bbox_2d_id", -1))
+                instance_seg_id = int(b3d.get("instance_seg_id", -1))
+
+                if self.require_all_ids:
+                    if bbox_3d_id < 0 or bbox_2d_id < 0 or instance_seg_id < 0:
+                        continue
+
+                b2d = bbox2d_by_id.get(bbox_2d_id)
+                class_name = self._infer_class_name(b3d=b3d, b2d=b2d)
+                class_name_lower = class_name.lower()
+
+                if any(skip in class_name_lower for skip in self.skip_labels):
+                    continue
+
+                classes.add(class_name)
+
+        return sorted(classes)
+
     def load_traj(self) -> Optional[List[Dict[str, Any]]]:
         """
         Loads trajectory data from traj.txt.

@@ -1594,7 +1594,8 @@ def create_3d_objects_with_tracking(
     o3std_ratio,
     object_registry: GlobalObjectRegistry,
     class_names: list = None,
-    skip_classes: set = None
+    skip_classes: set = None,
+    point_extractor: callable = None,
 ):
     """
     Enhanced version of create_3d_objects that uses GlobalObjectRegistry for tracking.
@@ -1609,7 +1610,7 @@ def create_3d_objects_with_tracking(
         track_ids: YOLO track IDs
         masks_clean: Cleaned masks
         max_points_per_obj: Max points to extract per object
-        depth_m: Depth map in meters
+        depth_m: Depth map (in meters for standard pipeline, or raw for custom extractors)
         T_w_c: Camera to world transform
         frame_idx: Current frame index
         o3_nb_neighbors: Open3D outlier removal param
@@ -1617,6 +1618,10 @@ def create_3d_objects_with_tracking(
         object_registry: GlobalObjectRegistry instance
         class_names: Optional list of class names corresponding to track_ids
         skip_classes: Optional set of class names to filter out (uses DEFAULT_SKIP_CLASSES if None)
+        point_extractor: Optional callable(depth, mask, frame_idx, max_points,
+                         o3_nb_neighbors, o3std_ratio, track_id) -> np.ndarray (N,3)
+                         in world frame.  When provided, replaces the default
+                         extract_points_from_mask + cam_to_world pipeline.
     
     Returns:
         frame_objs: List of LIGHTWEIGHT objects (bbox only) for edge prediction
@@ -1636,25 +1641,35 @@ def create_3d_objects_with_tracking(
         if m_clean is None:
             continue
         
-        # Extract points from mask in camera frame
-        points_cam = extract_points_from_mask(
-            depth_m, 
-            m_clean, 
-            frame_idx=frame_idx, 
-            max_points=max_points_per_obj,
-            o3_nb_neighbors=o3_nb_neighbors,
-            o3std_ratio=o3std_ratio, 
-            random_state=int(t_id)
-        )
-        
-        if points_cam is None or points_cam.size <= 0:
-            continue
-        
-        # Transform to world frame
-        if T_w_c is not None:
-            points_world = cam_to_world(points_cam, T_w_c)
+        if point_extractor is not None:
+            # Custom extractor returns world-frame points directly
+            points_world = point_extractor(
+                depth_m, m_clean, frame_idx, max_points_per_obj,
+                o3_nb_neighbors, o3std_ratio, int(t_id)
+            )
         else:
-            points_world = points_cam
+            # Default pipeline: extract in camera frame, then transform
+            points_cam = extract_points_from_mask(
+                depth_m, 
+                m_clean, 
+                frame_idx=frame_idx, 
+                max_points=max_points_per_obj,
+                o3_nb_neighbors=o3_nb_neighbors,
+                o3std_ratio=o3std_ratio, 
+                random_state=int(t_id)
+            )
+            
+            if points_cam is None or points_cam.size <= 0:
+                continue
+            
+            # Transform to world frame
+            if T_w_c is not None:
+                points_world = cam_to_world(points_cam, T_w_c)
+            else:
+                points_world = points_cam
+        
+        if points_world is None or points_world.size <= 0:
+            continue
         
         # Compute initial bbox (will be recomputed after merging)
         bbox_3d = compute_3d_bboxes(points_world)

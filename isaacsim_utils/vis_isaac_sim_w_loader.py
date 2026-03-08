@@ -23,7 +23,7 @@ from isaac_sim_loaderv3 import IsaacSimSceneLoader, FrameData, GTObject
 # -------------------------
 # Configuration
 # -------------------------
-SCENE_DIR = "/home/yehia/rizo/IsaacSim_Dataset/cabinet_complexq"  # Relative to workspace or absolute path
+SCENE_DIR = "/home/yehia/rizo/IsaacSim_Dataset/cabinet_complex"  # Relative to workspace or absolute path
 
 # Camera intrinsics (must match your data capture)
 IMAGE_WIDTH = 1280
