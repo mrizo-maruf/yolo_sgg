@@ -52,6 +52,18 @@ python yolo_ssg_e.py
 
 ### Traditional RGBD Processing
 
+### Modular Entry Points (new)
+
+You can now run the new modular app wrappers:
+
+```bash
+python run.py --config configs/default_run.yaml
+python benchmark.py --config configs/default_run.yaml --scene-path /path/to/scene
+```
+
+These wrappers use the new `yolo_sgg/` package (`core`, `plugins`, `services`) to make detector/tracker/edge predictor configuration explicit.
+
+
 Process RGB-D sequences with known camera poses:
 
 ```bash
