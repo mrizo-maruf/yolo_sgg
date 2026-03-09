@@ -1,5 +1,5 @@
 """
-Visualize Isaac Sim data using isaac_sim_loaderv3.py
+Visualize Isaac Sim data using isaac_sim_loader.py
 
 This script loads a scene using IsaacSimSceneLoader and visualizes each frame:
 - 2D: RGB with semantic masks overlay, 2D bboxes, and class labels
@@ -17,7 +17,7 @@ from matplotlib.colors import hsv_to_rgb
 import open3d as o3d
 from pathlib import Path
 
-from isaac_sim_loaderv3 import IsaacSimSceneLoader, FrameData, GTObject
+from isaac_sim_loader import IsaacSimSceneLoader, FrameData, GTObject
 
 
 # -------------------------

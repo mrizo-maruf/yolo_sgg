@@ -1,1091 +1,427 @@
-"""
-Isaac Sim Replicator Dataset Loader.
-
-A reusable data loader for Isaac Sim benchmark datasets with optional visualization.
-Supports loading RGB, depth, segmentation, 2D/3D bounding boxes, and camera poses.
-
-Usage:
-    loader = IsaacSimDataLoader(scene_path)
-    
-    # Get frame count
-    n_frames = loader.get_frame_count()
-    
-    # Load individual components
-    rgb = loader.load_rgb(frame_idx)
-    depth = loader.load_depth(frame_idx)
-    seg_map, seg_info = loader.load_segmentation(frame_idx)
-    bboxes = loader.load_bboxes(frame_idx)
-    poses = loader.get_poses()
-    
-    # Get all GT objects for a frame
-    gt_objects = loader.get_gt_objects(frame_idx)
-    
-    # Visualization (optional)
-    loader.visualize_frame(frame_idx, show_rgb=True, show_seg=True, show_bbox_2d=True)
-    loader.visualize_3d(frame_idx)  # 3D point cloud with bboxes
-"""
-
-import os
 import json
-import numpy as np
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from PIL import Image
-from typing import Dict, List, Tuple, Optional, Union
-from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import cv2
-
-try:
-    import open3d as o3d
-    HAS_OPEN3D = True
-except ImportError:
-    HAS_OPEN3D = False
-
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+import numpy as np
 
 
-# ============================================================================
-# Default camera intrinsics (can be overridden in constructor)
-# ============================================================================
-DEFAULT_IMAGE_WIDTH = 1280
-DEFAULT_IMAGE_HEIGHT = 720
-DEFAULT_FOCAL_LENGTH = 50.0
-DEFAULT_HORIZONTAL_APERTURE = 80.0
-DEFAULT_VERTICAL_APERTURE = 45.0
-DEFAULT_MIN_DEPTH = 0.01
-DEFAULT_MAX_DEPTH = 10.0
-DEFAULT_PNG_MAX_VALUE = 65535
+# -----------------------------
+# Data structures
+# -----------------------------
 
-
-@dataclass
+@dataclass(frozen=True)
 class GTObject:
-    """Ground truth object representation."""
     track_id: int
+    # Cross-reference IDs (all must be >= 0 for valid objects)
+    instance_seg_id: int  # instance ID from segmentation (unique per object)
+    bbox_2d_id: int       # ID from 2D bbox annotator
+    bbox_3d_id: int       # ID from 3D bbox annotator
+    
     class_name: str
-    semantic_id: int = -1
-    mask: Optional[np.ndarray] = None  # Binary mask (H, W), 0/255
-    bbox_2d: Optional[List[float]] = None  # [x1, y1, x2, y2]
-    bbox_3d_aabb: Optional[List[float]] = None  # [xmin, ymin, zmin, xmax, ymax, zmax]
-    bbox_3d_transform: Optional[np.ndarray] = None  # 4x4 transform matrix
-    prim_path: str = ""
-    visibility: float = 1.0
-    occlusion: float = 0.0
-    color_bgr: Optional[Tuple[int, int, int]] = None  # Segmentation color
+    prim_path: Optional[str]  # USD prim path, e.g., "/World/env/bowl"
+
+    bbox2d_xyxy: Optional[Tuple[float, float, float, float]]  # (x1,y1,x2,y2)
+    box_3d_aabb_xyzmin_xyzmax: Tuple[float, float, float, float, float, float]
+    box_3d_transform_4x4: np.ndarray  # (4,4)
+
+    visibility: Optional[float]   # from 2D (visibility_or_occlusion)
+    occlusion: Optional[float]    # from 3D (occlusion_ratio)
+
+    mask: np.ndarray              # HxW bool
 
 
-@dataclass
+@dataclass(frozen=True)
 class FrameData:
-    """Container for all data from a single frame."""
     frame_idx: int
-    rgb: Optional[np.ndarray] = None  # (H, W, 3) BGR
-    depth: Optional[np.ndarray] = None  # (H, W) float32 in meters
-    segmentation: Optional[np.ndarray] = None  # (H, W, 3) BGR color-coded
-    seg_info: Dict = field(default_factory=dict)  # semantic_id -> {class, color_bgr}
-    gt_objects: List[GTObject] = field(default_factory=list)
-    pose: Optional[np.ndarray] = None  # 4x4 camera-to-world transform
+    gt_objects: List[GTObject]
 
+    # Optional extras if you want them later
+    rgb: Optional[np.ndarray] = None   # HxWx3 BGR
+    depth: Optional[np.ndarray] = None # HxW uint16 or float (depends on your decode)
+    cam_transform_4x4: Optional[np.ndarray] = None  # from traj.txt, 4x4 matrix
+    seg: Optional[np.ndarray] = None   # HxWx3 BGR semantic segmentation (for visualization)
 
-class IsaacSimDataLoader:
+# -----------------------------
+# Loader
+# -----------------------------
+
+class IsaacSimSceneLoader:
     """
-    Data loader for Isaac Sim Replicator benchmark datasets.
-    
-    Expected directory structure:
-        scene_path/
-            rgb/frame000001.jpg, frame000002.jpg, ...
-            depth/depth000001.png, depth000002.png, ...
-            seg/semantic000001.png, semantic000001_info.json, ...
-            bbox/bboxes000001_info.json, ...  (or bbox000001.json)
-            traj.txt  (optional camera poses)
-    
-    Args:
-        scene_path: Path to scene directory
-        image_width: Image width (default 1280)
-        image_height: Image height (default 720)
-        focal_length: Camera focal length (default 50.0)
-        horizontal_aperture: Camera horizontal aperture (default 80.0)
-        vertical_aperture: Camera vertical aperture (default 45.0)
-        min_depth: Minimum valid depth in meters (default 0.01)
-        max_depth: Maximum valid depth in meters (default 10.0)
-        skip_labels: List of labels to skip (e.g., ['background', 'wall', 'floor'])
+    Loads one Isaac Sim scene folder:
+      scene/
+        bbox/
+        seg/
+        rgb/
+        depth/
+        traj.txt
     """
-    
+
     def __init__(
         self,
-        scene_path: str,
-        image_width: int = DEFAULT_IMAGE_WIDTH,
-        image_height: int = DEFAULT_IMAGE_HEIGHT,
-        focal_length: float = DEFAULT_FOCAL_LENGTH,
-        horizontal_aperture: float = DEFAULT_HORIZONTAL_APERTURE,
-        vertical_aperture: float = DEFAULT_VERTICAL_APERTURE,
-        min_depth: float = DEFAULT_MIN_DEPTH,
-        max_depth: float = DEFAULT_MAX_DEPTH,
-        skip_labels: List[str] = None,
+        scene_dir: str,
+        load_rgb: bool = False,
+        load_depth: bool = False,
+        skip_labels: Optional[Set[str]] = None,
+        require_all_ids: bool = True,  # Only load objects with all IDs >= 0
     ):
-        self.scene_path = Path(scene_path)
-        
-        # Camera parameters
-        self.image_width = image_width
-        self.image_height = image_height
-        self.focal_length = focal_length
-        self.horizontal_aperture = horizontal_aperture
-        self.vertical_aperture = vertical_aperture
-        self.min_depth = min_depth
-        self.max_depth = max_depth
-        
-        # Compute intrinsics
-        self.fx = focal_length / horizontal_aperture * image_width
-        self.fy = focal_length / vertical_aperture * image_height
-        self.cx = image_width / 2.0
-        self.cy = image_height / 2.0
-        
-        # Depth scale
-        self.png_max_value = DEFAULT_PNG_MAX_VALUE
-        self.png_depth_scale = (max_depth - min_depth) / float(self.png_max_value)
-        
-        # Skip labels - these should match the pipeline's skip_classes for fair comparison
-        DEFAULT_SKIP_LABELS = [
-            # Background/unlabeled
-            'background', 'unlabelled', 'unlabeled', 'unknown',
-            
-            # Structural elements
-            'wall', 'floor', 'ground', 'roof'
-        ]
-        self.skip_labels = set(l.lower() for l in (skip_labels if skip_labels is not None else DEFAULT_SKIP_LABELS))
-        
-        # Directory paths
-        self.rgb_dir = self.scene_path / "rgb"
-        self.depth_dir = self.scene_path / "depth"
-        self.seg_dir = self.scene_path / "seg"
-        self.bbox_dir = self.scene_path / "bbox"
-        self.traj_path = self.scene_path / "traj.txt"
-        
-        # Cache
-        self._frame_count = None
-        self._poses = None
-        self._rgb_files = None
-        self._depth_files = None
-        
-        # Detect file naming convention
-        self._detect_file_format()
-    
-    def _detect_file_format(self):
-        """Detect the file naming convention used in the dataset."""
-        # Check RGB naming
-        self._rgb_pattern = "frame{:06d}.jpg"
-        self._depth_pattern = "depth{:06d}.png"
-        self._seg_pattern = "semantic{:06d}.png"
-        self._seg_info_pattern = "semantic{:06d}_info.json"
-        self._bbox_pattern = "bboxes{:06d}_info.json"  # Default pattern
-        
-        # Check if alternative bbox pattern exists
-        if self.bbox_dir.exists():
-            sample_files = list(self.bbox_dir.glob("*.json"))
-            if sample_files:
-                sample_name = sample_files[0].name
-                if sample_name.startswith("bbox") and not sample_name.startswith("bboxes"):
-                    self._bbox_pattern = "bbox{:06d}.json"
-    
-    @property
-    def intrinsics(self) -> Dict[str, float]:
-        """Get camera intrinsics as dictionary."""
-        return {
-            'fx': self.fx,
-            'fy': self.fy,
-            'cx': self.cx,
-            'cy': self.cy,
-            'width': self.image_width,
-            'height': self.image_height,
-        }
-    
-    def get_frame_count(self) -> int:
-        """Get number of frames in the scene."""
-        if self._frame_count is None:
-            if self.rgb_dir.exists():
-                self._rgb_files = sorted(list(self.rgb_dir.glob("frame*.jpg")))
-                self._frame_count = len(self._rgb_files)
-            else:
-                self._frame_count = 0
-        return self._frame_count
-    
-    def get_poses(self) -> List[np.ndarray]:
+        self.scene_dir = Path(scene_dir)
+        if not self.scene_dir.exists():
+            raise FileNotFoundError(f"Scene dir not found: {self.scene_dir}")
+
+        self.bbox_dir = self.scene_dir / "bbox"
+        self.seg_dir = self.scene_dir / "seg"
+        self.rgb_dir = self.scene_dir / "rgb"
+        self.depth_dir = self.scene_dir / "depth"
+
+        for d in [self.bbox_dir, self.seg_dir]:
+            if not d.exists():
+                raise FileNotFoundError(f"Required folder missing: {d}")
+
+        self.load_rgb = load_rgb
+        self.load_depth = load_depth
+        self.skip_labels = skip_labels if skip_labels is not None else set()
+        self.require_all_ids = require_all_ids
+
+        # Optional: infer available frame indices from bbox files (robust)
+        self.frame_indices = self._discover_frames()
+
+        self.traj_data = self.load_traj()  # Optional: load trajectory if needed
+
+    # ---------- public API ----------
+
+    def get_classes(self) -> List[str]:
         """
-        Load camera poses from traj.txt.
-        
-        Returns:
-            List of 4x4 camera-to-world transformation matrices
+        Returns a sorted list of unique class names across all frames in this scene.
+        Respects skip_labels and require_all_ids filters.
         """
-        if self._poses is None:
-            self._poses = []
-            if self.traj_path.exists():
-                with open(self.traj_path, 'r') as f:
-                    for line in f:
-                        vals = line.strip().split()
-                        if len(vals) == 16:
-                            T = np.array([float(v) for v in vals]).reshape(4, 4)
-                            self._poses.append(T)
-        return self._poses
-    
-    def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        """Get camera pose for a specific frame."""
-        poses = self.get_poses()
-        if poses and 0 <= frame_idx < len(poses):
-            return poses[frame_idx]
-        return None
-    
-    def get_frame_paths(self, frame_idx: int) -> Dict[str, Path]:
-        """Get all file paths for a specific frame."""
-        frame_num = frame_idx + 1  # 1-indexed in filenames
-        return {
-            'rgb': self.rgb_dir / self._rgb_pattern.format(frame_num),
-            'depth': self.depth_dir / self._depth_pattern.format(frame_num),
-            'seg_png': self.seg_dir / self._seg_pattern.format(frame_num),
-            'seg_json': self.seg_dir / self._seg_info_pattern.format(frame_num),
-            'bbox_json': self.bbox_dir / self._bbox_pattern.format(frame_num),
-        }
-    
-    def load_rgb(self, frame_idx: int) -> Optional[np.ndarray]:
-        """
-        Load RGB image for a frame.
-        
-        Returns:
-            (H, W, 3) BGR image or None if not found
-        """
-        paths = self.get_frame_paths(frame_idx)
-        rgb_path = paths['rgb']
-        
-        if not rgb_path.exists():
-            return None
-        
-        return cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
-    
-    def load_depth(self, frame_idx: int, as_meters: bool = True) -> Optional[np.ndarray]:
-        """
-        Load depth map for a frame.
-        
-        Args:
-            frame_idx: Frame index
-            as_meters: If True, convert to meters; if False, return raw uint16
-            
-        Returns:
-            (H, W) depth map (float32 in meters or uint16 raw)
-        """
-        paths = self.get_frame_paths(frame_idx)
-        depth_path = paths['depth']
-        
-        if not depth_path.exists():
-            return None
-        
-        depth_raw = np.array(Image.open(depth_path))
-        
-        if not as_meters:
-            return depth_raw
-        
-        # Convert to meters
-        depth_m = depth_raw.astype(np.float32) * self.png_depth_scale + self.min_depth
-        
-        # Clamp invalid values
-        depth_m[depth_m < self.min_depth] = 0.0
-        depth_m[depth_m > self.max_depth] = 0.0
-        
-        return depth_m
-    
-    def load_segmentation(self, frame_idx: int) -> Tuple[Optional[np.ndarray], Dict]:
-        """
-        Load segmentation map and info.
-        
-        Returns:
-            seg_map: (H, W, 3) BGR color-coded segmentation
-            seg_info: Dict mapping semantic_id -> {class, color_bgr}
-        """
-        paths = self.get_frame_paths(frame_idx)
-        
-        # Load colored segmentation
-        seg_png_path = paths['seg_png']
-        if not seg_png_path.exists():
-            return None, {}
-        
-        seg_map = cv2.imread(str(seg_png_path), cv2.IMREAD_COLOR)
-        
-        # Load segmentation info
-        seg_json_path = paths['seg_json']
-        seg_info = {}
-        
-        if seg_json_path.exists():
-            with open(seg_json_path, 'r') as f:
-                raw_info = json.load(f)
-                for sem_id_str, info in raw_info.items():
-                    try:
-                        sem_id = int(sem_id_str)
-                    except ValueError:
+        classes: Set[str] = set()
+        for frame_idx in self.frame_indices:
+            bbox_path = self._bbox_json_path(frame_idx)
+            bbox_data = self._read_json(bbox_path)
+
+            bbox2d_by_id = self._parse_bbox2d_tight(bbox_data)
+            bbox3d_list = self._parse_bbox3d(bbox_data)
+
+            for b3d in bbox3d_list:
+                bbox_3d_id = int(b3d.get("bbox_3d_id", -1))
+                bbox_2d_id = int(b3d.get("bbox_2d_id", -1))
+                instance_seg_id = int(b3d.get("instance_seg_id", -1))
+
+                if self.require_all_ids:
+                    if bbox_3d_id < 0 or bbox_2d_id < 0 or instance_seg_id < 0:
                         continue
-                    
-                    # Handle different label formats
-                    label_data = info.get('label', {})
-                    if isinstance(label_data, str):
-                        cls_name = label_data
-                    elif isinstance(label_data, dict):
-                        cls_name = label_data.get('class', label_data.get('name', ''))
-                        if not cls_name:
-                            for k, v in label_data.items():
-                                cls_name = str(v) if v else str(k)
-                                break
-                    else:
-                        cls_name = str(label_data) if label_data else 'unknown'
-                    
-                    seg_info[sem_id] = {
-                        'class': cls_name,
-                        'color_bgr': tuple(info.get('color_bgr', [0, 0, 0]))
-                    }
-        
-        return seg_map, seg_info
-    
-    def load_bboxes(self, frame_idx: int) -> Dict[str, List[Dict]]:
+
+                b2d = bbox2d_by_id.get(bbox_2d_id)
+                class_name = self._infer_class_name(b3d=b3d, b2d=b2d)
+                class_name_lower = class_name.lower()
+
+                if any(skip in class_name_lower for skip in self.skip_labels):
+                    continue
+
+                classes.add(class_name)
+
+        return sorted(classes)
+
+    def load_traj(self) -> Optional[List[Dict[str, Any]]]:
         """
-        Load 2D and 3D bounding boxes.
-        
-        Returns:
-            Dict with 'bbox_2d' and 'bbox_3d' lists
+        Loads trajectory data from traj.txt.
+        Each line is a 4x4 camera transform matrix flattened in row-major order.
+        Returns a list of dicts with "frame_idx" and "cam_transform_4x4" keys.
         """
-        paths = self.get_frame_paths(frame_idx)
-        bbox_path = paths['bbox_json']
+        traj_path = self.scene_dir / "traj.txt"
+        if not traj_path.exists():
+            return None
         
-        if not bbox_path.exists():
-            return {'bbox_2d': [], 'bbox_3d': []}
-        
-        with open(bbox_path, 'r') as f:
-            data = json.load(f)
-        
-        result = {'bbox_2d': [], 'bbox_3d': []}
-        
-        # Parse 2D bboxes
-        bbox_2d_key = None
-        if 'bboxes' in data:
-            for key in ['bbox_2d_tight', 'bbox_2d_loose', 'bbox_2d']:
-                if key in data['bboxes']:
-                    bbox_2d_key = key
-                    break
-        
-        if bbox_2d_key and 'bboxes' in data:
-            for box in data['bboxes'][bbox_2d_key].get('boxes', []):
-                result['bbox_2d'].append({
-                    'track_id': box.get('bbox_id', box.get('track_id', -1)),
-                    'semantic_id': box.get('semantic_id', -1),
-                    'prim_path': box.get('prim_path', ''),
-                    'label': self._extract_label(box.get('label', {})),
-                    'xyxy': box.get('xyxy', [0, 0, 0, 0]),
-                    'visibility': 1.0 - box.get('visibility_or_occlusion', 
-                                                box.get('occlusion', 0.0))
-                })
-        
-        # Parse 3D bboxes
-        if 'bboxes' in data and 'bbox_3d' in data['bboxes']:
-            for box in data['bboxes']['bbox_3d'].get('boxes', []):
-                transform = box.get('transform_4x4', None)
-                if transform is not None:
-                    transform = np.array(transform, dtype=np.float64).reshape(4, 4)
+        traj_data = []
+        with open(traj_path, "r") as f:
+            for idx, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
                 
-                result['bbox_3d'].append({
-                    'track_id': box.get('track_id', box.get('bbox_id', -1)),
-                    'semantic_id': box.get('semantic_id', -1),
-                    'prim_path': box.get('prim_path', ''),
-                    'label': box.get('label', 'unknown'),
-                    'aabb': box.get('aabb_xyzmin_xyzmax', []),
-                    'transform': transform,
-                    'occlusion': box.get('occlusion_ratio', 0.0)
+                values = line.split()
+                if len(values) != 16:
+                    raise ValueError(f"Expected 16 values in traj.txt line {idx}, got {len(values)}")
+                
+                # Parse as floats and reshape to 4x4 matrix (row-major)
+                transform = np.array([float(v) for v in values], dtype=np.float32).reshape(4, 4)
+                
+                traj_data.append({
+                    "frame_idx": idx,
+                    "cam_transform_4x4": transform
                 })
         
-        return result
+        return traj_data
     
-    def _extract_label(self, label_dict) -> str:
-        """Extract class label from various label formats."""
-        if isinstance(label_dict, str):
-            return label_dict
-        if isinstance(label_dict, dict):
-            for k, v in label_dict.items():
-                return str(v) if v else str(k)
-        return 'unknown'
-    
-    def get_gt_objects(self, frame_idx: int, 
-                       include_masks: bool = True,
-                       apply_filter: bool = True,
-                       debug_visualize: bool = True) -> List[GTObject]:
+    def get_frame_data(self, frame_idx: int) -> FrameData:
         """
-        Get all ground truth objects for a frame.
-        
-        IMPORTANT: Objects are loaded based on 3D bboxes first.
-        Only objects with valid 3D bboxes are included. Segmentation masks
-        are extracted using semantic_id from 3D bbox to look up color in seg_info.
-        
-        Flow:
-        1. Load 3D bboxes (source of truth for object list)
-        2. Apply skip_labels filter (wall, floor, etc.)
-        3. For each remaining 3D bbox object:
-           a. Use semantic_id to look up color in seg_info
-           b. Extract mask by matching that color in segmentation map
-           c. Find matching 2D bbox by prim_path (for bbox_2d field)
-        
-        Args:
-            frame_idx: Frame index
-            include_masks: Whether to extract masks from segmentation
-            apply_filter: Whether to filter out skip_labels (default True)
-            debug_visualize: Whether to show debug visualization (RGB + masks + class names)
-            
-        Returns:
-            List of GTObject instances (only objects with 3D bboxes)
+        Returns FrameData for the given frame index (1-based),
+        including gt_objects built from bbox_3d entries.
         """
-        # Load bboxes - 3D bboxes are the source of truth
-        bboxes = self.load_bboxes(frame_idx)
-        
-        if not bboxes['bbox_3d']:
-            print(f"DEBUG[get_gt_objects] Frame {frame_idx}: No 3D bboxes found")
-            return []
-        
-        print(f"DEBUG[get_gt_objects] Frame {frame_idx}: Found {len(bboxes['bbox_3d'])} 3D bboxes, "
-              f"{len(bboxes['bbox_2d'])} 2D bboxes")
-        
-        # Load RGB for debug visualization
-        rgb_debug = None
-        if debug_visualize:
-            rgb_debug = self.load_rgb(frame_idx)
-        
-        # Load segmentation if needed
-        seg_map, seg_info = None, {}
-        if include_masks:
-            seg_map, seg_info = self.load_segmentation(frame_idx)
-            if seg_map is not None:
-                print(f"DEBUG[get_gt_objects] Loaded segmentation map: {seg_map.shape}")
-            else:
-                print(f"DEBUG[get_gt_objects] No segmentation map found")
-        
-        # Build prim_path -> 2D bbox mapping for fast lookup
-        prim_to_bbox_2d = {box['prim_path']: box for box in bboxes['bbox_2d']}
-        
-        gt_objects = []
-        skipped_by_filter = []
-        skipped_no_2d_bbox = []
-        
-        # ITERATE OVER 3D BBOXES - these define which objects exist
-        for box_3d in bboxes['bbox_3d']:
-            track_id = box_3d['track_id']
-            label = box_3d['label'] or 'unknown'
-            prim_path = box_3d['prim_path']
-            semantic_id = box_3d.get('semantic_id', -1)
-            
-            # Validate 3D bbox has required data
-            aabb = box_3d.get('aabb')
-            if aabb is None or len(aabb) != 6:
-                print(f"DEBUG[get_gt_objects] Skipping {prim_path}: invalid 3D bbox")
+        bbox_path = self._bbox_json_path(frame_idx)
+        seg_png_path = self._seg_png_path(frame_idx)
+        seg_info_path = self._seg_info_json_path(frame_idx)
+
+        bbox_data = self._read_json(bbox_path)
+        seg_info = self._read_json(seg_info_path)
+
+        seg_img = self._read_seg_bgr(seg_png_path)  # HxWx3 BGR
+
+        # Build maps
+        bbox2d_by_id = self._parse_bbox2d_tight(bbox_data)  # keyed by bbox_2d_id
+        bbox3d_list = self._parse_bbox3d(bbox_data)
+
+        # instance_id -> color_bgr (tuple) for mask extraction
+        color_by_instance_id = self._parse_instance_color_map(seg_info)
+
+        gt_objects: List[GTObject] = []
+        for b3d in bbox3d_list:
+            # Extract cross-reference IDs (new format)
+            bbox_3d_id = int(b3d.get("bbox_3d_id", -1))
+            bbox_2d_id = int(b3d.get("bbox_2d_id", -1))
+            instance_seg_id = int(b3d.get("instance_seg_id", -1))
+            track_id = int(b3d["track_id"])
+            prim_path = b3d.get("prim_path", None)
+
+            # Filter: require all IDs to be valid (>= 0) if enabled
+            if self.require_all_ids:
+                if bbox_3d_id < 0 or bbox_2d_id < 0 or instance_seg_id < 0:
+                    print(f"  [LOADER] SKIPPING object '{prim_path}': incomplete IDs "
+                          f"(3d={bbox_3d_id}, 2d={bbox_2d_id}, seg={instance_seg_id})")
+                    continue
+
+            # class name: prefer b3d["label"] (string), else derive from 2D label dict, else fallback
+            b2d = bbox2d_by_id.get(bbox_2d_id)  # Look up 2D box by bbox_2d_id
+            class_name = self._infer_class_name(b3d=b3d, b2d=b2d)
+            class_name_lower = class_name.lower()
+            if any(skip_label in class_name_lower for skip_label in self.skip_labels):
+                print(f"  [LOADER] SKIPPING GT CLASS '{class_name_lower}'")
                 continue
-            
-            # Apply skip_labels filter BEFORE extracting masks (optimization)
-            if apply_filter:
-                should_skip = False
-                for skip_label in self.skip_labels:
-                    if skip_label in label.lower():
-                        skipped_by_filter.append((track_id, label))
-                        should_skip = True
-                        break
-                if should_skip:
-                    continue
-            
-            # Find corresponding 2D bbox by prim_path
-            box_2d = prim_to_bbox_2d.get(prim_path, {})
-            
-            if not box_2d:
-                skipped_no_2d_bbox.append((track_id, label, prim_path))
-                # Still include object but note it has no 2D bbox
-                print(f"DEBUG[get_gt_objects] Warning: No 2D bbox for {prim_path} (track_id={track_id})")
-            
-            # Extract mask using semantic_id from 3D bbox
-            mask = None
-            color_bgr = None
-            if include_masks and seg_map is not None:
-                mask, color_bgr = self._extract_mask_for_object(
-                    seg_map, seg_info, box_3d
-                )
-            
-            gt_obj = GTObject(
-                track_id=track_id,
-                class_name=label,
-                semantic_id=semantic_id,  # Keep for reference but don't rely on it for matching
-                mask=mask,
-                bbox_2d=box_2d.get('xyxy') if box_2d else None,
-                bbox_3d_aabb=aabb,
-                bbox_3d_transform=box_3d.get('transform'),
-                prim_path=prim_path,
-                visibility=box_2d.get('visibility', 1.0) if box_2d else 1.0,
-                occlusion=box_3d.get('occlusion', 0.0),
-                color_bgr=color_bgr,
+
+            # 2D info (from the matched 2D box)
+            bbox2d_xyxy = None
+            visibility = None
+            if b2d is not None:
+                xyxy = b2d.get("xyxy", None)
+                if xyxy is not None and len(xyxy) == 4:
+                    bbox2d_xyxy = (float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3]))
+                visibility = b2d.get("visibility_or_occlusion", None)
+                visibility = float(visibility) if visibility is not None else None
+
+            # 3D info
+            aabb = b3d["aabb_xyzmin_xyzmax"]
+            aabb_xyzmin_xyzmax = (
+                float(aabb[0]), float(aabb[1]), float(aabb[2]),
+                float(aabb[3]), float(aabb[4]), float(aabb[5]),
             )
-            gt_objects.append(gt_obj)
-        
-        # Summary debug output
-        print(f"DEBUG[get_gt_objects] Frame {frame_idx} Summary:")
-        print(f"  - Total 3D bboxes: {len(bboxes['bbox_3d'])}")
-        print(f"  - Skipped by filter: {len(skipped_by_filter)}")
-        print(f"  - Missing 2D bbox: {len(skipped_no_2d_bbox)}")
-        print(f"  - Final GT objects: {len(gt_objects)}")
-        
-        if skipped_by_filter:
-            print(f"  - Filtered labels: {[l for _, l in skipped_by_filter[:5]]}{'...' if len(skipped_by_filter) > 5 else ''}")
-        
-        # Debug visualization: RGB + semantic masks + class names
-        # if debug_visualize and rgb_debug is not None:
-        #     self._visualize_gt_objects_debug(rgb_debug, gt_objects, frame_idx)
-        
-        return gt_objects
-    
-    def _visualize_gt_objects_debug(
-        self,
-        rgb: np.ndarray,
-        gt_objects: List[GTObject],
-        frame_idx: int,
-        alpha: float = 0.5,
-        window_name: str = "GT Objects Debug"
-    ) -> None:
-        """
-        Debug visualization showing RGB + semantic masks + class names.
-        
-        Args:
-            rgb: BGR image (H, W, 3)
-            gt_objects: List of GTObject instances
-            frame_idx: Frame index for title
-            alpha: Mask overlay alpha (0-1)
-            window_name: OpenCV window name
-        """
-        if rgb is None:
-            print("DEBUG: No RGB image available for visualization")
-            return
-        
-        vis_img = rgb.copy()
-        mask_overlay = np.zeros_like(rgb)
-        
-        for obj in gt_objects:
-            # Generate consistent color based on track_id
-            np.random.seed(obj.track_id)
-            color = tuple(int(c) for c in np.random.randint(50, 255, 3))
-            
-            # Draw mask if available
-            if obj.mask is not None:
-                mask_bool = obj.mask > 0
-                mask_overlay[mask_bool] = color
-            
-            # Draw 2D bbox if available
-            if obj.bbox_2d is not None:
-                x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
-                cv2.rectangle(vis_img, (x1, y1), (x2, y2), color, 2)
-                
-                # Draw class name label
-                label_text = f"{obj.class_name} (ID:{obj.track_id})"
-                (tw, th), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                
-                # Background rectangle for text
-                cv2.rectangle(vis_img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(vis_img, label_text, (x1 + 2, y1 - 4), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            elif obj.mask is not None:
-                # If no bbox, place label at mask centroid
-                mask_points = np.where(obj.mask > 0)
-                if len(mask_points[0]) > 0:
-                    cy, cx = int(np.mean(mask_points[0])), int(np.mean(mask_points[1]))
-                    label_text = f"{obj.class_name} (ID:{obj.track_id})"
-                    cv2.putText(vis_img, label_text, (cx - 30, cy), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        
-        # Blend mask overlay with original image
-        vis_img = cv2.addWeighted(vis_img, 1.0, mask_overlay, alpha, 0)
-        
-        # Add frame info
-        info_text = f"Frame {frame_idx} | {len(gt_objects)} objects"
-        cv2.putText(vis_img, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                   1.0, (0, 255, 0), 2, cv2.LINE_AA)
-        
-        # Save image
-        out_path = f"/home/maribjonov_mr/metr/yolo_sgg/vis_frame_{frame_idx:05d}.png"
-        cv2.imwrite(out_path, vis_img)
 
-        # Show image
-        cv2.imshow(window_name, vis_img)
-        print(f"DEBUG[Visualization] Press any key to continue, 'q' to quit visualization...")
-        key = cv2.waitKey(0) & 0xFF
-        if key == ord('q'):
-            cv2.destroyAllWindows()
-    
-    def _extract_mask_for_object(
-        self, 
-        seg_map: np.ndarray, 
-        seg_info: Dict,
-        box_3d: Dict
-    ) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int, int]]]:
-        """
-        Extract binary mask for an object from segmentation map.
-        
-        Uses semantic_id from 3D bbox to look up color in seg_info, then extracts
-        the mask by matching that color in the segmentation map.
-        
-        Args:
-            seg_map: (H, W, 3) BGR segmentation map
-            seg_info: Dict mapping semantic_id -> {class, color_bgr}
-            box_3d: 3D bbox dict containing semantic_id, label, prim_path, etc.
-        
-        Returns:
-            mask: Binary mask (H, W) with values 0/255
-            color_bgr: The segmentation color used
-        """
-        if seg_map is None:
-            return None, None
-        
-        # Get object info
-        prim_path = box_3d.get('prim_path', 'unknown')
-        label = box_3d.get('label', 'unknown')
-        track_id = box_3d.get('track_id', -1)
-        semantic_id = box_3d.get('semantic_id', -1)
-        
-        # Look up color from seg_info using semantic_id
-        if semantic_id not in seg_info:
-            print(f"DEBUG[_extract_mask] semantic_id={semantic_id} not in seg_info for {prim_path}")
-            return None, None
-        
-        color_bgr = seg_info[semantic_id].get('color_bgr')
-        if color_bgr is None:
-            print(f"DEBUG[_extract_mask] No color_bgr for semantic_id={semantic_id}")
-            return None, None
-        
-        color_bgr = tuple(color_bgr)
-        
-        # Skip black (background) color
-        if color_bgr == (0, 0, 0):
-            print(f"DEBUG[_extract_mask] Skipping black color for {prim_path}")
-            return None, None
-        
-        # Create mask by matching the color in segmentation map
-        color_array = np.array(color_bgr, dtype=np.uint8)
-        mask = np.all(seg_map == color_array, axis=2).astype(np.uint8) * 255
-        
-        # Verify mask has pixels
-        pixel_count = mask.sum() // 255
-        if pixel_count == 0:
-            print(f"DEBUG[_extract_mask] Mask has no pixels for {prim_path} (semantic_id={semantic_id}, color={color_bgr})")
-            return None, None
-        
-        print(f"DEBUG[_extract_mask] Extracted mask for {prim_path} (track_id={track_id}, "
-              f"semantic_id={semantic_id}), color={color_bgr}, pixels={pixel_count}")
-        
-        return mask, color_bgr
-    
-    def get_frame_data(self, frame_idx: int, 
-                       load_rgb: bool = True,
-                       load_depth: bool = True,
-                       load_seg: bool = True,
-                       load_objects: bool = True) -> FrameData:
-        """
-        Load all data for a single frame.
-        
-        Args:
-            frame_idx: Frame index
-            load_rgb: Whether to load RGB image
-            load_depth: Whether to load depth map
-            load_seg: Whether to load segmentation
-            load_objects: Whether to extract GT objects
-            
-        Returns:
-            FrameData container with requested data
-        """
-        data = FrameData(frame_idx=frame_idx)
-        
-        if load_rgb:
-            data.rgb = self.load_rgb(frame_idx)
-        
-        if load_depth:
-            data.depth = self.load_depth(frame_idx)
-        
-        if load_seg:
-            data.segmentation, data.seg_info = self.load_segmentation(frame_idx)
-        
-        if load_objects:
-            data.gt_objects = self.get_gt_objects(frame_idx, include_masks=load_seg)
-        
-        data.pose = self.get_pose(frame_idx)
-        
-        return data
-    
-    def __len__(self) -> int:
-        """Return number of frames."""
-        return self.get_frame_count()
-    
-    def __iter__(self):
-        """Iterate over frames."""
-        for i in range(len(self)):
-            yield self.get_frame_data(i)
-    
-    # =========================================================================
-    # Visualization Methods
-    # =========================================================================
-    
-    def visualize_frame(
-        self,
-        frame_idx: int,
-        show_rgb: bool = True,
-        show_seg: bool = True,
-        show_bbox_2d: bool = True,
-        show_depth: bool = False,
-        alpha: float = 0.5,
-        figsize: Tuple[int, int] = (20, 10),
-        save_path: Optional[str] = None,
-    ) -> None:
-        """
-        Visualize 2D data for a frame.
-        
-        Args:
-            frame_idx: Frame index
-            show_rgb: Show RGB image
-            show_seg: Show segmentation overlay
-            show_bbox_2d: Show 2D bounding boxes
-            show_depth: Show depth map
-            alpha: Segmentation overlay alpha
-            figsize: Figure size
-            save_path: If provided, save figure to this path
-        """
-        if not HAS_MATPLOTLIB:
-            print("matplotlib not available for visualization")
-            return
-        
-        data = self.get_frame_data(frame_idx)
-        
-        # Count panels
-        n_panels = sum([show_rgb, show_seg, show_depth])
-        if n_panels == 0:
-            print("No visualization options selected")
-            return
-        
-        fig, axes = plt.subplots(1, n_panels, figsize=figsize)
-        if n_panels == 1:
-            axes = [axes]
-        
-        ax_idx = 0
-        
-        # RGB with bboxes
-        if show_rgb and data.rgb is not None:
-            ax = axes[ax_idx]
-            img = cv2.cvtColor(data.rgb.copy(), cv2.COLOR_BGR2RGB)
-            
-            if show_bbox_2d:
-                for obj in data.gt_objects:
-                    if obj.bbox_2d is None:
-                        continue
-                    
-                    x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
-                    
-                    # Random color based on track_id
-                    np.random.seed(obj.track_id)
-                    color = tuple(int(c) for c in np.random.randint(0, 255, 3))
-                    
-                    # Draw box
-                    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                    
-                    # Draw label
-                    text = f"{obj.class_name} (ID:{obj.track_id})"
-                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(img, (x1, y1 - th - 4), (x1 + tw, y1), color, -1)
-                    cv2.putText(img, text, (x1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 
-                               0.5, (255, 255, 255), 1)
-            
-            ax.imshow(img)
-            ax.set_title(f'RGB + 2D BBoxes - Frame {frame_idx} ({len(data.gt_objects)} objects)')
-            ax.axis('off')
-            ax_idx += 1
-        
-        # Segmentation overlay
-        if show_seg and data.rgb is not None and data.segmentation is not None:
-            ax = axes[ax_idx]
-            rgb = cv2.cvtColor(data.rgb, cv2.COLOR_BGR2RGB)
-            seg = cv2.cvtColor(data.segmentation, cv2.COLOR_BGR2RGB)
-            
-            # Blend
-            blended = cv2.addWeighted(rgb, 1 - alpha, seg, alpha, 0)
-            
-            # Add annotations
-            for obj in data.gt_objects:
-                if obj.bbox_2d is None:
-                    continue
-                x1, y1, x2, y2 = [int(v) for v in obj.bbox_2d]
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                
-                text = f"{obj.class_name}"
-                cv2.putText(blended, text, (cx - 20, cy), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.4, (255, 255, 255), 1, cv2.LINE_AA)
-            
-            ax.imshow(blended)
-            ax.set_title(f'RGB + Segmentation - Frame {frame_idx}')
-            ax.axis('off')
-            ax_idx += 1
-        
-        # Depth
-        if show_depth and data.depth is not None:
-            ax = axes[ax_idx]
-            depth_vis = data.depth.copy()
-            depth_vis[depth_vis <= 0] = np.nan
-            
-            im = ax.imshow(depth_vis, cmap='viridis')
-            ax.set_title(f'Depth - Frame {frame_idx}')
-            ax.axis('off')
-            plt.colorbar(im, ax=ax, label='Depth (m)', fraction=0.046)
-            ax_idx += 1
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved visualization to: {save_path}")
-        
-        plt.show()
-    
-    def visualize_3d(
-        self,
-        frame_idx: int,
-        show_point_cloud: bool = True,
-        show_bbox_3d: bool = True,
-        use_pose: bool = True,
-        point_size: float = 2.0,
-        max_box_edge: float = 20.0,
-        window_name: Optional[str] = None,
-    ) -> None:
-        """
-        Visualize 3D data for a frame using Open3D.
-        
-        Args:
-            frame_idx: Frame index
-            show_point_cloud: Show reconstructed point cloud
-            show_bbox_3d: Show 3D bounding boxes
-            use_pose: Transform point cloud to world frame
-            point_size: Point size for visualization
-            max_box_edge: Skip boxes larger than this (meters)
-            window_name: Window title
-        """
-        if not HAS_OPEN3D:
-            print("Open3D not available for 3D visualization")
-            return
-        
-        data = self.get_frame_data(frame_idx)
-        
-        if data.rgb is None or data.depth is None:
-            print(f"Missing RGB or depth for frame {frame_idx}")
-            return
-        
-        # Create RGBD image
-        rgb_o3d = o3d.geometry.Image(cv2.cvtColor(data.rgb, cv2.COLOR_BGR2RGB))
-        depth_o3d = o3d.geometry.Image(data.depth.astype(np.float32))
-        
-        # Create intrinsics
-        intrinsics = o3d.camera.PinholeCameraIntrinsic()
-        intrinsics.set_intrinsics(
-            self.image_width, self.image_height,
-            self.fx, self.fy, self.cx, self.cy
-        )
-        
-        # Create RGBD and point cloud
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgb_o3d, depth_o3d,
-            depth_scale=1.0,
-            depth_trunc=self.max_depth,
-            convert_rgb_to_intensity=False,
-        )
-        
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsics)
-        
-        # Transform to world frame
-        if use_pose and data.pose is not None:
-            pcd.transform(data.pose)
-        
-        # Prepare geometries
-        geometries = []
-        
-        if show_point_cloud:
-            geometries.append(pcd)
-        
-        # Coordinate frame
-        coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
-        geometries.append(coord)
-        
-        # 3D bounding boxes
-        if show_bbox_3d:
-            for obj in data.gt_objects:
-                if obj.bbox_3d_aabb is None or len(obj.bbox_3d_aabb) != 6:
-                    continue
-                
-                aabb = obj.bbox_3d_aabb
-                xmin, ymin, zmin, xmax, ymax, zmax = aabb
-                
-                # Skip very large boxes
-                sx, sy, sz = xmax - xmin, ymax - ymin, zmax - zmin
-                if max(sx, sy, sz) > max_box_edge:
-                    continue
-                
-                # Create line set for bbox
-                corners = np.array([
-                    [xmin, ymin, zmin],
-                    [xmax, ymin, zmin],
-                    [xmax, ymax, zmin],
-                    [xmin, ymax, zmin],
-                    [xmin, ymin, zmax],
-                    [xmax, ymin, zmax],
-                    [xmax, ymax, zmax],
-                    [xmin, ymax, zmax],
-                ], dtype=np.float64)
-                
-                lines = np.array([
-                    [0, 1], [1, 2], [2, 3], [3, 0],  # bottom
-                    [4, 5], [5, 6], [6, 7], [7, 4],  # top
-                    [0, 4], [1, 5], [2, 6], [3, 7],  # verticals
-                ], dtype=np.int32)
-                
-                ls = o3d.geometry.LineSet()
-                ls.points = o3d.utility.Vector3dVector(corners)
-                ls.lines = o3d.utility.Vector2iVector(lines)
-                
-                # Color based on track_id
-                np.random.seed(obj.track_id)
-                color = np.random.rand(3).tolist()
-                ls.paint_uniform_color(color)
-                
-                geometries.append(ls)
-        
-        # Visualize
-        window_title = window_name or f"3D Visualization - Frame {frame_idx}"
-        o3d.visualization.draw_geometries(
-            geometries,
-            window_name=window_title,
-            width=1280,
-            height=720,
-            point_show_normal=False,
-        )
-    
-    def visualize_sequence(
-        self,
-        start_frame: int = 0,
-        end_frame: Optional[int] = None,
-        step: int = 1,
-        mode: str = '2d',
-        **kwargs
-    ) -> None:
-        """
-        Visualize a sequence of frames.
-        
-        Args:
-            start_frame: Starting frame index
-            end_frame: Ending frame index (exclusive)
-            step: Frame step
-            mode: '2d' for 2D visualization, '3d' for 3D
-            **kwargs: Additional arguments for visualize_frame or visualize_3d
-        """
-        if end_frame is None:
-            end_frame = len(self)
-        
-        for frame_idx in range(start_frame, end_frame, step):
-            print(f"\nFrame {frame_idx}/{end_frame-1}")
-            
-            if mode == '2d':
-                self.visualize_frame(frame_idx, **kwargs)
-            elif mode == '3d':
-                self.visualize_3d(frame_idx, **kwargs)
+            T = np.array(b3d["transform_4x4"], dtype=np.float32)
+            if T.shape != (4, 4):
+                raise ValueError(f"Bad transform shape in {bbox_path}: {T.shape}")
+
+            occlusion = b3d.get("occlusion_ratio", None)
+            occlusion = float(occlusion) if occlusion is not None else None
+
+            # Mask extraction: use instance_seg_id to look up color from segmentation
+            color = color_by_instance_id.get(instance_seg_id, None)
+            if color is None:
+                # If missing mapping, make empty mask
+                print(f"  [LOADER] WARNING: No color mapping for instance_seg_id={instance_seg_id}, class='{class_name}'")
+                mask = np.zeros(seg_img.shape[:2], dtype=bool)
             else:
-                raise ValueError(f"Unknown mode: {mode}")
-    
-    def print_info(self) -> None:
-        """Print dataset information."""
-        print(f"\n{'='*60}")
-        print(f"Isaac Sim Dataset Info")
-        print(f"{'='*60}")
-        print(f"  Scene path: {self.scene_path}")
-        print(f"  Frames: {self.get_frame_count()}")
-        print(f"  Poses: {len(self.get_poses())}")
-        print(f"\n  Camera intrinsics:")
-        print(f"    Image: {self.image_width} x {self.image_height}")
-        print(f"    fx, fy: {self.fx:.1f}, {self.fy:.1f}")
-        print(f"    cx, cy: {self.cx:.1f}, {self.cy:.1f}")
-        print(f"  Depth range: [{self.min_depth}, {self.max_depth}] m")
+                # seg_img is BGR; color is (b,g,r)
+                mask = np.all(seg_img == np.array(color, dtype=np.uint8), axis=2)
+
+            gt_objects.append(
+                GTObject(
+                    track_id=track_id,
+                    instance_seg_id=instance_seg_id,
+                    bbox_2d_id=bbox_2d_id,
+                    bbox_3d_id=bbox_3d_id,
+                    class_name=class_name,
+                    prim_path=prim_path,
+                    bbox2d_xyxy=bbox2d_xyxy,
+                    box_3d_aabb_xyzmin_xyzmax=aabb_xyzmin_xyzmax,
+                    box_3d_transform_4x4=T,
+                    visibility=visibility,
+                    occlusion=occlusion,
+                    mask=mask,
+                )
+            )
+
+        # Debug: print all class names before filtering
+        print(f"  [LOADER] Frame {frame_idx}: Found {len(gt_objects)} objects before filtering")
+        if gt_objects:
+            class_names = [obj.class_name for obj in gt_objects]
+            print(f"  [LOADER] Class names: {class_names}")
         
-        # Check folders
-        print(f"\n  Directories:")
-        for name, path in [('RGB', self.rgb_dir), ('Depth', self.depth_dir),
-                          ('Segmentation', self.seg_dir), ('Bboxes', self.bbox_dir)]:
-            exists = path.exists()
-            n_files = len(list(path.glob('*'))) if exists else 0
-            status = f"✓ {n_files} files" if exists else "✗ not found"
-            print(f"    {name:15s}: {status}")
+        rgb = self._read_rgb_bgr(self._rgb_path(frame_idx)) if self.load_rgb else None
+        depth = self._read_depth(self._depth_path(frame_idx)) if self.load_depth else None
+
+        # Load camera transform from trajectory data (frame_idx is 1-based, list is 0-based)
+        cam_transform_4x4 = None
+        if self.traj_data is not None and len(self.traj_data) >= frame_idx:
+            cam_transform_4x4 = self.traj_data[frame_idx - 1]["cam_transform_4x4"]
         
-        # Show skip labels info
-        print(f"\n  Skip labels: {len(self.skip_labels)} patterns")
-        sample_labels = sorted(list(self.skip_labels))[:8]
-        print(f"    Examples: {', '.join(sample_labels)}...")
-        
-        # Sample first frame objects (show filtered vs unfiltered)
-        if len(self) > 0:
-            objects_all = self.get_gt_objects(0, include_masks=False, apply_filter=False)
-            objects_filtered = self.get_gt_objects(0, include_masks=False, apply_filter=True)
-            
-            print(f"\n  Objects in first frame:")
-            print(f"    Total (unfiltered): {len(objects_all)}")
-            print(f"    After filtering:    {len(objects_filtered)}")
-            print(f"    Filtered out:       {len(objects_all) - len(objects_filtered)}")
-            
-            # Show what was filtered
-            filtered_classes = set()
-            for obj in objects_all:
-                if obj.class_name.lower() in self.skip_labels:
-                    filtered_classes.add(obj.class_name)
-            if filtered_classes:
-                print(f"    Filtered classes:   {', '.join(sorted(filtered_classes))}")
-            
-            # Show remaining class distribution
-            class_counts = {}
-            for obj in objects_filtered:
-                class_counts[obj.class_name] = class_counts.get(obj.class_name, 0) + 1
-            if class_counts:
-                print(f"\n    Remaining classes:")
-                for cls, count in sorted(class_counts.items()):
-                    print(f"      {cls}: {count}")
-        
-        print(f"{'='*60}\n")
+        return FrameData(
+            frame_idx=frame_idx,
+            gt_objects=gt_objects,
+            rgb=rgb,
+            depth=depth,
+            cam_transform_4x4=cam_transform_4x4,
+            seg=seg_img,
+        )
 
+    # ---------- internals ----------
 
-# ============================================================================
-# Convenience functions
-# ============================================================================
+    def _discover_frames(self) -> List[int]:
+        """
+        Discovers frame indices by scanning bbox/*.json.
+        """
+        if not self.bbox_dir.exists():
+            return []
+        frames = []
+        for p in sorted(self.bbox_dir.glob("bboxes*_info.json")):
+            # expects bboxes000001_info.json
+            stem = p.name.replace("bboxes", "").replace("_info.json", "")
+            if stem.isdigit():
+                frames.append(int(stem))
+        return frames
 
-def load_scene(scene_path: str, **kwargs) -> IsaacSimDataLoader:
-    """Convenience function to create a data loader."""
-    return IsaacSimDataLoader(scene_path, **kwargs)
+    @staticmethod
+    def _read_json(path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing file: {path}")
+        with open(path, "r") as f:
+            return json.load(f)
 
+    @staticmethod
+    def _read_seg_bgr(path: Path) -> np.ndarray:
+        """
+        Reads semanticXXXXXX.png as BGR uint8 (keeps BGR since your json is color_bgr).
+        """
+        if not path.exists():
+            raise FileNotFoundError(f"Missing seg png: {path}")
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)  # BGR
+        if img is None:
+            raise RuntimeError(f"Failed to read seg png: {path}")
+        return img
 
-if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python isaac_sim_loader.py <scene_path> [frame_idx]")
-        print("       python isaac_sim_loader.py <scene_path> --info")
-        print("       python isaac_sim_loader.py <scene_path> --3d [frame_idx]")
-        sys.exit(1)
-    
-    scene_path = sys.argv[1]
-    loader = IsaacSimDataLoader(scene_path)
-    
-    if len(sys.argv) > 2:
-        if sys.argv[2] == '--info':
-            loader.print_info()
-        elif sys.argv[2] == '--3d':
-            frame_idx = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-            loader.visualize_3d(frame_idx)
-        else:
-            frame_idx = int(sys.argv[2])
-            loader.visualize_frame(frame_idx, show_rgb=True, show_seg=True, 
-                                   show_bbox_2d=True, show_depth=True)
-    else:
-        loader.print_info()
-        for i in range(0, 20, 5):
-            loader.visualize_frame(i, show_rgb=True, show_seg=True, 
-                              show_bbox_2d=True)
-            loader.visualize_3d(i)
+    @staticmethod
+    def _read_rgb_bgr(path: Path) -> np.ndarray:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing rgb jpg: {path}")
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)  # BGR
+        if img is None:
+            raise RuntimeError(f"Failed to read rgb jpg: {path}")
+        return img
+
+    @staticmethod
+    def _read_depth(path: Path) -> np.ndarray:
+        """
+        Depth is stored as PNG with max value 65535 (uint16).
+        You can later convert to meters if you have min/max mapping.
+        """
+        if not path.exists():
+            raise FileNotFoundError(f"Missing depth png: {path}")
+        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # likely uint16
+        if img is None:
+            raise RuntimeError(f"Failed to read depth png: {path}")
+        return img
+
+    @staticmethod
+    def _parse_bbox2d_tight(bbox_data: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+        """
+        Returns bbox_2d_id -> 2D box dict.
+        Uses the new 'bbox_2d_id' field for keying.
+        """
+        b2d = (
+            bbox_data.get("bboxes", {})
+                    .get("bbox_2d_tight", {})
+                    .get("boxes", [])
+        )
+        out: Dict[int, Dict[str, Any]] = {}
+        for b in b2d:
+            # Use new format key 'bbox_2d_id'
+            bbox_2d_id = b.get("bbox_2d_id", b.get("bbox_id", None))
+            if bbox_2d_id is not None:
+                out[int(bbox_2d_id)] = b
+        return out
+
+    @staticmethod
+    def _parse_bbox3d(bbox_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Returns list of 3D box dicts.
+        Uses new format with bbox_3d_id, bbox_2d_id, instance_seg_id.
+        """
+        b3d = (
+            bbox_data.get("bboxes", {})
+                    .get("bbox_3d", {})
+                    .get("boxes", [])
+        )
+        # Enforce required keys for new format
+        required = {"bbox_3d_id", "track_id", "aabb_xyzmin_xyzmax", "transform_4x4"}
+        for i, b in enumerate(b3d):
+            missing = required - set(b.keys())
+            if missing:
+                raise ValueError(f"bbox_3d[{i}] missing keys {missing}")
+        return b3d
+
+    @staticmethod
+    def _parse_instance_color_map(seg_info: Dict[str, Any]) -> Dict[int, Tuple[int, int, int]]:
+        """
+        seg_info keys are instance seg IDs as strings ("0","1","12",...).
+        Each entry has: instance_seg_id, bbox_2d_id, bbox_3d_id, prim_path, label, color_bgr.
+        Returns instance_seg_id(int) -> (b,g,r) color tuple.
+        """
+        out: Dict[int, Tuple[int, int, int]] = {}
+        for k, v in seg_info.items():
+            if not str(k).isdigit():
+                continue
+            instance_id = int(k)
+            color = v.get("color_bgr", None)
+            if color is None or len(color) != 3:
+                continue
+            out[instance_id] = (int(color[0]), int(color[1]), int(color[2]))
+        return out
+
+    @staticmethod
+    def _infer_class_name(b3d: Dict[str, Any], b2d: Optional[Dict[str, Any]]) -> str:
+        """
+        Prefer 3D label string. If not present, 2D label dict like {"wall":"wall"} -> take first value.
+        """
+        # 3D example: "label": "wall"
+        if "label" in b3d and isinstance(b3d["label"], str) and b3d["label"]:
+            return b3d["label"]
+
+        # 2D example: "label": {"wall":"wall"} or {"goal":"bowl"}
+        if b2d is not None:
+            lab = b2d.get("label", None)
+            if isinstance(lab, dict) and len(lab) > 0:
+                # take first value if exists, else key
+                k0 = next(iter(lab.keys()))
+                v0 = lab.get(k0, k0)
+                return str(v0)
+
+        return "xxxxxxx"
+
+    def _frame_str(self, frame_idx: int) -> str:
+        return f"{frame_idx:06d}"
+
+    def _bbox_json_path(self, frame_idx: int) -> Path:
+        return self.bbox_dir / f"bboxes{self._frame_str(frame_idx)}_info.json"
+
+    def _seg_png_path(self, frame_idx: int) -> Path:
+        return self.seg_dir / f"semantic{self._frame_str(frame_idx)}.png"
+
+    def _seg_info_json_path(self, frame_idx: int) -> Path:
+        return self.seg_dir / f"semantic{self._frame_str(frame_idx)}_info.json"
+
+    def _rgb_path(self, frame_idx: int) -> Path:
+        return self.rgb_dir / f"frame{self._frame_str(frame_idx)}.jpg"
+
+    def _depth_path(self, frame_idx: int) -> Path:
+        return self.depth_dir / f"depth{self._frame_str(frame_idx)}.png"

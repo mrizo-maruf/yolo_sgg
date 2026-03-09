@@ -128,7 +128,7 @@ def _obb_to_aabb(
 
 
 # ---------------------------------------------------------------------------
-# Data structures  (field layout mirrors isaac_sim_loaderv3)
+# Data structures  (field layout mirrors isaac_sim_loader)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)

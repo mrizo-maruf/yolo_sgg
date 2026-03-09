@@ -52,7 +52,7 @@ from tqdm import tqdm
 # -- project imports (framework-specific) ----------------------------------
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
-from isaacsim_utils.isaac_sim_loaderv3 import IsaacSimSceneLoader, GTObject
+from isaacsim_utils.isaac_sim_loader import IsaacSimSceneLoader, GTObject
 
 # -- decoupled metrics & vis -----------------------------------------------
 from metrics.tracking_metrics import (
