@@ -1,0 +1,6 @@
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background

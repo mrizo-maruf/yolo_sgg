@@ -1,0 +1,21 @@
+# ============================================================================
+# IsaacSim dataset overrides
+# ============================================================================
+# Inherits everything from default.yaml; override only what differs.
+
+dataset: isaacsim
+
+# IsaacSim depth is loaded via YOLOE.utils.load_depth_as_meters
+# which uses its own built-in PNG→metres conversion.
+depth_scale: 1.0        # already handled by yutils
+depth_max_m: 10.0
+
+# IsaacSim-specific labels to skip in GT loading
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background
+  - unlabeled
+  - unknown

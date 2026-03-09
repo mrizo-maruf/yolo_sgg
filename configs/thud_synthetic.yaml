@@ -1,0 +1,17 @@
+# ============================================================================
+# THUD Synthetic Scenes overrides
+# ============================================================================
+
+dataset: thud_synthetic
+
+depth_scale: 1000.0     # raw uint16 → metres  (raw / depth_scale)
+depth_max_m: 100.0
+
+scene_type: static      # "static" or "dynamic"
+
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background

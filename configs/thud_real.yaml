@@ -1,0 +1,28 @@
+# ============================================================================
+# THUD Real Scenes overrides
+# ============================================================================
+
+dataset: thud_real
+
+depth_scale: 1000.0
+depth_max_m: 100.0
+
+# GT tracking distance for assigning persistent IDs
+real_tracking_distance: 0.3
+
+# Classes to track (YOLOE set_classes)
+track_classes:
+  - door
+  - chair
+  - table
+  - stool
+  - people
+  - shelf
+  - robot
+
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background

@@ -40,7 +40,7 @@ import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
 
 # Import Isaac Sim data loader
-from isaacsim_utils.isaac_sim_loaderv3 import IsaacSimSceneLoader, GTObject
+from isaacsim_utils.isaac_sim_loader import IsaacSimSceneLoader, GTObject
 
 
 # ============================================================================

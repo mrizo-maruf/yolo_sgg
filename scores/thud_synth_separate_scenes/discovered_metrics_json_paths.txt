@@ -1,0 +1,15 @@
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Gym/static/Capture_1/Capture_1_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Gym/static/Capture_2/Capture_2_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Gym/static/Capture_3/Capture_3_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/House/static/Capture_1/Capture_1_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/House/static/Capture_2/Capture_2_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/House/static/Capture_3/Capture_3_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Office/static/Capture_1/Capture_1_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Office/static/Capture_2/Capture_2_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Office/static/Capture_3/Capture_3_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_1/static/Capture_1/Capture_1_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_1/static/Capture_2/Capture_2_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_1/static/Capture_3/Capture_3_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_2/static/Capture_1/Capture_1_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_2/static/Capture_2/Capture_2_metrics.json
+/home/yehia/rizo/THUD_Robot/Synthetic_Scenes/Supermarket_2/static/Capture_3/Capture_3_metrics.json
