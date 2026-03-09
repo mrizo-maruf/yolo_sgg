@@ -200,7 +200,7 @@ def process_depth_model(cfg):
         
         # Save as grayscale PNG
         img = Image.fromarray(depth_uint8, mode='L')
-        output_path = os.path.join(new_depth_dir, f'depth_{i:04d}.png')
+        output_path = os.path.join(new_depth_dir, f'depth{i:06d}.png')
         img.save(output_path)
     
     t_save_png_end = time.perf_counter()

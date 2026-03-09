@@ -1915,9 +1915,9 @@ if __name__ == "__main__":
             'enabled': True,  # Master switch for all visualization
             
             # What to visualize
-            'show_2d': True,      # YOLO masks with class IDs & global IDs
-            'show_3d': True,      # Open3D: all objects with BLUE=visible, RED=not visible
-            'show_comparison': True,  # GT vs Predictions side-by-side
+            'show_2d': False,      # YOLO masks with class IDs & global IDs
+            'show_3d': False,      # Open3D: all objects with BLUE=visible, RED=not visible
+            'show_comparison': False,  # GT vs Predictions side-by-side
             
             # Visualization frequency
             'interval': 10,       # Visualize every N frames (1 = every frame)
@@ -1927,7 +1927,7 @@ if __name__ == "__main__":
             'point_size': 2.0,     # Point size for 3D visualization
             
             # Save options (optional)
-            'save_dir': "/home/yehia/rizo/code/yolo_sgg",      # Directory to save visualizations (None = don't save)
+            'save_dir': "../files/yolo_sgg",      # Directory to save visualizations (None = don't save)
             # Example: 'save_dir': './debug_vis'
         }
     })
@@ -1946,16 +1946,16 @@ if __name__ == "__main__":
         # r"C:\path\to\scene_3",
         
         # Isaac Sim scenes:
-        '/home/maribjonov_mr/IsaacSim_bench/scene_1',
-        '/home/maribjonov_mr/IsaacSim_bench/scene_2',
-        '/home/maribjonov_mr/IsaacSim_bench/scene_3',
-        '/home/maribjonov_mr/IsaacSim_bench/scene_7',
-        '/home/maribjonov_mr/IsaacSim_bench/cabinet_simple',
-        '/home/maribjonov_mr/IsaacSim_bench/nk_scene_complex',
+        '../files/3D_SSGG_IsaacSim/scene_1',
+        '../files/3D_SSGG_IsaacSim/scene_2',
+        '../files/3D_SSGG_IsaacSim/scene_3',
+        '../files/3D_SSGG_IsaacSim/scene_7',
+        '../files/3D_SSGG_IsaacSim/cabinet_simple',
+        '../files/3D_SSGG_IsaacSim/nk_scene_complex',
     ]
     
     # Output directory for multi-scene results
-    DEFAULT_OUTPUT_DIR = '/home/maribjonov_mr/IsaacSim_bench'
+    DEFAULT_OUTPUT_DIR = '../files/yolo_sgg/IsaacSim_bench'
     
     # Parse command line arguments
     scene_path = None
@@ -1996,7 +1996,7 @@ if __name__ == "__main__":
     
     if scene_path is None and not multi_mode:
         # Default scene path - update this!
-        scene_path = r"/home/yehia/rizo/IsaacSim_Dataset/cabinet_complex"
+        scene_path = r"../files/3D_SSGG_IsaacSim/scene_1"
         print(f"Usage: python benchmark_tracking.py <scene_path> [options]")
         print(f"       python benchmark_tracking.py --multi [options]")
         print(f"\nOptions:")
