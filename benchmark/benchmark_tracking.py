@@ -53,6 +53,7 @@ from tqdm import tqdm
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
 from isaacsim_utils.isaac_sim_loader import IsaacSimSceneLoader, GTObject
+from Pi3.utils import process_depth_model
 
 # -- decoupled metrics & vis -----------------------------------------------
 from metrics.tracking_metrics import (
@@ -78,6 +79,7 @@ from benchmark.visualization import (
 DEFAULT_CFG = {
     # --- YOLO ---
     "yolo_model": "yoloe-11l-seg-pf.pt",
+    "depth_model": "yyfz233/Pi3X",  # set None if you want to use original depth
     "conf": 0.25,
     "iou": 0.5,
     # --- Mask pre-processing ---
@@ -182,7 +184,23 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
     )
 
     rgb_dir = str(loader.rgb_dir)
-    depth_paths = yutils.list_png_paths(str(loader.depth_dir))
+    depth_dir = str(loader.depth_dir)
+    
+    # Process depth with Pi3X model if configured
+    temp_cfg = OmegaConf.create({
+        'rgb_dir': rgb_dir,
+        'depth_dir': depth_dir,
+        'traj_path': str(scene_dir / "traj.txt"),
+        'depth_model': cfg.get('depth_model', None)
+    })
+    temp_cfg = process_depth_model(temp_cfg)
+    
+    # Update depth_dir if it was changed by depth model processing
+    if temp_cfg.depth_dir != depth_dir:
+        depth_dir = temp_cfg.depth_dir
+        print(f"Using processed depth from: {depth_dir}")
+    
+    depth_paths = yutils.list_png_paths(depth_dir)
 
     # cache depth maps
     depth_cache: Dict[str, np.ndarray] = {}
@@ -554,6 +572,8 @@ Examples
     p.add_argument("--model", type=str, default=None, help="YOLO model path.")
     p.add_argument("--conf", type=float, default=None, help="YOLO confidence threshold.")
     p.add_argument("--iou-thresh", type=float, default=None, help="Matching IoU threshold.")
+    # Depth model
+    p.add_argument("--depth-model", type=str, default=None, help="Depth model (e.g., 'yyfz233/Pi3X' or 'none' for original).")
     return p
 
 
@@ -578,6 +598,11 @@ def main() -> int:
         cfg.conf = args.conf
     if args.iou_thresh is not None:
         cfg.iou_threshold = args.iou_thresh
+    if args.depth_model is not None:
+        if args.depth_model.lower() == 'none':
+            cfg.depth_model = None
+        else:
+            cfg.depth_model = args.depth_model
 
     path = Path(args.path)
     if not path.exists():

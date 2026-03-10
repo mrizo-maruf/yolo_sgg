@@ -59,6 +59,7 @@ except Exception:
 # -- project imports -----------------------------------------------------------
 import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry
+from Pi3.utils import process_depth_model
 
 from thud_utils.thud_synthetic_loader import (
     THUDSyntheticLoader,
@@ -96,6 +97,7 @@ from benchmark.visualization import (
 DEFAULT_CFG = {
     # --- YOLO ---
     "yolo_model": "yoloe-11l-seg.pt",
+    "depth_model": "yyfz233/Pi3X",  # set None if you want to use original depth
     "conf": 0.25,
     "iou": 0.5,
     # --- Mask pre-processing ---
@@ -634,6 +636,37 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
     rgb_paths = [e[1] for e in valid_entries]
     depth_paths = [e[2] for e in valid_entries]
     n_eval_frames = len(frame_indices_eval)
+    
+    # --- Process depth with Pi3X model if configured ----------------------------
+    rgb_dir = str(loader.rgb_dir)
+    depth_dir = str(loader.depth_dir)
+    
+    temp_cfg = OmegaConf.create({
+        'rgb_dir': rgb_dir,
+        'depth_dir': depth_dir,
+        'traj_path': str(scene_dir / "camera_poses.txt"),  # Placeholder
+        'depth_model': cfg.get('depth_model', None)
+    })
+    temp_cfg = process_depth_model(temp_cfg)
+    
+    # Update depth paths if depth_dir was changed
+    if temp_cfg.depth_dir != depth_dir:
+        depth_dir = temp_cfg.depth_dir
+        print(f"Using processed depth from: {depth_dir}")
+        # Rebuild depth_paths with new directory
+        depth_paths = []
+        for fidx in frame_indices_eval:
+            dp = Path(depth_dir) / f"depth_{fidx:04d}.png"
+            if dp.exists():
+                depth_paths.append(str(dp))
+            else:
+                # Try without zero-padding
+                dp_alt = Path(depth_dir) / f"depth_{fidx}.png"
+                if dp_alt.exists():
+                    depth_paths.append(str(dp_alt))
+                else:
+                    print(f"[WARN] Depth file not found: {dp} or {dp_alt}")
+                    depth_paths.append("")  # Empty string as placeholder
 
     # --- Override global intrinsics in YOLOE.utils ---------------------------
     # Read intrinsics from the first frame
@@ -1082,6 +1115,26 @@ def benchmark_real_scene(scene_path: str, cfg: OmegaConf) -> Dict:
         print(f"  [WARN] RGB count ({len(rgb_paths)}) != frame count ({n_frames})")
     if len(depth_paths) != n_frames:
         print(f"  [WARN] Depth count ({len(depth_paths)}) != frame count ({n_frames})")
+    
+    # --- Process depth with Pi3X model if configured -------------------------
+    rgb_dir = str(loader.rgb_dir)
+    depth_dir = str(loader.depth_dir)
+    
+    temp_cfg = OmegaConf.create({
+        'rgb_dir': rgb_dir,
+        'depth_dir': depth_dir,
+        'traj_path': str(scene_dir / "camera_poses.txt"),  # Placeholder
+        'depth_model': cfg.get('depth_model', None)
+    })
+    temp_cfg = process_depth_model(temp_cfg)
+    
+    # Update depth paths if depth_dir was changed
+    if temp_cfg.depth_dir != depth_dir:
+        depth_dir = temp_cfg.depth_dir
+        print(f"  Using processed depth from: {depth_dir}")
+        # Use new depth directory paths
+        depth_paths = sorted(Path(depth_dir).glob("depth_*.png"))
+        depth_paths = [str(p) for p in depth_paths[:n_frames]]
 
     # --- Cache depth maps ---------------------------------------------------
     depth_scale = float(cfg.get("depth_scale", 1000.0))
@@ -1575,6 +1628,13 @@ Examples
         default=None,
         help="Matching IoU threshold.",
     )
+    # Depth model
+    p.add_argument(
+        "--depth-model",
+        type=str,
+        default=None,
+        help="Depth model (e.g., 'yyfz233/Pi3X' or 'none' for original).",
+    )
     return p
 
 
@@ -1614,6 +1674,11 @@ def main() -> int:
         cfg.depth_max_m = args.depth_max
     if args.scene_type:
         cfg.scene_type = args.scene_type
+    if args.depth_model is not None:
+        if args.depth_model.lower() == 'none':
+            cfg.depth_model = None
+        else:
+            cfg.depth_model = args.depth_model
 
     use_real = getattr(args, "real", False)
 
