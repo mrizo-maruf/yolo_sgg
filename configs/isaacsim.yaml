@@ -5,10 +5,17 @@
 
 dataset: isaacsim
 
-# IsaacSim depth is loaded via YOLOE.utils.load_depth_as_meters
-# which uses its own built-in PNG→metres conversion.
-depth_scale: 1.0        # already handled by yutils
-depth_max_m: 10.0
+# --- IsaacSim camera intrinsics ---
+image_width: 1280
+image_height: 720
+focal_length: 50
+horizontal_aperture: 80
+vertical_aperture: 45
+
+# --- Depth conversion (16-bit PNG → metres) ---
+min_depth: 0.01
+max_depth: 10.0
+png_max_value: 65535
 
 # IsaacSim-specific labels to skip in GT loading
 loader_skip_labels:
@@ -19,3 +26,132 @@ loader_skip_labels:
   - background
   - unlabeled
   - unknown
+
+load_rgb: true
+load_depth: true
+pi3: false
+dav3: false
+require_all_ids: true
+
+# class names for open vocabulary evaluation (if enabled)
+scene_1_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+scene_2_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+scene_3_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+scene_4_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+scene_5_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+scene_6_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+  - "paller box"
+  - "purple box"
+  - "black box"
+  - "black cube"
+  - "black table"
+
+scene_7_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+  - "paller box"
+  - "purple box"
+  - "black box"
+  - "black cube"
+  - "black table"
+
+nk_scene_complex_class_names:
+  - "red office chair"
+  - "black office chair"
+  - "vase"
+  - "trash can"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+simple_scene_class_names:
+  - "red office chair"
+  - "chair"
+  - "stool"
+  - "blue bowl"
+  - "bowl"
+  - "chiffonier"
+  - "cabinet"
+
+cabinet_complex_class_names:
+  - "white cabinet"
+  - "brow box"
+  - "yellow box"
+  - "purple box"
+  - "red box"
+  - "pallet box"
+  - "power drill"
+  - "yellow bottle"
+  - "clamp"
+  - "cup"
+  - "blue can"
+  - "human"
+
+cabinet_simple_class_names:
+  - "white cabinet"
+  - "box"
+  - "blue can"
+  - "can"
+  - "banana"
+  - "blue cup"
+  - "cup"
+  - "mustard bottle"
+  - "cereal box"
+
+
+benchmark_metrics_path: "./results/isaacsim_metrics/"

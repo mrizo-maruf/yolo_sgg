@@ -89,6 +89,9 @@ def main() -> int:
 
     dataset_name = cfg.get("dataset", args.dataset or "isaacsim")
 
+    # --- Configure globals from config (device, tracker, depth, intrinsics) --
+    yutils.configure_globals(cfg)
+
     # --- Build loader --------------------------------------------------------
     scene_path = str(Path(args.path).resolve())
     scene_path = "/home/yehia/rizo/IsaacSim_Dataset/scene_7"
@@ -106,6 +109,12 @@ def main() -> int:
         loader_kwargs["depth_max_m"] = float(cfg.get("depth_max_m", 100.0))
     if dataset_name == "thud_real":
         loader_kwargs["tracking_distance"] = float(cfg.get("real_tracking_distance", 0.3))
+    if dataset_name == "isaacsim":
+        loader_kwargs["image_width"] = int(cfg.get("image_width", 1280))
+        loader_kwargs["image_height"] = int(cfg.get("image_height", 720))
+        loader_kwargs["focal_length"] = float(cfg.get("focal_length", 50))
+        loader_kwargs["horizontal_aperture"] = float(cfg.get("horizontal_aperture", 80))
+        loader_kwargs["vertical_aperture"] = float(cfg.get("vertical_aperture", 45))
 
     loader = LoaderCls(scene_path, **loader_kwargs)
     print(f"\n{'=' * 60}")

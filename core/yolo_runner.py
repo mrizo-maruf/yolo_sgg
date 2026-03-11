@@ -24,6 +24,8 @@ def run_yolo_tracking_stream(
     persistent: bool = True,
     agnostic_nms: bool = True,
     class_names_to_track: Optional[List[str]] = None,
+    tracker_cfg: Optional[str] = None,
+    device: Optional[str] = None,
 ) -> Generator[Tuple, None, None]:
     """Yield ``(yolo_result, rgb_path, depth_path)`` for each frame.
 
@@ -46,9 +48,16 @@ def run_yolo_tracking_stream(
     class_names_to_track : list[str] | None
         If provided, ``model.set_classes(...)`` is called to restrict
         detections to these classes (used e.g. by THUD Real Scenes).
+    tracker_cfg : str | None
+        Tracker config filename (default: ``yutils.TRACKER_CFG``).
+    device : str | None
+        Device string (default: ``yutils.DEVICE``).
     """
 
     model = YOLOEModel(model_path)
+
+    _tracker_cfg = tracker_cfg or yutils.TRACKER_CFG
+    _device = device or yutils.DEVICE
 
     if class_names_to_track:
         model.set_classes(class_names_to_track)
@@ -63,8 +72,8 @@ def run_yolo_tracking_stream(
 
         out = model.track(
             source=[rgb_input],
-            tracker=yutils.TRACKER_CFG,
-            device=yutils.DEVICE,
+            tracker=_tracker_cfg,
+            device=_device,
             conf=conf,
             verbose=verbose,
             persist=persistent,

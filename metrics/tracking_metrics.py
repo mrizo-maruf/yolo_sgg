@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from polars import datetime
 
 
 # ---------------------------------------------------------------------------
@@ -334,26 +335,27 @@ def _make_serializable(obj):
 
 def save_metrics(results: Dict, output_dir: str | Path, scene_name: str = "scene") -> None:
     """Persist metrics as JSON + CSV."""
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    # make outdir with date time to avoid overwriting previous results
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     data = _make_serializable(results)
 
     # JSON
-    json_path = out / f"{scene_name}_metrics.json"
+    json_path = output_dir / f"{scene_name}_metrics.json"
     with open(json_path, "w") as f:
         json.dump(data, f, indent=2)
 
     # CSV (flat key→value)
-    csv_path = out / f"{scene_name}_metrics.csv"
-    with open(csv_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["Metric", "Value"])
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                w.writerow([k, v])
+    # csv_path = output_dir / f"{scene_name}_metrics.csv"
+    # with open(csv_path, "w", newline="") as f:
+    #     w = csv.writer(f)
+    #     w.writerow(["Metric", "Value"])
+    #     for k, v in data.items():
+    #         if not isinstance(v, dict):
+    #             w.writerow([k, v])
 
-    print(f"[metrics] Saved {json_path}  &  {csv_path}")
+    print(f"[metrics] Saved {json_path}")
 
 
 def print_summary(results: Dict, title: str = "TRACKING METRICS") -> None:

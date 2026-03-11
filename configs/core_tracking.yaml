@@ -3,12 +3,15 @@
 # ============================================================================
 
 # --- YOLO model ---
+is_open_vocabulary: false
 yolo_model: "yoloe-11l-seg-pf.pt"
 conf: 0.25
 iou: 0.5
 verbose: false
 persistent: true
 agnostic_nms: true
+tracker_cfg: "botsort.yaml"
+device: "0"
 
 # --- Mask pre-processing ---
 kernel_size: 11
@@ -30,10 +33,6 @@ reprojection_visibility_threshold: 0.2
 
 # --- Matching (benchmark) ---
 iou_threshold: 0.3
-
-# --- Depth ---
-depth_scale: 1000.0      # raw uint16 / depth_scale = metres
-depth_max_m: 100.0        # clamp ceiling (metres)
 
 # --- Classes to skip (structural / background) ---
 skip_classes:

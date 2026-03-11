@@ -43,6 +43,50 @@ RGB_PATHS = []
 TRACKER_CFG = "botsort.yaml"
 DEVICE = "0"
 
+
+def configure_globals(cfg) -> None:
+    """Set module-level globals from an OmegaConf config object.
+
+    Call this once at startup (e.g. in ``run.py`` / ``benchmark_tracking_isaac.py``)
+    before any tracking or depth-loading functions are invoked.
+
+    Recognised keys (all optional – missing keys leave the current default):
+
+    Camera / image:
+        ``image_width``, ``image_height``,
+        ``focal_length``, ``horizontal_aperture``, ``vertical_aperture``
+
+    Depth:
+        ``min_depth``, ``max_depth``, ``png_max_value``
+
+    YOLO:
+        ``tracker_cfg``, ``device``
+    """
+    global IMAGE_WIDTH, IMAGE_HEIGHT, MIN_DEPTH, MAX_DEPTH, PNG_MAX_VALUE
+    global FOCAL_LENGTH, HORIZONTAL_APARTURE, VERTICAL_APARTURE
+    global fx, fy, cx, cy, TRACKER_CFG, DEVICE
+
+    # --- camera / image ------------------------------------------------------
+    IMAGE_WIDTH = int(cfg.get("image_width", IMAGE_WIDTH))
+    IMAGE_HEIGHT = int(cfg.get("image_height", IMAGE_HEIGHT))
+    FOCAL_LENGTH = float(cfg.get("focal_length", FOCAL_LENGTH))
+    HORIZONTAL_APARTURE = float(cfg.get("horizontal_aperture", HORIZONTAL_APARTURE))
+    VERTICAL_APARTURE = float(cfg.get("vertical_aperture", VERTICAL_APARTURE))
+
+    fx = FOCAL_LENGTH / HORIZONTAL_APARTURE * IMAGE_WIDTH
+    fy = FOCAL_LENGTH / VERTICAL_APARTURE * IMAGE_HEIGHT
+    cx = IMAGE_WIDTH / 2.0
+    cy = IMAGE_HEIGHT / 2.0
+
+    # --- depth ---------------------------------------------------------------
+    MIN_DEPTH = float(cfg.get("min_depth", MIN_DEPTH))
+    MAX_DEPTH = float(cfg.get("max_depth", MAX_DEPTH))
+    PNG_MAX_VALUE = int(cfg.get("png_max_value", PNG_MAX_VALUE))
+
+    # --- YOLO ----------------------------------------------------------------
+    TRACKER_CFG = str(cfg.get("tracker_cfg", TRACKER_CFG))
+    DEVICE = str(cfg.get("device", DEVICE))
+
 # ============================================================================
 # DEFAULT CLASSES TO SKIP (structural elements, rooms, large spaces)
 # ============================================================================
@@ -998,7 +1042,9 @@ def remove_mask_overlaps(masks):
     return result_masks
 
 def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
-                                  model_path='yoloe-11l-seg-pf.pt',
+                                  model_path,
+                                  is_open_vocabulary,
+                                  class_names_to_track=None,
                                   conf=0.3,
                                   iou=0.5):
     """Track objects in a video stream.
@@ -1017,6 +1063,11 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
     depth_paths = depth_path_list
 
     model = YOLOE(model_path)
+
+    if is_open_vocabulary:
+        # print(f'DEBUG setting open vocabulary class names: {class_names_to_track}')
+        model.set_open_vocabulary(class_names_to_track)
+
     for ip, rgb_p in enumerate(rgb_paths):
         # read in rgb
         rgb = cv2.imread(rgb_p)

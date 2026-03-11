@@ -96,7 +96,7 @@ def run_tracking(
             volume_ratio_threshold=float(cfg.tracking_volume_ratio_threshold),
             reprojection_visibility_threshold=float(cfg.reprojection_visibility_threshold),
         )
-
+    
     # --- YOLO tracking stream ------------------------------------------------
     results_stream = run_yolo_tracking_stream(
         rgb_paths,
@@ -108,6 +108,8 @@ def run_tracking(
         persistent=bool(cfg.persistent),
         agnostic_nms=bool(cfg.agnostic_nms),
         class_names_to_track=class_names_to_track,
+        tracker_cfg=cfg.get("tracker_cfg"),
+        device=cfg.get("device"),
     )
 
     skip_set: Set[str] = set(c.lower() for c in cfg.get("skip_classes", []))

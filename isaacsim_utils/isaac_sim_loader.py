@@ -65,6 +65,8 @@ class IsaacSimSceneLoader:
         load_rgb: bool = False,
         load_depth: bool = False,
         skip_labels: Optional[Set[str]] = None,
+        pi3: bool = False,  # Whether to apply load pi3 depth predictions
+        dav3: bool = False,  # Whether to apply dav3 depth predictions
         require_all_ids: bool = True,  # Only load objects with all IDs >= 0
     ):
         self.scene_dir = Path(scene_dir)

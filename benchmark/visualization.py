@@ -7,6 +7,7 @@ Optional Open3D support is guarded behind ``HAS_OPEN3D``.
 
 from __future__ import annotations
 
+from datetime import datetime
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -195,7 +196,7 @@ def visualize_matching(
 
 def plot_results(results: Dict, output_dir: Optional[str] = None) -> None:
     """Generate standard plots from a metrics dict."""
-    out = Path(output_dir) if output_dir else None
+    out = Path(output_dir)
     if out:
         out.mkdir(parents=True, exist_ok=True)
 

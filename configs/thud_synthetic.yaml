@@ -15,3 +15,12 @@ loader_skip_labels:
   - ground
   - ceiling
   - background
+
+
+gym_class_names:
+  - trademiller
+  - cup
+
+office_class_names:
+  - chair
+  - table

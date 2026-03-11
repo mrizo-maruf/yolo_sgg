@@ -25,17 +25,46 @@ _DEFAULT_SKIP_LABELS: Set[str] = {
 class IsaacSimLoader(DatasetLoader):
     """Adapter for IsaacSim scenes."""
 
+    # Default IsaacSim camera parameters (overridden if cfg values change)
+    _IMAGE_WIDTH = 1280
+    _IMAGE_HEIGHT = 720
+    _FOCAL_LENGTH = 50
+    _HORIZONTAL_APERTURE = 80
+    _VERTICAL_APERTURE = 45
+
     def __init__(
         self,
         scene_dir: str,
+        load_rgb: bool = False,
+        load_depth: bool = False,
         skip_labels: Optional[Set[str]] = None,
+        pi3: bool = False,  # Whether to apply load pi3 depth predictions
+        dav3: bool = False,  # Whether to apply dav3 depth predictions
+        require_all_ids: bool = True,  # Only load objects with all IDs >= 0
+        image_width: int = 1280,
+        image_height: int = 720,
+        focal_length: float = 50,
+        horizontal_aperture: float = 80,
+        vertical_aperture: float = 45,
     ) -> None:
         self._scene_dir = Path(scene_dir)
         self._skip_labels = skip_labels or _DEFAULT_SKIP_LABELS
+
+        # Camera params (can come from cfg via caller)
+        self._image_width = image_width
+        self._image_height = image_height
+        self._focal_length = focal_length
+        self._horizontal_aperture = horizontal_aperture
+        self._vertical_aperture = vertical_aperture
+
         self._loader = IsaacSimSceneLoader(
             str(self._scene_dir),
-            load_rgb=True,
+            load_rgb=load_rgb,
+            load_depth=load_depth,
             skip_labels=self._skip_labels,
+            pi3=pi3,
+            dav3=dav3,
+            require_all_ids=require_all_ids,
         )
         # Pre-load poses from traj.txt
         traj_path = self._scene_dir / "traj.txt"
@@ -71,8 +100,18 @@ class IsaacSimLoader(DatasetLoader):
     # -- camera ------------------------------------------------------------
 
     def get_camera_intrinsics(self) -> Optional[Tuple[np.ndarray, int, int]]:
-        # IsaacSim uses the global defaults in YOLOE.utils
-        return None
+        w = self._image_width
+        h = self._image_height
+        _fx = self._focal_length / self._horizontal_aperture * w
+        _fy = self._focal_length / self._vertical_aperture * h
+        _cx = w / 2.0
+        _cy = h / 2.0
+        K = np.array([
+            [_fx,  0.0, _cx],
+            [0.0, _fy, _cy],
+            [0.0,  0.0, 1.0],
+        ], dtype=np.float64)
+        return K, h, w
 
     def get_camera_pose(self, frame_idx: int) -> Optional[np.ndarray]:
         if self._poses is None:

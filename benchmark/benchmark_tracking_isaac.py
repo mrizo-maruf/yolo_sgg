@@ -24,9 +24,8 @@ Metrics (dataset-agnostic, computed in ``metrics.tracking_metrics``)
 - T-mIoU, T-SR, ID Switches, MOTA, MOTP, per-class breakdown.
 
 The benchmark itself only depends on the dataset through a thin
-``SceneLoader`` protocol (see ``_load_scene``).  Swapping to a different
-dataset means providing a loader that exposes the same interface as
-``IsaacSimSceneLoader``.
+``DatasetLoader`` protocol (see ``loaders.base``).  Swapping to a different
+dataset means providing a loader that implements ``DatasetLoader``.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from datetime import datetime
 # Ensure project root is on sys.path so `YOLOE`, `metrics`, etc. are importable
 # even when the script is invoked as  `python benchmark/benchmark_tracking.py`.
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -51,8 +51,8 @@ from tqdm import tqdm
 
 # -- project imports (framework-specific) ----------------------------------
 import YOLOE.utils as yutils
-from YOLOE.utils import GlobalObjectRegistry
-from isaacsim_utils.isaac_sim_loader import IsaacSimSceneLoader, GTObject
+from loaders.isaacsim import IsaacSimLoader
+from core.tracker import run_tracking
 
 # -- decoupled metrics & vis -----------------------------------------------
 from metrics.tracking_metrics import (
@@ -75,83 +75,6 @@ from benchmark.visualization import (
 # Default configuration
 # ═══════════════════════════════════════════════════════════════════════════
 
-DEFAULT_CFG = {
-    # --- YOLO ---
-    "yolo_model": "yoloe-11l-seg-pf.pt",
-    "conf": 0.25,
-    "iou": 0.5,
-    # --- Mask pre-processing ---
-    "kernel_size": 11,
-    "alpha": 0.7,
-    "fast_mask": True,
-    # --- Point cloud ---
-    "max_points_per_obj": 2000,
-    "max_accumulated_points": 10000,
-    "o3_nb_neighbors": 50,
-    "o3std_ratio": 0.1,
-    # --- Tracking registry ---
-    "tracking_overlap_threshold": 0.3,
-    "tracking_distance_threshold": 0.5,
-    "tracking_inactive_limit": 0,
-    "tracking_volume_ratio_threshold": 0.1,
-    "reprojection_visibility_threshold": 0.2,
-    # --- Matching ---
-    "iou_threshold": 0.3,
-    # --- Classes to ignore (large structural / background) ---
-    "skip_classes": [
-        "wall", "floor", "ceiling", "roof", "carpet", "mat", 'ground', 'workspace', 'workplace',
-        "stairway", "stairs", "elevator",
-        "room", "kitchen", "bathroom", "bedroom", "living room",
-        "dining room", "office", "hallway", "corridor", "lobby",
-        "garage", "basement", "attic",
-        "sky", "ground", "grass", "field", "lawn",
-        "building", "house", "warehouse",
-        "road", "street", "sidewalk", "parking",
-    ],
-    # --- Visualisation ---
-    "visualization": {
-        "enabled": False,
-        "interval": 10,        # show every N frames
-        "show_matching": True,  # 3-panel GT/pred/combined
-        "show_2d": True,        # 2-D mask overlay
-        "show_windows": True,
-        "save_dir": None,       # if set, PNGs are saved there
-    },
-}
-
-ISAACSIM_SKIP_LABELS = {'wall', 'floor', 'ground', 'ceiling', 'background'}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _should_skip_class(name: str, skip_set: Set[str]) -> bool:
-    """Return True if *name* matches any skip pattern."""
-    if name is None:
-        return False
-    low = name.lower()
-    if low in skip_set:
-        return True
-    # catch common substrings that appear in YOLO class names
-    for kw in ("room", "shot", "carpet", "yard", "floor", "mat", "resort"):
-        if kw in low:
-            return True
-    return False
-
-
-def _gt_objects_to_instances(gt_objects: List[GTObject]) -> List[GTInstance]:
-    """Convert Isaac-Sim GT objects to the dataset-agnostic ``GTInstance``."""
-    return [
-        GTInstance(
-            track_id=g.track_id,
-            class_name=g.class_name,
-            mask=g.mask,
-            bbox_xyxy=g.bbox2d_xyxy,
-        )
-        for g in gt_objects
-    ]
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Single-scene benchmark
 # ═══════════════════════════════════════════════════════════════════════════
@@ -164,39 +87,32 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
     print(f"  BENCHMARK  –  {scene_dir.name}")
     print(f"{'=' * 60}")
 
-    # --- load GT data -------------------------------------------------------
-    loader = IsaacSimSceneLoader(str(scene_dir), load_rgb=True, skip_labels=ISAACSIM_SKIP_LABELS)
-    frame_indices = loader.frame_indices
+    # --- build loader (same adapter used by run.py) --------------------------
+    skip_labels = set(c.lower() for c in cfg.get("loader_skip_labels", []))
+    loader = IsaacSimLoader(
+        scene_dir=str(scene_dir),
+        load_rgb=cfg.load_rgb,
+        load_depth=cfg.load_depth,
+        skip_labels=skip_labels,
+        pi3=cfg.pi3,
+        dav3=cfg.dav3,
+        require_all_ids=cfg.require_all_ids,
+        image_width=int(cfg.get("image_width", 1280)),
+        image_height=int(cfg.get("image_height", 720)),
+        focal_length=float(cfg.get("focal_length", 50)),
+        horizontal_aperture=float(cfg.get("horizontal_aperture", 80)),
+        vertical_aperture=float(cfg.get("vertical_aperture", 45)),
+    )
+
+    frame_indices = loader.get_frame_indices()
     n_frames = len(frame_indices)
-    traj = loader.traj_data
-    print(f"Frames: {n_frames}  |  Trajectory entries: {len(traj) if traj else 0}")
 
-    # --- initialise tracking pipeline ----------------------------------------
-    object_registry = GlobalObjectRegistry(
-        overlap_threshold=float(cfg.tracking_overlap_threshold),
-        distance_threshold=float(cfg.tracking_distance_threshold),
-        max_points_per_object=int(cfg.max_accumulated_points),
-        inactive_frames_limit=int(cfg.tracking_inactive_limit),
-        volume_ratio_threshold=float(cfg.tracking_volume_ratio_threshold),
-        reprojection_visibility_threshold=float(cfg.reprojection_visibility_threshold),
-    )
-
-    rgb_dir = str(loader.rgb_dir)
-    depth_paths = yutils.list_png_paths(str(loader.depth_dir))
-
-    # cache depth maps
-    depth_cache: Dict[str, np.ndarray] = {}
-    for dp in depth_paths:
-        depth_cache[dp] = yutils.load_depth_as_meters(dp)
-
-    poses = yutils.load_camera_poses(str(loader.scene_dir / "traj.txt")) if (loader.scene_dir / "traj.txt").exists() else None
-
-    results_stream = yutils.track_objects_in_video_stream(
-        rgb_dir, depth_paths,
-        model_path=cfg.yolo_model,
-        conf=float(cfg.conf),
-        iou=float(cfg.iou),
-    )
+    # --- Prepare data for run_tracking --------------------------------------
+    rgb_paths = loader.get_rgb_paths()
+    depth_paths = loader.get_depth_paths()
+    depth_cache = loader.build_depth_cache()
+    poses = loader.get_all_poses()
+    print(f"Frames: {n_frames}  |  Poses: {len(poses) if poses else 0}")
 
     # --- vis setup -----------------------------------------------------------
     vis_cfg = OmegaConf.to_container(cfg.visualization, resolve=True)
@@ -206,57 +122,35 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
     if vis_save:
         os.makedirs(vis_save, exist_ok=True)
 
-    skip_set = set(c.lower() for c in cfg.get("skip_classes", []))
-
     # --- metrics accumulator -------------------------------------------------
     acc = MetricsAccumulator()
 
-    # --- main loop -----------------------------------------------------------
-    frame_idx = 0
-    for yolo_res, rgb_path, depth_path in tqdm(results_stream, total=n_frames, desc="Processing"):
+    if cfg.is_open_vocabulary:
+        class_names_to_track = list(cfg.get(f"{scene_dir.name}_class_names", []))
+    else:
+        class_names_to_track = None
+
+    # --- main loop (delegates tracking to core.tracker.run_tracking) ----------
+    for tf in tqdm(run_tracking(
+        rgb_paths=rgb_paths,
+        depth_paths=depth_paths,
+        depth_cache=depth_cache,
+        poses=poses,
+        cfg=cfg,
+        class_names_to_track=class_names_to_track,
+    ), total=n_frames, desc=f"Tracking scene {scene_dir.name}"):
         # GT for this frame
-        fd = loader.get_frame_data(frame_indices[frame_idx] if frame_idx < len(frame_indices) else frame_indices[-1])
-        gt_objects = fd.gt_objects
-        gt_instances = _gt_objects_to_instances(gt_objects)
-
-        # Depth
-        depth_m = depth_cache.get(depth_path)
-        if depth_m is None:
-            frame_idx += 1
-            continue
-
-        # Camera pose
-        T_w_c = poses[min(frame_idx, len(poses) - 1)] if poses else None
-
-        # YOLO masks
-        _, masks_clean = yutils.preprocess_mask(
-            yolo_res=yolo_res,
-            index=frame_idx,
-            KERNEL_SIZE=int(cfg.kernel_size),
-            alpha=float(cfg.alpha),
-            fast=True,
+        gt_frame_idx = (
+            frame_indices[tf.frame_idx]
+            if tf.frame_idx < len(frame_indices)
+            else frame_indices[-1]
         )
+        gt_instances = loader.get_gt_instances(gt_frame_idx)
 
-        # Track IDs & class names
-        track_ids, class_names = _extract_yolo_ids(yolo_res, masks_clean)
-
-        # Filter skip classes
-        masks_clean, track_ids, class_names = _apply_class_filter(
-            masks_clean, track_ids, class_names, skip_set,
+        # Build PredInstance list from TrackedFrame outputs
+        pred_instances = _build_pred_instances(
+            tf.frame_objs, tf.track_ids, tf.masks_clean,
         )
-
-        # Build 3-D objects with global tracking
-        frame_objs, _ = yutils.create_3d_objects_with_tracking(
-            track_ids, masks_clean,
-            int(cfg.max_points_per_obj), depth_m, T_w_c, frame_idx,
-            o3_nb_neighbors=cfg.o3_nb_neighbors,
-            o3std_ratio=cfg.o3std_ratio,
-            object_registry=object_registry,
-            class_names=class_names,
-        )
-
-        # Build PredInstance list
-        pred_instances = _build_pred_instances(frame_objs, track_ids, masks_clean)
 
         # Match GT ↔ pred
         mapping, ious = match_greedy(
@@ -266,7 +160,7 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
 
         # Feed accumulator
         rec = FrameRecord(
-            frame_idx=frame_idx,
+            frame_idx=tf.frame_idx,
             gt_objects=gt_instances,
             pred_objects=pred_instances,
             mapping=mapping,
@@ -275,13 +169,11 @@ def benchmark_scene(scene_path: str, cfg: OmegaConf) -> Dict:
         acc.add_frame(rec)
 
         # --- optional visualisation ------------------------------------------
-        if vis_on and (frame_idx % vis_interval == 0 or frame_idx == 0):
+        if vis_on and (tf.frame_idx % vis_interval == 0 or tf.frame_idx == 0):
             _visualize_frame(
-                rgb_path, gt_instances, pred_instances,
-                mapping, ious, frame_idx, vis_cfg, vis_save,
+                tf.rgb_path, gt_instances, pred_instances,
+                mapping, ious, tf.frame_idx, vis_cfg, vis_save,
             )
-
-        frame_idx += 1
 
     # --- final metrics -------------------------------------------------------
     metrics = acc.compute()
@@ -338,7 +230,8 @@ def benchmark_dataset(dataset_path: str, cfg: OmegaConf, output_dir: Optional[st
 
     _print_aggregate(overall, agg_keys)
 
-    out = Path(output_dir) if output_dir else root
+    out_root = Path(output_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = out_root / "all_scenes_aggregate"
     combined = {"per_scene": all_results, "overall": overall, "num_scenes": len(all_results)}
     save_metrics(combined, out, scene_name="all_scenes_aggregate")
     for name, res in all_results.items():
@@ -347,9 +240,19 @@ def benchmark_dataset(dataset_path: str, cfg: OmegaConf, output_dir: Optional[st
         scene_plot_dir = out / name / "benchmark_plots"
         plot_results(res, output_dir=str(scene_plot_dir))
 
+    # overall aggregate plots (same style as per-scene)
+    overall_for_plot = _build_overall_plot_results(all_results)
+    overall_plot_dir = out / "overall_benchmark_plots"
+    plot_results(overall_for_plot, output_dir=str(overall_plot_dir))
+
     # cross-scene comparison chart
     if len(all_results) > 1:
         _plot_cross_scene(all_results, agg_keys, out)
+
+    # save cfg in out_root for reference
+    cfg_out = out_root / "all_config.yaml"
+    with open(cfg_out, "w") as f:
+        OmegaConf.save(cfg, f)
 
     return combined
 
@@ -405,46 +308,71 @@ def _plot_cross_scene(all_results: Dict[str, Dict], agg_keys: List[str], out: Pa
     plot_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(plot_dir / "cross_scene_comparison.png", dpi=150, bbox_inches="tight")
     print(f"[plots] Saved {plot_dir / 'cross_scene_comparison.png'}")
-    plt.show()
+    # plt.show()
+
+
+def _build_overall_plot_results(all_results: Dict[str, Dict]) -> Dict:
+    """Merge per-scene results into a single dict compatible with ``plot_results``.
+
+    Scalar metrics are averaged across scenes; per-object / per-class data is
+    pooled so that the histogram and bar-chart cover the full dataset.
+    """
+    if not all_results:
+        return {}
+
+    # --- scalar metrics (mean across scenes) ---------------------------------
+    scalar_keys = [
+        "T_mIoU", "T_mIoU_std", "T_SR", "ID_consistency",
+        "MOTA", "MOTP",
+        "MOTA_FN_ratio", "MOTA_FP_ratio", "MOTA_IDSW_ratio",
+        "ID_switches_total",
+        "frames_processed", "unique_gt_objects",
+        "total_gt_instances", "total_pred_instances",
+        "total_matches", "total_false_positives", "total_false_negatives",
+    ]
+    merged: Dict = {}
+    for k in scalar_keys:
+        vals = [r[k] for r in all_results.values() if k in r]
+        if vals:
+            merged[k] = float(np.mean(vals))
+
+    # --- per-object T-mIoU (pool across scenes, prefix with scene name) ------
+    per_obj: Dict[str, float] = {}
+    for scene_name, res in all_results.items():
+        for obj_id, val in res.get("T_mIoU_per_object", {}).items():
+            per_obj[f"{scene_name}/{obj_id}"] = val
+    merged["T_mIoU_per_object"] = per_obj
+
+    # Recompute T_mIoU from pooled per-object values for consistency
+    if per_obj:
+        merged["T_mIoU"] = float(np.mean(list(per_obj.values())))
+        merged["T_mIoU_std"] = float(np.std(list(per_obj.values())))
+
+    # --- per-class metrics (weighted average by count) -----------------------
+    class_ious: Dict[str, List[float]] = defaultdict(list)
+    class_counts: Dict[str, int] = defaultdict(int)
+    for res in all_results.values():
+        for cls, m in res.get("per_class_metrics", {}).items():
+            # Weight each scene's class mean by its count
+            cnt = m.get("count", 1)
+            class_ious[cls].extend([m["T_mIoU"]] * cnt)
+            class_counts[cls] += cnt
+    per_class: Dict[str, Dict] = {}
+    for cls in class_ious:
+        vals = class_ious[cls]
+        per_class[cls] = {
+            "T_mIoU": float(np.mean(vals)),
+            "T_mIoU_std": float(np.std(vals)),
+            "count": class_counts[cls],
+        }
+    merged["per_class_metrics"] = per_class
+
+    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal helpers
 # ═══════════════════════════════════════════════════════════════════════════
-
-def _extract_yolo_ids(yolo_res, masks_clean):
-    """Pull track IDs and class names from a YOLO result object."""
-    track_ids = None
-    class_names = None
-    if hasattr(yolo_res, "boxes") and yolo_res.boxes is not None:
-        if getattr(yolo_res.boxes, "id", None) is not None:
-            try:
-                track_ids = yolo_res.boxes.id.detach().cpu().numpy().astype(np.int64)
-            except Exception:
-                pass
-        if getattr(yolo_res.boxes, "cls", None) is not None and hasattr(yolo_res, "names"):
-            try:
-                cls_ids = yolo_res.boxes.cls.detach().cpu().numpy().astype(np.int64)
-                class_names = [yolo_res.names[int(c)] for c in cls_ids]
-            except Exception:
-                pass
-    n = len(masks_clean) if isinstance(masks_clean, (list, tuple)) else 0
-    if track_ids is None:
-        track_ids = np.arange(n, dtype=np.int64)
-    return track_ids, class_names
-
-
-def _apply_class_filter(masks_clean, track_ids, class_names, skip_set):
-    """Remove detections whose class name is in *skip_set*."""
-    if not skip_set or class_names is None:
-        return masks_clean, track_ids, class_names
-    keep = [i for i, c in enumerate(class_names) if not _should_skip_class(c, skip_set)]
-    if len(keep) == len(class_names):
-        return masks_clean, track_ids, class_names
-    masks_clean = [masks_clean[i] for i in keep] if masks_clean else []
-    track_ids = track_ids[keep] if track_ids is not None else None
-    class_names = [class_names[i] for i in keep]
-    return masks_clean, track_ids, class_names
 
 
 def _build_pred_instances(frame_objs, track_ids, masks_clean) -> List[PredInstance]:
@@ -469,7 +397,7 @@ def _visualize_frame(
     rgb_path, gt_instances, pred_instances,
     mapping, ious, frame_idx, vis_cfg, vis_save,
 ):
-    """Optionally render 2-D tracking + matching panels."""
+    """Optionally render 2-D tracking + matching panels. TODO: add 3-D visualisation."""
     rgb = cv2.imread(rgb_path)
     if rgb is None:
         return
@@ -544,16 +472,12 @@ Examples
     )
     p.add_argument("path", help="Path to a single scene dir or dataset root (with --multi).")
     p.add_argument("--multi", action="store_true", help="Benchmark all scenes under PATH.")
-    p.add_argument("--output", type=str, default=None, help="Output directory for metrics.")
+
     # visualisation flags
     p.add_argument("--vis", action="store_true", help="Enable debug visualisation.")
     p.add_argument("--vis-interval", type=int, default=10, help="Visualise every N frames.")
     p.add_argument("--vis-save", type=str, default=None, help="Dir to save vis PNGs.")
     p.add_argument("--no-show", action="store_true", help="Don't pop up windows (only save).")
-    # YOLO overrides
-    p.add_argument("--model", type=str, default=None, help="YOLO model path.")
-    p.add_argument("--conf", type=float, default=None, help="YOLO confidence threshold.")
-    p.add_argument("--iou-thresh", type=float, default=None, help="Matching IoU threshold.")
     return p
 
 
@@ -561,23 +485,23 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    cfg = OmegaConf.create(DEFAULT_CFG)
+    core_tracking_cfg = OmegaConf.load(Path(__file__).parent.parent / "configs" / "core_tracking.yaml")
+    isaac_sim_cfg = OmegaConf.load(Path(__file__).parent.parent / "configs" / "isaacsim.yaml")
 
-    # apply CLI overrides
+    cfg = OmegaConf.merge(core_tracking_cfg, isaac_sim_cfg)
+
+    # --- Configure globals from config (device, tracker, depth, intrinsics) --
+    yutils.configure_globals(cfg)
+
+    # TODO: add cmd ovverride of yolo model, prompt free or not
     if args.vis:
-        cfg.visualization.enabled = True
+        cfg.visualization.enabled = args.vis
     if args.vis_interval:
         cfg.visualization.interval = args.vis_interval
+    if args.no_show:
+        cfg.visualization.show_windows = not args.no_show
     if args.vis_save:
         cfg.visualization.save_dir = args.vis_save
-    if args.no_show:
-        cfg.visualization.show_windows = False
-    if args.model:
-        cfg.yolo_model = args.model
-    if args.conf is not None:
-        cfg.conf = args.conf
-    if args.iou_thresh is not None:
-        cfg.iou_threshold = args.iou_thresh
 
     path = Path(args.path)
     if not path.exists():
@@ -585,10 +509,10 @@ def main() -> int:
         return 1
 
     if args.multi:
-        results = benchmark_dataset(str(path), cfg, output_dir=args.output)
+        results = benchmark_dataset(str(path), cfg, output_dir=cfg.benchmark_metrics_path)
     else:
         results = benchmark_scene(str(path), cfg)
-        out_dir = args.output or str(path)
+        out_dir = Path(cfg.benchmark_metrics_path)/ datetime.now().strftime("%Y%m%d_%H%M%S")
         save_metrics(results, out_dir, scene_name=path.name)
         plot_results(results, output_dir=os.path.join(out_dir, "benchmark_plots"))
 
