@@ -4,13 +4,15 @@
 
 dataset: thud_real
 
+# --- Depth encoding ---
 depth_scale: 1000.0
 depth_max_m: 100.0
 
-# GT tracking distance for assigning persistent IDs
+# --- GT tracking distance for assigning persistent IDs ---
 real_tracking_distance: 0.3
 
-# Classes to track (YOLOE set_classes)
+# --- Open-vocabulary class names to track (YOLOE set_classes) ---
+
 track_classes:
   - door
   - chair
@@ -26,3 +28,6 @@ loader_skip_labels:
   - ground
   - ceiling
   - background
+
+# --- Benchmark output ---
+benchmark_metrics_path: results/thud_real_metrics

@@ -24,6 +24,12 @@ max_accumulated_points: 10000
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 
+# --- Depth cache ---
+# max_depth_cached: max number of depth frames held in RAM at once.
+#   0   = load ALL depth frames upfront (fast but high memory — avoid for long sequences)
+#   >0  = lazy LRU cache (recommended for sequences > ~200 frames)
+max_depth_cached: 64
+
 # --- Tracking registry ---
 tracking_overlap_threshold: 0.3
 tracking_distance_threshold: 0.5
@@ -81,6 +87,10 @@ _substring_skip:
   - floor
   - mat
   - resort
+  - board
+  - wall
+  - blackboard
+  - desk
 
 # --- Scene-graph (run.py only) ---
 ssg:

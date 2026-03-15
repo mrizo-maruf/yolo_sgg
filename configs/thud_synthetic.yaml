@@ -4,11 +4,14 @@
 
 dataset: thud_synthetic
 
+# --- Depth encoding ---
 depth_scale: 1000.0     # raw uint16 → metres  (raw / depth_scale)
 depth_max_m: 100.0
 
+# --- Scene discovery ---
 scene_type: static      # "static" or "dynamic"
 
+# --- GT labels to ignore in the loader ---
 loader_skip_labels:
   - wall
   - floor
@@ -17,10 +20,95 @@ loader_skip_labels:
   - background
 
 
-gym_class_names:
-  - trademiller
-  - cup
+Gym_class_names:
+  - "lamp"
+  - "speaker"
+  - "tv"
+  - "radiator"
+  - "mirror"
+  - "bench"
+  - "ball"
+  - "rack"
+  - "step"
+  - "rowing machine"
+  - "weight plate"
+  - "mat"
+  - "treadmill"
+  - "stool"
+  - "barrel"
+  - "dumbbell"
+  - "fan"
+  - "airconditioner"
+  - "human"
+  - "door"
 
-office_class_names:
-  - chair
-  - table
+Office_class_names:
+  - "chair"
+  - "sofa"
+  - "bookshelf"
+  - "desk"
+  - "table"
+  - "plants"
+  - "bag"
+  - "curtain"
+  - "laptop"
+  - "computer"
+  - "clock"
+  - "TV"
+  - "people"
+  - "cup"
+  - "ceramics"
+  - "book"
+  - "pot"
+  - "folder"
+  - "light"
+  - "rack"
+  - "airconditioner"
+  - "window"
+
+# House_class_names:
+#   - "Chair"
+#   - "Bench"
+#   - "Table"
+#   - Sofa
+#   - "bookshelf"
+#   - "Fridge"
+#   - "Desk"
+#   - "Bed"
+
+# Supermarket_1_class_names:
+#   - "Shopping Cart"
+#   - "Shelf"
+#   - "Freezer"
+#   - "Stall"
+#   - "Checkout"
+#   - "Fridge"
+#   - "Cabinet"
+#   - "Table"
+#   - "door"
+
+# Supermarket_2_class_names:
+#   - "Shopping Cart"
+#   - "Shelf"
+#   - "Freezer"
+#   - "Stall"
+#   - "Checkout"
+#   - "Fridge"
+#   - "Cabinet"
+#   - "Table"
+#   - "door"
+
+# --- Depth → point-cloud conversion constants ---
+# These replicate the THUD Depth_to_pointcloud.py + ExportPointCloud.py
+# pipeline.  Final coords: (x-right, y-forward, z-up) in metres.
+pointcloud:
+  x_divisor: 2.5          # Xr / x_divisor / unit_scale
+  y_divisor: 6.5          # depth / y_divisor + y_offset
+  y_offset:  200.0
+  z_divisor: 2.0          # Zr / z_divisor + z_offset
+  z_offset:  300.0
+  unit_scale: 1000.0      # mm → m
+  num_sample: 40000       # random sub-sample point count (0 = keep all)
+
+# --- Benchmark output ---
+benchmark_metrics_path: results/thud_synth_metrics
