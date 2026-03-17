@@ -15,3 +15,4 @@ runs/
 *.json
 *.csv
 thud/
+logs/
