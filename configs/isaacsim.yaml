@@ -28,11 +28,28 @@ loader_skip_labels:
   - unknown
 
 load_rgb: true
-load_depth: true
+load_depth: false
 pi3: false
 dav3: false
 require_all_ids: true
 
+scene_0_class_names:
+  - "chair"
+  - "box"
+  - "table"
+  - "teddy bear"
+  - "ladder"
+  - "stool"
+  - "palm tree"
+  - "clock"
+  - "cabinet"
+  - "chiffonier"
+  - "lamp"
+  - "vase"
+  - "sofa"
+  - "trash can"
+
+save_graph_dir: "results/scene_graphs"
 # class names for open vocabulary evaluation (if enabled)
 scene_1_class_names:
   - "red office chair"

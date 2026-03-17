@@ -3,8 +3,8 @@
 # ============================================================================
 
 # --- YOLO model ---
-is_open_vocabulary: false
-yolo_model: "yoloe-11l-seg-pf.pt"
+is_open_vocabulary: true
+yolo_model: "yoloe-11l-seg.pt"
 conf: 0.25
 iou: 0.5
 verbose: false
@@ -14,7 +14,7 @@ tracker_cfg: "botsort.yaml"
 device: "0"
 
 # --- Mask pre-processing ---
-kernel_size: 11
+kernel_size: 9
 alpha: 0.7
 fast_mask: true
 
@@ -31,8 +31,8 @@ o3std_ratio: 0.1
 max_depth_cached: 64
 
 # --- Tracking registry ---
-tracking_overlap_threshold: 0.3
-tracking_distance_threshold: 0.5
+tracking_overlap_threshold: 0.1
+tracking_distance_threshold: 1
 tracking_inactive_limit: 0          # 0 = never remove
 tracking_volume_ratio_threshold: 0.1
 reprojection_visibility_threshold: 0.2
@@ -98,6 +98,8 @@ ssg:
   vis_graph: false
   print_resource_usage: false
   print_tracking_info: false
+  save_graph: false
+  save_graph_dir: "results/scene_graphs"
 
 # --- Visualisation ---
 visualization:

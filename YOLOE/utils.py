@@ -315,22 +315,65 @@ class GlobalObjectRegistry:
         
         # If volumes differ by more than 10x (ratio < 0.1), likely different objects
         # This catches the room-contains-objects case
-        if volume_ratio < self.volume_ratio_threshold:
-            return 0.0, centroid_dist, False
+        # if volume_ratio < self.volume_ratio_threshold:
+        #     return 0.0, centroid_dist, False
         
         # === SIZE SIMILARITY CHECK ===
         # Compare dimensions individually - objects should have similar proportions
+        # But be lenient: partial views of an object may differ significantly
+        # in one or more dimensions, so only reject if ALL dimensions are very different
         size_ratios = np.minimum(extent1, extent2) / np.maximum(extent1, extent2 + 1e-6)
-        # If any dimension differs by more than 5x, likely different objects
-        if np.any(size_ratios < 0.2):
+        # Reject only if the majority of dimensions are wildly different
+        if np.sum(size_ratios < 0.15) >= 2:
             return 0.0, centroid_dist, False
         
         # Compute 3D IoU
         iou = calculate_3d_iou(pcd1, pcd2)
         
-        is_candidate = iou >= self.overlap_threshold
+        # === CONTAINMENT CHECK ===
+        # When one bbox is largely inside the other (partial view of same object),
+        # standard IoU is low (small/large), but containment ratio is high.
+        # E.g. seeing part of a chair later — its bbox is inside the accumulated bbox.
+        containment = self._compute_containment(bbox1, bbox2)
         
-        return iou, centroid_dist, is_candidate
+        is_candidate = iou >= self.overlap_threshold or containment >= 0.5
+        
+        # Use max of IoU and containment as the score for ranking matches
+        effective_score = max(iou, containment)
+        
+        return effective_score, centroid_dist, is_candidate
+    
+    def _compute_containment(self, bbox1: dict, bbox2: dict) -> float:
+        """
+        Compute how much one AABB is contained inside the other.
+        
+        Returns max(vol_intersection/vol1, vol_intersection/vol2).
+        This is high when one bbox is mostly inside the other, even if
+        standard IoU is low (because the other bbox is much larger).
+        """
+        aabb1 = bbox1.get('aabb') if bbox1 else None
+        aabb2 = bbox2.get('aabb') if bbox2 else None
+        
+        if aabb1 is None or aabb2 is None:
+            return 0.0
+        
+        min1 = np.array(aabb1.get('min', [0, 0, 0]))
+        max1 = np.array(aabb1.get('max', [0, 0, 0]))
+        min2 = np.array(aabb2.get('min', [0, 0, 0]))
+        max2 = np.array(aabb2.get('max', [0, 0, 0]))
+        
+        inter_min = np.maximum(min1, min2)
+        inter_max = np.minimum(max1, max2)
+        
+        if np.any(inter_min >= inter_max):
+            return 0.0
+        
+        inter_vol = np.prod(inter_max - inter_min)
+        vol1 = np.prod(np.maximum(max1 - min1, 1e-9))
+        vol2 = np.prod(np.maximum(max2 - min2, 1e-9))
+        
+        # Fraction of the smaller bbox that is inside the larger one
+        return max(inter_vol / vol1, inter_vol / vol2)
     
     def _compute_reprojection_visibility(self, bbox_3d: dict, T_w_c: np.ndarray,
                                           image_width: int = IMAGE_WIDTH,
@@ -1274,6 +1317,59 @@ def preprocess_mask(yolo_res, index, KERNEL_SIZE, alpha = 0.5, show=True, fast: 
 
     return bin_masks, cleaned_masks
 
+def _keep_largest_clusters(points: np.ndarray, 
+                           eps: float = 0.05, 
+                           min_samples: int = 10,
+                           min_cluster_fraction: float = 0.3) -> np.ndarray:
+    """
+    Keep the largest cluster(s) from a point cloud using DBSCAN, removing
+    noise chunks (e.g. background points seen through mask holes).
+    
+    Args:
+        points: (N, 3) array of 3D points
+        eps: DBSCAN neighborhood radius — points within this distance are neighbors.
+             Tune based on your scene scale (meters). 0.05 works for tabletop scenes.
+        min_samples: Minimum points to form a dense region in DBSCAN.
+        min_cluster_fraction: Keep secondary clusters if they have at least this
+                              fraction of points relative to the largest cluster.
+                              E.g. 0.1 means keep clusters with >=10% of largest.
+    
+    Returns:
+        (M, 3) array containing only points from the largest cluster(s).
+    """
+    if points.shape[0] < min_samples:
+        return points
+    
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    labels = np.array(pcd.cluster_dbscan(eps=eps, min_points=min_samples, print_progress=False))
+    
+    if len(labels) == 0 or np.all(labels == -1):
+        # DBSCAN found no clusters — return original points
+        return points
+    
+    # Find cluster sizes (ignore noise label -1)
+    unique_labels = np.unique(labels)
+    unique_labels = unique_labels[unique_labels >= 0]
+    
+    if len(unique_labels) == 0:
+        return points
+    
+    cluster_sizes = {lbl: np.sum(labels == lbl) for lbl in unique_labels}
+    largest_label = max(cluster_sizes, key=cluster_sizes.get)
+    largest_size = cluster_sizes[largest_label]
+    
+    # Keep clusters that are large enough relative to the biggest one
+    threshold = largest_size * min_cluster_fraction
+    keep_mask = np.zeros(len(labels), dtype=bool)
+    for lbl, size in cluster_sizes.items():
+        if size >= threshold:
+            keep_mask |= (labels == lbl)
+    
+    return points[keep_mask].astype(np.float32)
+
+
 def _guided_filter_denoise(points: np.ndarray, radius: float, epsilon: float):
     """
     Apply guided filter denoising to a point cloud.
@@ -1415,6 +1511,12 @@ def extract_points_from_mask( depth_m: np.ndarray,
     pcd = pcd.select_by_index(ind)
 
     cleaned_pts_np = np.asarray(pcd.points)
+
+    # Remove noise chunks (e.g. background seen through mask holes) via DBSCAN
+    if cleaned_pts_np.shape[0] > 0:
+        cleaned_pts_np = _keep_largest_clusters(cleaned_pts_np, eps=0.1,
+                                                min_samples=10, min_cluster_fraction=0.6)
+
     results_points = cleaned_pts_np
     return results_points
 

@@ -22,6 +22,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -72,6 +73,7 @@ def main() -> int:
         ds_yaml = Path(__file__).parent / "configs" / f"{args.dataset}.yaml"
         if ds_yaml.exists():
             cfg = OmegaConf.merge(default_cfg, OmegaConf.load(ds_yaml))
+            print(f"Merged 2 cofs {args.dataset}")
         else:
             cfg = default_cfg
     else:
@@ -86,6 +88,8 @@ def main() -> int:
         cfg.ssg.print_resource_usage = True
     if args.print_tracking:
         cfg.ssg.print_tracking_info = True
+    if args.save_graph:
+        cfg.ssg.save_graph = True
 
     dataset_name = cfg.get("dataset", args.dataset or "isaacsim")
 
@@ -94,7 +98,7 @@ def main() -> int:
 
     # --- Build loader --------------------------------------------------------
     scene_path = str(Path(args.path).resolve())
-    scene_path = "/home/yehia/rizo/IsaacSim_Dataset/scene_7"
+    scene_path = "/home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_2"
     LoaderCls = get_loader(dataset_name)
 
     loader_kwargs = {}
@@ -140,7 +144,7 @@ def main() -> int:
     poses = loader.get_all_poses()
 
     # Track classes (for THUD Real)
-    class_names_to_track = list(cfg.get("track_classes", [])) or None
+    class_names_to_track = list(cfg.get("scene_0_class_names", [])) or None
 
     # --- Object registry -----------------------------------------------------
     object_registry = GlobalObjectRegistry(
@@ -236,6 +240,12 @@ def main() -> int:
 
     # --- Summary -------------------------------------------------------------
     _print_summary(object_registry, timings, gpu_usage, cuda_available)
+
+    # --- Save graph as JSON --------------------------------------------------
+    if ssg_cfg.get("save_graph", False):
+        save_dir = Path(ssg_cfg.get("save_graph_dir", "results/scene_graphs"))
+        _save_graph_json(persistent_graph, object_registry, save_dir, dataset_name)
+
     return 0
 
 
@@ -280,6 +290,66 @@ def _print_summary(object_registry, timings, gpu_usage, cuda_available):
     print("=" * 60)
 
 
+def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str):
+    """Serialize the persistent scene graph to JSON."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    all_objs = object_registry.get_all_objects()
+
+    def _bbox_to_serializable(bbox_3d):
+        if bbox_3d is None:
+            return None
+        result = {}
+        aabb = bbox_3d.get("aabb")
+        if aabb is not None:
+            result["aabb"] = {
+                "min": np.asarray(aabb["min"]).tolist() if aabb.get("min") is not None else None,
+                "max": np.asarray(aabb["max"]).tolist() if aabb.get("max") is not None else None,
+            }
+        obb = bbox_3d.get("obb")
+        if obb is not None:
+            result["obb"] = {
+                "center": np.asarray(obb["center"]).tolist() if obb.get("center") is not None else None,
+                "extent": np.asarray(obb["extent"]).tolist() if obb.get("extent") is not None else None,
+            }
+        return result
+
+    # Build nodes dict keyed by global (track) id
+    nodes = {}
+    for node_id in graph.nodes:
+        node_data = graph.nodes[node_id]
+        obj = all_objs.get(node_id, {})
+        # Prefer registry data, fall back to graph node data
+        bbox_3d = obj.get("bbox_3d") or (node_data.get("data", {}).get("bbox_3d") if isinstance(node_data.get("data"), dict) else None)
+        class_name = obj.get("class_name") or (node_data.get("data", {}).get("class_name") if isinstance(node_data.get("data"), dict) else None)
+
+        # Collect outgoing edges
+        edges_list = []
+        for _, target, _, edge_data in graph.out_edges(node_id, keys=True, data=True):
+            edges_list.append({
+                "target_id": int(target),
+                "relation_type": edge_data.get("label", edge_data.get("label_class", "")),
+            })
+
+        nodes[int(node_id)] = {
+            "track_id": int(node_id),
+            "class_name": class_name,
+            "bbox_3d": _bbox_to_serializable(bbox_3d),
+            "edges": edges_list,
+        }
+
+    output = {
+        "dataset": dataset_name,
+        "num_objects": len(nodes),
+        "nodes": nodes,
+    }
+
+    out_path = save_dir / "scene_graph.json"
+    with open(out_path, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"\nScene graph saved to {out_path}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════
@@ -296,7 +366,7 @@ Examples
   python run.py /data/scene_1 --config configs/isaacsim.yaml --show-pcds
 """,
     )
-    p.add_argument("--path", default="/home/yehia/rizo/IsaacSim_Dataset/scene_7", help="Path to the scene directory.")
+    p.add_argument("--path", default="/home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_0", help="Path to the scene directory.")
     p.add_argument("--dataset", type=str, default=None,
                    choices=["isaacsim", "thud_synthetic", "thud_real", "code", "any_scene"],
                    help="Dataset type (default: 'isaacsim').")
@@ -305,6 +375,7 @@ Examples
     p.add_argument("--vis-graph", action="store_true", help="Show scene graph per frame.")
     p.add_argument("--print-resources", action="store_true", help="Print per-frame resource usage.")
     p.add_argument("--print-tracking", action="store_true", help="Print per-frame tracking info.")
+    p.add_argument("--save-graph", action="store_true", help="Save final scene graph as JSON.")
     return p
 
 
