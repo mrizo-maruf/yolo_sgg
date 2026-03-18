@@ -1,0 +1,81 @@
+# ============================================================================
+# v2 default configuration
+# ============================================================================
+
+# --- YOLO model ---
+yolo_model: "yoloe-11l-seg.pt"
+conf: 0.25
+iou: 0.5
+verbose: false
+persistent: true
+agnostic_nms: true
+tracker_cfg: "botsort.yaml"
+device: "0"
+
+# --- Mask pre-processing ---
+kernel_size: 9
+
+# --- Point cloud ---
+max_points_per_obj: 2000
+max_accumulated_points: 10000
+o3_nb_neighbors: 50
+o3std_ratio: 0.1
+
+# --- Tracking registry ---
+tracking_overlap_threshold: 0.1
+tracking_distance_threshold: 1.0
+tracking_inactive_limit: 0
+tracking_volume_ratio_threshold: 0.1
+reprojection_visibility_threshold: 0.2
+
+# --- Classes to skip ---
+skip_classes:
+  - wall
+  - floor
+  - ceiling
+  - roof
+  - ground
+  - carpet
+  - mat
+  - workspace
+  - stairway
+  - stairs
+  - elevator
+  - room
+  - kitchen
+  - bathroom
+  - bedroom
+  - living room
+  - dining room
+  - office
+  - hallway
+  - corridor
+  - lobby
+  - garage
+  - basement
+  - attic
+  - sky
+  - grass
+  - field
+  - lawn
+  - building
+  - house
+  - warehouse
+  - road
+  - street
+  - sidewalk
+  - parking
+
+_substring_skip:
+  - room
+  - carpet
+  - floor
+  - mat
+  - wall
+  - board
+  - desk
+
+# --- Scene-graph ---
+ssg:
+  save_graph: false
+  save_graph_dir: "results/scene_graphs_v2"

@@ -1,0 +1,21 @@
+# ============================================================================
+# THUD Synthetic dataset overrides (v2)
+# ============================================================================
+
+dataset: thud_synthetic
+
+# --- Depth provider ---
+depth_provider: "gt"        # gt | pi3_offline
+depth_scale: 1000.0
+max_depth: 100.0
+min_depth: 0.01
+
+# --- Loader ---
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background
+
+class_names_to_track: []
