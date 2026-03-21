@@ -1773,8 +1773,9 @@ def create_3d_objects_with_tracking(
         skip_classes: Optional set of class names to filter out (uses DEFAULT_SKIP_CLASSES if None)
         point_extractor: Optional callable(depth, mask, frame_idx, max_points,
                          o3_nb_neighbors, o3std_ratio, track_id) -> np.ndarray (N,3)
-                         in world frame.  When provided, replaces the default
-                         extract_points_from_mask + cam_to_world pipeline.
+                         in camera frame.  When provided, replaces the default
+                         extract_points_from_mask pipeline.  cam_to_world is
+                         still applied afterwards.
     
     Returns:
         frame_objs: List of LIGHTWEIGHT objects (bbox only) for edge prediction
@@ -1795,11 +1796,18 @@ def create_3d_objects_with_tracking(
             continue
         
         if point_extractor is not None:
-            # Custom extractor returns world-frame points directly
-            points_world = point_extractor(
+            # Custom extractor returns camera-frame points
+            points_cam = point_extractor(
                 depth_m, m_clean, frame_idx, max_points_per_obj,
                 o3_nb_neighbors, o3std_ratio, int(t_id)
             )
+            if points_cam is None or points_cam.size <= 0:
+                continue
+            # Transform to world frame
+            if T_w_c is not None:
+                points_world = cam_to_world(points_cam, T_w_c)
+            else:
+                points_world = points_cam
         else:
             # Default pipeline: extract in camera frame, then transform
             points_cam = extract_points_from_mask(

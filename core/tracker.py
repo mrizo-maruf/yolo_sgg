@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Set
+from typing import Any, Callable, Dict, Generator, List, Optional, Set
 
 import numpy as np
 import torch
@@ -64,6 +64,7 @@ def run_tracking(
     cfg: OmegaConf,
     object_registry: Optional[GlobalObjectRegistry] = None,
     class_names_to_track: Optional[List[str]] = None,
+    point_extractor: Optional[Callable] = None,
 ) -> Generator[TrackedFrame, None, None]:
     """Core tracking generator.
 
@@ -167,6 +168,7 @@ def run_tracking(
             o3std_ratio=cfg.o3std_ratio,
             object_registry=object_registry,
             class_names=class_names,
+            point_extractor=point_extractor,
         )
         timings["create_3d"] = (time.perf_counter() - t0) * 1000
 

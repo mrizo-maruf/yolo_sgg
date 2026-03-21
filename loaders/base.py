@@ -59,6 +59,22 @@ class DatasetLoader(ABC):
         """Pre-load all depth maps into a dict keyed by path."""
         return {p: self.load_depth(p) for p in self.get_depth_paths()}
 
+    def make_point_extractor(self):
+        """Return a custom depth→3-D-points callable, or *None*.
+
+        Datasets with non-standard depth encoding (e.g. THUD synthetic)
+        override this to supply a function with signature::
+
+            extractor(depth, mask, frame_idx, max_points,
+                      o3_nb_neighbors, o3std_ratio, track_id)
+                      -> np.ndarray (N, 3)
+
+        The returned points must be in the dataset's camera/scene frame.
+        ``cam_to_world`` is still applied afterwards by the tracking
+        pipeline.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Camera
     # ------------------------------------------------------------------

@@ -8,7 +8,7 @@ Usage
   python run.py /path/to/scene_1
 
   # THUD Synthetic scene
-  python run.py /path/to/Gym/static/Capture_1 --dataset thud_synthetic
+  python run.py /path/to/Office/static/Capture_1 --dataset thud_synthetic
 
   # THUD Real scene
   python run.py /path/to/Real_Scenes/10L/static/Capture_1 --dataset thud_real
@@ -44,6 +44,8 @@ from ssg.ssg_main import edges
 
 import matplotlib.pyplot as plt
 import networkx as nx
+from rerun_utils import RerunVisualizer
+from kg_nav_run import edges_bs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -90,6 +92,12 @@ def main() -> int:
         cfg.ssg.print_tracking_info = True
     if args.save_graph:
         cfg.ssg.save_graph = True
+    if args.rerun:
+        cfg.ssg.rerun = True
+    if args.vis_edge:
+        cfg.ssg.vis_edge = True
+
+    edge_predictor = args.edge_predictor
 
     dataset_name = cfg.get("dataset", args.dataset or "isaacsim")
 
@@ -98,7 +106,6 @@ def main() -> int:
 
     # --- Build loader --------------------------------------------------------
     scene_path = str(Path(args.path).resolve())
-    scene_path = "/home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_2"
     LoaderCls = get_loader(dataset_name)
 
     loader_kwargs = {}
@@ -137,6 +144,11 @@ def main() -> int:
         print(f"Intrinsics: fx={K[0,0]:.1f}  fy={K[1,1]:.1f}  "
               f"cx={K[0,2]:.1f}  cy={K[1,2]:.1f}  image={img_w}x{img_h}")
 
+    # --- Custom point extractor (THUD synthetic uses non-standard depth) -----
+    point_extractor = loader.make_point_extractor()
+    if point_extractor is not None:
+        print("[INFO] Using dataset-specific depth→PCD pipeline")
+
     # --- Prepare data --------------------------------------------------------
     rgb_paths = loader.get_rgb_paths()
     depth_paths = loader.get_depth_paths()
@@ -163,6 +175,20 @@ def main() -> int:
     cuda_available = torch.cuda.is_available()
     ssg_cfg = OmegaConf.to_container(cfg.get("ssg", {}), resolve=True)
 
+    # --- Rerun visualizer (optional) ----------------------------------------
+    rerun_vis = None
+    if ssg_cfg.get("rerun", False):
+        rerun_vis = RerunVisualizer(recording_id=f"yolo_ssg_{dataset_name}")
+        K_intr = loader.get_camera_intrinsics()
+        if K_intr is not None:
+            _K, _ih, _iw = K_intr
+            rerun_vis.init(_iw, _ih,
+                           float(_K[0, 0]), float(_K[1, 1]),
+                           float(_K[0, 2]), float(_K[1, 2]))
+        else:
+            rerun_vis.init(yutils.IMAGE_WIDTH, yutils.IMAGE_HEIGHT,
+                           yutils.fx, yutils.fy, yutils.cx, yutils.cy)
+
     # --- Core tracking loop --------------------------------------------------
     for tf in run_tracking(
         rgb_paths=rgb_paths,
@@ -172,6 +198,7 @@ def main() -> int:
         cfg=cfg,
         object_registry=object_registry,
         class_names_to_track=class_names_to_track,
+        point_extractor=point_extractor,
     ):
         # Collect timings from core tracker
         for k in ("yolo", "preprocess", "create_3d"):
@@ -194,7 +221,19 @@ def main() -> int:
 
         # --- Edge prediction (SSG) -------------------------------------------
         t0 = time.perf_counter()
-        edges(tf.scene_graph, tf.frame_objs, tf.T_w_c, tf.depth_m)
+        if edge_predictor == "sv":
+            edges(tf.scene_graph, tf.frame_objs, tf.T_w_c, tf.depth_m)
+        elif edge_predictor == "bs" and tf.T_w_c is not None:
+            objs_dict = {obj['global_id']: obj for obj in tf.frame_objs}
+            bs_result = edges_bs(objs_dict, tf.T_w_c)
+            for src_id, edge_list in bs_result.items():
+                for e in edge_list:
+                    tf.scene_graph.add_edge(
+                        src_id, e['target_id'],
+                        label=e['relation_type'],
+                        label_class='proximity',
+                    )
+        # vlsat: no-op for now
         timings["edges"].append((time.perf_counter() - t0) * 1000)
 
         if cuda_available:
@@ -224,6 +263,20 @@ def main() -> int:
             axes[1].set_title(f"Current Graph frame: {tf.frame_idx}")
             plt.tight_layout()
             plt.show()
+
+        # --- Rerun visualisation -----------------------------------------------
+        if rerun_vis is not None:
+            rerun_vis.log_frame(
+                frame_idx=tf.frame_idx,
+                object_registry=object_registry,
+                persistent_graph=persistent_graph,
+                T_w_c=tf.T_w_c,
+                rgb_path=tf.rgb_path,
+                masks_clean=tf.masks_clean,
+                track_ids=tf.track_ids,
+                class_names=tf.class_names,
+                vis_edges=ssg_cfg.get("vis_edge", False),
+            )
 
         if ssg_cfg.get("print_resource_usage", False):
             print("=" * 50)
@@ -362,11 +415,14 @@ def _build_parser() -> argparse.ArgumentParser:
 Examples
 --------
   python run.py /data/scene_1
-  python run.py /data/Gym/static/Capture_1 --dataset thud_synthetic
+  python run.py /data/Office/static/Capture_1 --dataset thud_synthetic
   python run.py /data/scene_1 --config configs/isaacsim.yaml --show-pcds
 """,
     )
-    p.add_argument("--path", default="/home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_0", help="Path to the scene directory.")
+    # /home/yehia/rizo/IsaacSim_Dataset/nk_scene_complex
+    # /home/yehia/Downloads/RGB-D/Synthetic_Scenes/Office/static/Capture_4
+    # /home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_3
+    p.add_argument("--path", default="/home/yehia/Downloads/kg_nav_IsaacSimData/kg_nav_IsaacSimData/scene_3", help="Path to the scene directory.")
     p.add_argument("--dataset", type=str, default=None,
                    choices=["isaacsim", "thud_synthetic", "thud_real", "code", "any_scene"],
                    help="Dataset type (default: 'isaacsim').")
@@ -376,6 +432,11 @@ Examples
     p.add_argument("--print-resources", action="store_true", help="Print per-frame resource usage.")
     p.add_argument("--print-tracking", action="store_true", help="Print per-frame tracking info.")
     p.add_argument("--save-graph", action="store_true", help="Save final scene graph as JSON.")
+    p.add_argument("--rerun", action="store_true", help="Enable Rerun 3D/2D visualisation.")
+    p.add_argument("--edge-predictor", type=str, default="sv",
+                   choices=["sv", "bs", "vlsat"],
+                   help="Edge predictor: sv (sceneverse), bs (baseline spatial), vlsat (skip).")
+    p.add_argument("--vis-edge", action="store_true", help="Show scene-graph edges in Rerun 3D view.")
     return p
 
 

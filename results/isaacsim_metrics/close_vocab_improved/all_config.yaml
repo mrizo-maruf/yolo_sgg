@@ -1,0 +1,233 @@
+is_open_vocabulary: false
+yolo_model: yoloe-11l-seg-pf.pt
+conf: 0.25
+iou: 0.5
+verbose: false
+persistent: true
+agnostic_nms: true
+tracker_cfg: botsort.yaml
+device: '0'
+kernel_size: 9
+alpha: 0.7
+fast_mask: true
+max_points_per_obj: 2000
+max_accumulated_points: 10000
+o3_nb_neighbors: 50
+o3std_ratio: 0.1
+max_depth_cached: 64
+tracking_overlap_threshold: 0.1
+tracking_distance_threshold: 1
+tracking_inactive_limit: 0
+tracking_volume_ratio_threshold: 0.1
+reprojection_visibility_threshold: 0.2
+iou_threshold: 0.3
+skip_classes:
+- wall
+- floor
+- ceiling
+- roof
+- carpet
+- mat
+- ground
+- workspace
+- workplace
+- stairway
+- stairs
+- elevator
+- room
+- kitchen
+- bathroom
+- bedroom
+- living room
+- dining room
+- office
+- hallway
+- corridor
+- lobby
+- garage
+- basement
+- attic
+- sky
+- grass
+- field
+- lawn
+- building
+- house
+- warehouse
+- road
+- street
+- sidewalk
+- parking
+_substring_skip:
+- room
+- shot
+- carpet
+- yard
+- floor
+- mat
+- resort
+- board
+- wall
+- blackboard
+- desk
+ssg:
+  show_pcds: false
+  vis_graph: false
+  print_resource_usage: false
+  print_tracking_info: false
+  save_graph: false
+  save_graph_dir: results/scene_graphs
+visualization:
+  enabled: false
+  interval: 10
+  show_matching: true
+  show_2d: true
+  show_windows: true
+  save_dir: null
+dataset: isaacsim
+image_width: 1280
+image_height: 720
+focal_length: 50
+horizontal_aperture: 80
+vertical_aperture: 45
+min_depth: 0.01
+max_depth: 10.0
+png_max_value: 65535
+loader_skip_labels:
+- wall
+- floor
+- ground
+- ceiling
+- background
+- unlabeled
+- unknown
+load_rgb: true
+load_depth: false
+pi3: false
+dav3: false
+require_all_ids: true
+scene_0_class_names:
+- chair
+- box
+- table
+- teddy bear
+- ladder
+- stool
+- palm tree
+- clock
+- cabinet
+- chiffonier
+- lamp
+- vase
+- sofa
+- trash can
+save_graph_dir: results/scene_graphs
+scene_1_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+scene_2_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+scene_3_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+scene_4_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+scene_5_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+scene_6_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+- paller box
+- purple box
+- black box
+- black cube
+- black table
+scene_7_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+- paller box
+- purple box
+- black box
+- black cube
+- black table
+nk_scene_complex_class_names:
+- red office chair
+- black office chair
+- vase
+- trash can
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+simple_scene_class_names:
+- red office chair
+- chair
+- stool
+- blue bowl
+- bowl
+- chiffonier
+- cabinet
+cabinet_complex_class_names:
+- white cabinet
+- brow box
+- yellow box
+- purple box
+- red box
+- pallet box
+- power drill
+- yellow bottle
+- clamp
+- cup
+- blue can
+- human
+cabinet_simple_class_names:
+- white cabinet
+- box
+- blue can
+- can
+- banana
+- blue cup
+- cup
+- mustard bottle
+- cereal box
+benchmark_metrics_path: ./results/isaacsim_metrics/
