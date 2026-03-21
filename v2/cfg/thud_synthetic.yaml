@@ -5,10 +5,23 @@
 dataset: thud_synthetic
 
 # --- Depth provider ---
-depth_provider: "gt"        # gt | pi3_offline
+depth_provider: "gt"        # gt | pi3_offline | pi3_online | dav3_offline | dav3_online
 depth_scale: 1000.0
 max_depth: 100.0
 min_depth: 0.01
+
+# Predicted depth/pose paths (relative to scene dir, or absolute)
+pi3_offline_depth_dir: "pi3_depth"
+pi3_offline_pose_path: "pi3_traj.txt"
+dav3_offline_depth_dir: "dav3_depth"
+dav3_offline_pose_path: "dav3_traj.txt"
+
+# Online model parameters
+pi3_model_name: "yyfz233/Pi3X"
+pi3_window_size: 13
+pi3_overlap: 5
+dav3_model_name: "depth-anything-v3"
+online_max_cache: 128
 
 # --- Loader ---
 loader_skip_labels:

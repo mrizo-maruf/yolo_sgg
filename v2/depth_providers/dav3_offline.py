@@ -1,8 +1,4 @@
-"""Pi3 offline depth providers.
-
-These providers read precomputed Pi3 depth maps from disk and optionally
-load model-predicted poses from a trajectory text file.
-"""
+"""DepthAnything V3 offline depth providers."""
 from __future__ import annotations
 
 from typing import Optional
@@ -10,15 +6,15 @@ from typing import Optional
 from .gt_depth import MetricPngDepthProvider
 
 
-class Pi3OfflineDepthProvider(MetricPngDepthProvider):
-    """Generic Pi3 offline provider for metric PNG depth."""
+class DAv3OfflineDepthProvider(MetricPngDepthProvider):
+    """Generic DAv3 offline provider for metric PNG depth."""
 
     def __init__(
         self,
         depth_dir: str,
         filename_pattern: str = "depth{frame_idx:06d}.png",
         png_max_value: int = 65535,
-        max_depth: float = 10.0,
+        max_depth: float = 80.0,
         min_depth: float = 0.01,
         pose_path: Optional[str] = None,
         pose_lookup: str = "frame_number",
@@ -34,8 +30,8 @@ class Pi3OfflineDepthProvider(MetricPngDepthProvider):
         )
 
 
-class Pi3OfflineIsaacSimDepthProvider(Pi3OfflineDepthProvider):
-    """Pi3 offline depth for IsaacSim scenes."""
+class DAv3OfflineIsaacSimDepthProvider(DAv3OfflineDepthProvider):
+    """DAv3 offline depth for IsaacSim scenes."""
 
     def __init__(
         self,
@@ -56,8 +52,8 @@ class Pi3OfflineIsaacSimDepthProvider(Pi3OfflineDepthProvider):
         )
 
 
-class Pi3OfflineTHUDSyntheticDepthProvider(Pi3OfflineDepthProvider):
-    """Pi3 offline depth for THUD Synthetic scenes."""
+class DAv3OfflineTHUDSyntheticDepthProvider(DAv3OfflineDepthProvider):
+    """DAv3 offline depth for THUD Synthetic scenes."""
 
     def __init__(
         self,
@@ -78,8 +74,8 @@ class Pi3OfflineTHUDSyntheticDepthProvider(Pi3OfflineDepthProvider):
         )
 
 
-class Pi3OfflineCODaDepthProvider(Pi3OfflineDepthProvider):
-    """Pi3 offline depth for CODa scenes."""
+class DAv3OfflineCODaDepthProvider(DAv3OfflineDepthProvider):
+    """DAv3 offline depth for CODa scenes."""
 
     def __init__(
         self,

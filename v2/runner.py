@@ -30,11 +30,18 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from v2.depth_providers import (
+    CODaDepthProvider,
+    DAv3OfflineCODaDepthProvider,
+    DAv3OfflineIsaacSimDepthProvider,
+    DAv3OfflineTHUDSyntheticDepthProvider,
+    DAv3StreamingDepthProvider,
     IsaacSimDepthProvider,
-    Pi3OfflineDepthProvider,
+    Pi3OfflineCODaDepthProvider,
+    Pi3OfflineIsaacSimDepthProvider,
+    Pi3OfflineTHUDSyntheticDepthProvider,
+    Pi3OnlineDepthProvider,
     THUDSyntheticDepthProvider,
 )
-from v2.depth_providers.pi3_online import Pi3OnlineDepthProvider
 from v2.loaders import get_loader
 from v2.loaders.camera import CameraLoader
 from v2.object_registry import GlobalObjectRegistry
@@ -75,9 +82,22 @@ def _load_config(args: argparse.Namespace) -> OmegaConf:
 # Depth provider factory
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _resolve_scene_path(scene_dir: Optional[str], value, default_rel: str) -> str:
+    if scene_dir is None:
+        raise ValueError("This depth provider requires a scene directory")
+    raw = str(value) if value is not None else default_rel
+    p = Path(raw)
+    return str(p if p.is_absolute() else (Path(scene_dir) / p))
+
+
+def _maybe_existing_path(path: str) -> Optional[str]:
+    p = Path(path)
+    return str(p) if p.exists() else None
+
+
 def _build_depth_provider(cfg, scene_dir: Optional[str]):
-    kind = cfg.get("depth_provider", "gt")
-    dataset = cfg.get("dataset", "isaacsim")
+    kind = str(cfg.get("depth_provider", "gt"))
+    dataset = str(cfg.get("dataset", "isaacsim"))
 
     if kind == "gt":
         if dataset == "isaacsim" and scene_dir:
@@ -87,23 +107,119 @@ def _build_depth_provider(cfg, scene_dir: Optional[str]):
                 max_depth=float(cfg.get("max_depth", 10.0)),
                 min_depth=float(cfg.get("min_depth", 0.01)),
             )
-        elif dataset == "thud_synthetic" and scene_dir:
-            return THUDSyntheticDepthProvider(
-                str(Path(scene_dir) / "Depth"),
+        if dataset == "thud_synthetic" and scene_dir:
+            return THUDSyntheticDepthProvider(str(Path(scene_dir) / "Depth"))
+        if dataset == "coda" and scene_dir:
+            return CODaDepthProvider(
+                str(Path(scene_dir) / "depth"),
+                png_max_value=int(cfg.get("png_max_value", 65535)),
+                max_depth=float(cfg.get("max_depth", 80.0)),
+                min_depth=float(cfg.get("min_depth", 0.01)),
             )
         return None
 
-    if kind == "pi3_offline":
+    if kind in {"pi3_offline", "dav3_offline", "depthanything_offline"}:
         if scene_dir is None:
-            raise ValueError("pi3_offline requires a scene directory")
-        return Pi3OfflineDepthProvider(str(Path(scene_dir) / "rgb"))
+            raise ValueError(f"{kind} requires a scene directory")
+
+        model_tag = "pi3" if kind == "pi3_offline" else "dav3"
+        depth_default = f"{model_tag}_depth"
+        pose_default = f"{model_tag}_traj.txt"
+
+        depth_dir = _resolve_scene_path(
+            scene_dir,
+            cfg.get(f"{kind}_depth_dir", cfg.get("pred_depth_dir")),
+            depth_default,
+        )
+        pose_candidate = _resolve_scene_path(
+            scene_dir,
+            cfg.get(f"{kind}_pose_path", cfg.get("pred_pose_path")),
+            pose_default,
+        )
+        pose_path = _maybe_existing_path(pose_candidate)
+
+        png_max = int(cfg.get("pred_png_max_value", cfg.get("png_max_value", 65535)))
+        max_depth = float(cfg.get("pred_max_depth", cfg.get("max_depth", 10.0)))
+        min_depth = float(cfg.get("pred_min_depth", cfg.get("min_depth", 0.01)))
+
+        if kind == "pi3_offline":
+            if dataset == "thud_synthetic":
+                return Pi3OfflineTHUDSyntheticDepthProvider(
+                    depth_dir,
+                    png_max_value=png_max,
+                    max_depth=max_depth,
+                    min_depth=min_depth,
+                    pose_path=pose_path,
+                )
+            if dataset == "coda":
+                return Pi3OfflineCODaDepthProvider(
+                    depth_dir,
+                    png_max_value=png_max,
+                    max_depth=max_depth,
+                    min_depth=min_depth,
+                    pose_path=pose_path,
+                )
+            return Pi3OfflineIsaacSimDepthProvider(
+                depth_dir,
+                png_max_value=png_max,
+                max_depth=max_depth,
+                min_depth=min_depth,
+                pose_path=pose_path,
+            )
+
+        if dataset == "thud_synthetic":
+            return DAv3OfflineTHUDSyntheticDepthProvider(
+                depth_dir,
+                png_max_value=png_max,
+                max_depth=max_depth,
+                min_depth=min_depth,
+                pose_path=pose_path,
+            )
+        if dataset == "coda":
+            return DAv3OfflineCODaDepthProvider(
+                depth_dir,
+                png_max_value=png_max,
+                max_depth=max_depth,
+                min_depth=min_depth,
+                pose_path=pose_path,
+            )
+        return DAv3OfflineIsaacSimDepthProvider(
+            depth_dir,
+            png_max_value=png_max,
+            max_depth=max_depth,
+            min_depth=min_depth,
+            pose_path=pose_path,
+        )
 
     if kind == "pi3_online":
-        return Pi3OnlineDepthProvider()
+        target_size = None
+        if cfg.get("image_height") and cfg.get("image_width"):
+            target_size = (int(cfg.image_height), int(cfg.image_width))
+
+        return Pi3OnlineDepthProvider(
+            model_name=str(cfg.get("pi3_model_name", "yyfz233/Pi3X")),
+            window_size=int(cfg.get("pi3_window_size", 13)),
+            overlap=int(cfg.get("pi3_overlap", 5)),
+            target_size=target_size,
+            device=str(cfg.get("device", "cuda")),
+            max_cache=int(cfg.get("online_max_cache", 128)),
+            min_depth=float(cfg.get("min_depth", 0.01)),
+        )
+
+    if kind in {"dav3_online", "depthanything_online", "depthanything_v3_streaming"}:
+        target_size = None
+        if cfg.get("image_height") and cfg.get("image_width"):
+            target_size = (int(cfg.image_height), int(cfg.image_width))
+
+        return DAv3StreamingDepthProvider(
+            model_name=str(cfg.get("dav3_model_name", "depth-anything-v3")),
+            device=str(cfg.get("device", "cuda")),
+            target_size=target_size,
+            min_depth=float(cfg.get("min_depth", 0.01)),
+            max_cache=int(cfg.get("online_max_cache", 256)),
+        )
 
     raise ValueError(f"Unknown depth_provider: {kind}")
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Loader factory
 # ═══════════════════════════════════════════════════════════════════════════
@@ -296,8 +412,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Max frames for camera mode")
     p.add_argument("--conf", type=float, default=None)
     p.add_argument("--device", default=None)
-    p.add_argument("--depth-provider", default=None,
-                   choices=["gt", "pi3_offline", "pi3_online"])
+    p.add_argument(
+        "--depth-provider",
+        default=None,
+        choices=["gt", "pi3_offline", "pi3_online", "dav3_offline", "dav3_online"],
+    )
     p.add_argument("--save-graph", action="store_true")
     return p
 
