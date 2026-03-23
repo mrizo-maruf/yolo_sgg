@@ -45,7 +45,6 @@ def run_yolo_tracking_stream(
     n_frames = loader.get_num_frames()
     for idx in range(n_frames):
         rgb, rgb_path = loader.get_rgb(idx)
-        print(f"[YOLO] Processing frame {idx}/{n_frames} ({rgb_path})")
         if rgb is None:
             continue
 
