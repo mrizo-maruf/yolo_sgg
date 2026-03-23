@@ -19,7 +19,6 @@ class DatasetLoader(ABC):
     """Protocol every dataset loader implements."""
 
     # -- metadata ----------------------------------------------------------
-
     @property
     @abstractmethod
     def scene_label(self) -> str: ...

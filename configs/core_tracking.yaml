@@ -2,6 +2,10 @@
 # Default configuration — shared by run.py and bench.py
 # ============================================================================
 
+# --- Depth provider ---
+# gt | pi3_online | pi3_offline | dav3_online | dav3_offline
+depth_provider: gt
+
 # --- YOLO model ---
 is_open_vocabulary: true
 yolo_model: "yoloe-11l-seg.pt"
@@ -14,7 +18,7 @@ tracker_cfg: "botsort.yaml"
 device: "0"
 
 # --- Mask pre-processing ---
-kernel_size: 9
+kernel_size: 5
 alpha: 0.7
 fast_mask: true
 
@@ -98,13 +102,21 @@ ssg:
   vis_graph: false
   print_resource_usage: false
   print_tracking_info: false
-  save_graph: false
   save_graph_dir: "results/scene_graphs"
+
+  # Edge predictors
+  basic_edges: true
+  baseline_edges: true
+  vlsat_edges: true
+
+  # Save
+  save_local_graph: false
+  save_global_graph: false
 
 # --- Visualisation ---
 visualization:
   enabled: false
-  interval: 10
+  interval: 1
   show_matching: true
   show_2d: true
   show_windows: true

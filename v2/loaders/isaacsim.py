@@ -32,7 +32,7 @@ class IsaacSimLoader(DatasetLoader):
     def __init__(
         self,
         scene_dir: str,
-        depth_provider: Optional[DepthProvider] = None,
+        depth_provider: DepthProvider = None,
         depth_provider_type: int = 0,
         skip_labels: Optional[Set[str]] = None,
         image_width: int = 1280,
