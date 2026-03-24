@@ -80,6 +80,9 @@ def main() -> int:
     if args.save_global_graph:
         cfg.ssg = cfg.get("ssg", {})
         cfg.ssg.save_global_graph = True
+    if args.vis_edge:
+        cfg.ssg = cfg.get("ssg", {})
+        cfg.ssg.vis_edge = True
 
     dataset_name = args.dataset
 
@@ -119,6 +122,21 @@ def main() -> int:
     # SceneGraph
     scene_graph = SceneGraph(cfg.ssg)
 
+    # --- Rerun visualizer (optional) ---
+    ssg_cfg = OmegaConf.to_container(cfg.get("ssg", {}), resolve=True)
+    rerun_vis = None
+    if ssg_cfg.get("rerun", False):
+        from rerun_utils import RerunVisualizer
+        rerun_vis = RerunVisualizer(recording_id=f"yolo_ssg_{dataset_name}")
+        rerun_vis.init(
+            img_w=intrinsics.width,
+            img_h=intrinsics.height,
+            fx=intrinsics.fx,
+            fy=intrinsics.fy,
+            cx=intrinsics.cx,
+            cy=intrinsics.cy,
+        )
+
     # --- Timings ---
     timings_agg = {"yolo": [], "preprocess": [], "tracking_3d": []}
 
@@ -152,6 +170,20 @@ def main() -> int:
         if cfg.ssg.save_local_graph:
             scene_graph.save_local_graph(scene_name=loader.scene_label)
 
+        # --- Rerun visualisation ---
+        if rerun_vis is not None:
+            rerun_vis.log_frame(
+                frame_idx=tf.frame_idx,
+                object_registry=object_registry,
+                persistent_graph=scene_graph.global_graph,
+                T_w_c=tf.T_w_c,
+                rgb_path=tf.rgb_path,
+                masks_clean=tf.masks,
+                track_ids=tf.track_ids if tf.track_ids is not None else np.array([], dtype=int),
+                class_names=tf.class_names,
+                vis_edges=ssg_cfg.get("vis_edge", False),
+            )
+
     if cfg.ssg.save_global_graph:
         scene_graph.save_global_graph(scene_name=loader.scene_label)
 
@@ -160,8 +192,7 @@ def main() -> int:
     # --- Summary ---
     _print_summary(object_registry, timings_agg)
 
-    # --- Save global graph (placeholder) ---
-    ssg_cfg = OmegaConf.to_container(cfg.get("ssg", {}), resolve=True)
+    # --- Save global graph ---
     if ssg_cfg.get("save_graph", False) or ssg_cfg.get("save_global_graph", False):
         save_dir = Path(ssg_cfg.get("save_graph_dir", "results/scene_graphs"))
         _save_objects_json(object_registry, save_dir, dataset_name)
@@ -289,9 +320,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--is_open_vocab", action="store_true", default=None,
                    help="Enable open-vocabulary mode.")
     p.add_argument("--rerun", action="store_true",
-                   help="Enable Rerun 3D/2D visualisation (placeholder).")
+                   help="Enable Rerun 3D/2D visualisation.")
+    p.add_argument("--vis_edge", action="store_true",
+                   help="Show scene-graph edges in the Rerun 3D view.")
     p.add_argument("--vis_graph", action="store_true",
-                   help="Visualize scene graph per frame (placeholder).")
+                   help="Visualize scene graph per frame.")
     p.add_argument("--save_graph", action="store_true",
                    help="Save scene graph as JSON.")
     p.add_argument("--save_global_graph", action="store_true",

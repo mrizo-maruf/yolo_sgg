@@ -190,6 +190,22 @@ class GlobalObjectRegistry:
     def get_all_objects(self) -> Dict[int, dict]:
         return self.objects
 
+    def get_all_pcds_for_visualization(self) -> List[dict]:
+        """Return per-object dicts suitable for RerunVisualizer."""
+        result = []
+        for gid, obj in self.objects.items():
+            bbox = obj.get("bbox_3d")
+            bbox_dict = bbox.to_dict() if bbox is not None else None
+            result.append({
+                "global_id": gid,
+                "points": obj.get("points_accumulated"),
+                "class_name": obj.get("class_name"),
+                "bbox_3d": bbox_dict,
+                "visible_current_frame": gid in self._visible_this_frame,
+                "observation_count": obj.get("observation_count", 0),
+            })
+        return result
+
     def get_visible_objects(self, frame_idx: int) -> List[TrackedObject]:
         """Return TrackedObjects visible in the given frame."""
         visible = []

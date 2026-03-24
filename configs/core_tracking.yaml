@@ -113,6 +113,10 @@ ssg:
   save_local_graph: false
   save_global_graph: false
 
+  # Rerun visualisation
+  rerun: false
+  vis_edge: false
+
 # --- Visualisation ---
 visualization:
   enabled: false

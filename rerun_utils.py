@@ -25,7 +25,7 @@ except ModuleNotFoundError as exc:
         "The 'rerun' package is required.  Install with: pip install rerun-sdk"
     ) from exc
 
-import YOLOE.utils as yutils
+# No external dependencies beyond rerun, cv2, numpy, colorsys
 
 # ───────────────────────────────────────────────────────────────────────────
 # Colour helpers
@@ -329,7 +329,12 @@ class RerunVisualizer:
         for nid in graph.nodes:
             obj = all_objs.get(nid, {})
             bbox = obj.get("bbox_3d")
-            if bbox and bbox.get("aabb"):
+            if bbox is None:
+                continue
+            # bbox may be a BBox3D dataclass or a dict
+            if hasattr(bbox, "aabb_min"):
+                centres[nid] = (bbox.aabb_min + bbox.aabb_max) / 2.0
+            elif isinstance(bbox, dict) and bbox.get("aabb"):
                 c = _aabb_center(bbox["aabb"])
                 if c is not None:
                     centres[nid] = c
@@ -397,15 +402,16 @@ class RerunVisualizer:
         )
 
     # ------------------------------------------------------------------
-    # Panel 3 – RGB with reprojected 2-D boxes
+    # Panel 3 – RGB with reprojected 3-D box wireframes
     # ------------------------------------------------------------------
     def _log_rgb_with_boxes(self, rgb: np.ndarray, object_registry,
                             T_w_c: Optional[np.ndarray],
                             img_w: int, img_h: int):
-        """Draw reprojected 3-D AABBs as 2-D rectangles on the RGB image."""
+        """Draw reprojected 3-D AABB wireframes on the RGB image."""
         canvas = rgb.copy()
 
         if T_w_c is not None:
+            T_c_w = np.linalg.inv(T_w_c)
             all_vis = object_registry.get_all_pcds_for_visualization()
             for obj in all_vis:
                 if not obj.get("visible_current_frame", False):
@@ -417,30 +423,44 @@ class RerunVisualizer:
                 if corners_3d is None:
                     continue
 
-                px = _project_points(
-                    corners_3d, T_w_c,
-                    self._fx, self._fy, self._cx, self._cy,
-                    img_w, img_h,
-                )
-                if px is None or len(px) < 2:
-                    continue
-
-                x1 = max(0, int(np.min(px[:, 0])))
-                y1 = max(0, int(np.min(px[:, 1])))
-                x2 = min(img_w - 1, int(np.max(px[:, 0])))
-                y2 = min(img_h - 1, int(np.max(px[:, 1])))
-                if x2 - x1 < 2 or y2 - y1 < 2:
-                    continue
+                # Project all 8 corners into camera frame
+                pts_cam = (T_c_w[:3, :3] @ corners_3d.T).T + T_c_w[:3, 3]
+                # Per-corner projection (only draw edges where both endpoints are in front)
+                px = np.full((8, 2), np.nan, dtype=np.float32)
+                for i in range(8):
+                    if pts_cam[i, 2] > 0:
+                        px[i, 0] = (pts_cam[i, 0] / pts_cam[i, 2]) * self._fx + self._cx
+                        px[i, 1] = (pts_cam[i, 1] / pts_cam[i, 2]) * self._fy + self._cy
 
                 gid = obj["global_id"]
                 color_bgr = tuple(int(c) for c in _track_color_u8(gid)[::-1])
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), color_bgr, 2)
+
+                # Draw the 12 edges of the 3D box
+                drawn = False
+                for i0, i1 in _BOX_EDGES:
+                    if np.isnan(px[i0, 0]) or np.isnan(px[i1, 0]):
+                        continue
+                    p0 = (int(round(px[i0, 0])), int(round(px[i0, 1])))
+                    p1 = (int(round(px[i1, 0])), int(round(px[i1, 1])))
+                    cv2.line(canvas, p0, p1, color_bgr, 2, cv2.LINE_AA)
+                    drawn = True
+
+                if not drawn:
+                    continue
+
+                # Label at the top-most visible corner
+                valid = ~np.isnan(px[:, 0])
+                if not np.any(valid):
+                    continue
+                top_idx = np.argmin(px[valid, 1])
+                lx = int(round(px[valid][top_idx, 0]))
+                ly = int(round(px[valid][top_idx, 1]))
 
                 class_name = obj.get("class_name", "")
                 label = f"{class_name} T:{gid}" if class_name else f"T:{gid}"
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(canvas, (x1, y1 - th - 6), (x1 + tw + 4, y1), color_bgr, -1)
-                cv2.putText(canvas, label, (x1 + 2, y1 - 4),
+                cv2.rectangle(canvas, (lx, ly - th - 6), (lx + tw + 4, ly), color_bgr, -1)
+                cv2.putText(canvas, label, (lx + 2, ly - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
         rr.log(
