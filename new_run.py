@@ -15,7 +15,7 @@ Usage
   python new_run.py --dataset coda --scene_path /path/to/coda_scene
 
   # ScanNet++
-  python new_run.py --dataset scanepp --scene_path /path/to/scannetpp_scene
+  python new_run.py --dataset scanetpp --scene_path /path/to/scannetpp_scene
 
   # Open vocabulary with custom YOLO model
   python new_run.py --scene_path /path/to/scene --is_open_vocab --yolo_model yoloe-11l-seg-pf.pt
@@ -189,8 +189,13 @@ def _build_loader_kwargs(dataset_name: str, cfg) -> dict:
         kwargs["depth_scale"] = float(cfg.get("depth_scale", 1000.0))
     elif dataset_name == "coda":
         kwargs["max_depth"] = float(cfg.get("max_depth", 80.0))
-    elif dataset_name == "scanepp":
-        kwargs["max_depth"] = float(cfg.get("max_depth", 10.0))
+    elif dataset_name == "scanetpp":
+        kwargs["fx"] = float(cfg.get("fx", 692.52))
+        kwargs["fy"] = float(cfg.get("fy", 693.83))
+        kwargs["cx"] = float(cfg.get("cx", 459.76))
+        kwargs["cy"] = float(cfg.get("cy", 344.76))
+        kwargs["image_width"] = int(cfg.get("image_width", 920))
+        kwargs["image_height"] = int(cfg.get("image_height", 690))
 
     return kwargs
 
@@ -271,7 +276,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--dataset", type=str, default="isaacsim",
-                   choices=["isaacsim", "thud_synthetic", "coda", "scanepp"],
+                   choices=["isaacsim", "thud_synthetic", "coda", "scanetpp"],
                    help="Dataset type (default: isaacsim).")
     p.add_argument("--scene_path", type=str, required=True,
                    help="Path to the scene directory.")

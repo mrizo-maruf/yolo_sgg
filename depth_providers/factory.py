@@ -27,7 +27,7 @@ _DEPTH_DIRS: dict[str, str] = {
     "isaacsim": "depth",
     "thud_synthetic": "Depth",
     "coda": "depth",
-    "scanepp": "depth",
+    "scanetpp": "gt_depth",
 }
 
 # Provider type choices (for CLI help / validation).
@@ -47,7 +47,7 @@ def build_depth_provider(
     provider_type : str
         One of ``PROVIDER_CHOICES``.
     dataset_name : str
-        Dataset key (``isaacsim``, ``thud_synthetic``, ``coda``, ``scanepp``).
+        Dataset key (``isaacsim``, ``thud_synthetic``, ``coda``, ``scanetpp``).
     scene_dir : str
         Absolute path to the scene directory.
     cfg : OmegaConf
@@ -114,16 +114,18 @@ def _build_gt(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             pose_path=str(pose_path) if pose_path.exists() else None,
         )
 
-    if dataset_name == "scanepp":
-        from .gt_depth import MetricPngDepthProvider
+    if dataset_name == "scanetpp":
+        from .gt_depth import ScanNetPPDepthProvider
 
-        depth_dir = scene_p / "depth"
-        return MetricPngDepthProvider(
+        depth_dir = scene_p / "gt_depth"
+        pose_path = scene_p / "traj.txt"
+        return ScanNetPPDepthProvider(
             depth_dir=str(depth_dir),
-            filename_pattern="frame{frame_idx:06d}.png",
-            png_max_value=int(cfg.get("png_max_value", 65535)),
+            filename_pattern="frame_{frame_idx:06d}.png",
+            depth_scale=float(cfg.get("depth_scale", 1000.0)),
             max_depth=float(cfg.get("max_depth", 10.0)),
             min_depth=float(cfg.get("min_depth", 0.01)),
+            pose_path=str(pose_path) if pose_path.exists() else None,
         )
 
     raise ValueError(f"No GT depth provider for dataset: {dataset_name!r}")
@@ -137,14 +139,14 @@ _FILENAME_PATTERNS: dict[str, str] = {
     "isaacsim": "depth{frame_number:06d}.png",
     "thud_synthetic": "depth_{frame_idx}.png",
     "coda": "depth{frame_number:06d}.png",
-    "scanepp": "frame{frame_idx:06d}.png",
+    "scanetpp": "frame_{frame_idx:06d}.png",
 }
 
 _DEFAULT_MAX_DEPTH: dict[str, float] = {
     "isaacsim": 10.0,
     "thud_synthetic": 100.0,
     "coda": 80.0,
-    "scanepp": 10.0,
+    "scanetpp": 10.0,
 }
 
 

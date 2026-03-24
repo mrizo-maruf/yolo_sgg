@@ -1,0 +1,30 @@
+# ============================================================================
+# ScanNet++ dataset overrides
+# ============================================================================
+# Inherits everything from core_tracking.yaml; override only what differs.
+
+dataset: scanetpp
+
+# --- ScanNet++ camera intrinsics ---
+fx: 692.52
+fy: 693.83
+cx: 459.76
+cy: 344.76
+image_width: 920
+image_height: 690
+
+# --- Depth conversion (uint16 PNG, metres = px / 1000) ---
+depth_scale: 1000.0
+min_depth: 0.01
+max_depth: 10.0
+
+# ScanNet++ labels to skip in GT loading
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background
+
+load_rgb: true
+load_depth: false

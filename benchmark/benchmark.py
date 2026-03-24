@@ -16,7 +16,7 @@ Modes
 
        python -m benchmark.benchmark --dataset isaacsim --scene_path /path/to/dataset --multi
 
-Supported datasets: isaacsim, thud_synthetic, coda, scanepp
+Supported datasets: isaacsim, thud_synthetic, coda, scanetpp
 (as registered in ``data_loaders.registry``).
 """
 from __future__ import annotations
@@ -304,8 +304,13 @@ def _build_loader_kwargs(dataset_name: str, cfg) -> dict:
         kwargs["depth_scale"] = float(cfg.get("depth_scale", 1000.0))
     elif dataset_name == "coda":
         kwargs["max_depth"] = float(cfg.get("max_depth", 80.0))
-    elif dataset_name == "scanepp":
-        kwargs["max_depth"] = float(cfg.get("max_depth", 10.0))
+    elif dataset_name == "scanetpp":
+        kwargs["fx"] = float(cfg.get("fx", 692.52))
+        kwargs["fy"] = float(cfg.get("fy", 693.83))
+        kwargs["cx"] = float(cfg.get("cx", 459.76))
+        kwargs["cy"] = float(cfg.get("cy", 344.76))
+        kwargs["image_width"] = int(cfg.get("image_width", 920))
+        kwargs["image_height"] = int(cfg.get("image_height", 690))
 
     return kwargs
 
@@ -514,7 +519,7 @@ Examples
     )
     p.add_argument(
         "--dataset", type=str, default="isaacsim",
-        choices=["isaacsim", "thud_synthetic", "coda", "scanepp"],
+        choices=["isaacsim", "thud_synthetic", "coda", "scanetpp"],
         help="Dataset type (default: isaacsim).",
     )
     p.add_argument(

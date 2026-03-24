@@ -24,3 +24,7 @@ On all thud synthetic static:
 ```
 python benchmark/benchmark_tracking_thud.py /home/yehia/Downloads/RGB-D --multi
 ```
+
+### New benchmarking
+```python -m benchmark.benchmark --dataset isaacsim --scene_path ~/rizo/3D_SSGG_IsaacSim_small/scene_1 --depth_provider gt --vis --vis_interval 1
+```

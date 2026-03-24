@@ -16,7 +16,7 @@ LOADER_REGISTRY: Dict[str, str] = {
     "isaacsim":       "data_loaders.isaacsim.IsaacSimLoader",
     "thud_synthetic": "data_loaders.thud_synthetic.THUDSyntheticLoader",
     "coda":           "data_loaders.coda.CODaLoader",
-    "scanepp":        "data_loaders.scanepp.ScanNetPPLoader",
+    "scanetpp":        "data_loaders.scanetpp.ScanNetPPLoader",
 }
 
 
