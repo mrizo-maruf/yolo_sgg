@@ -64,11 +64,16 @@ class GlobalObjectRegistry:
         self.current_frame = frame_idx
         self._visible_this_frame.clear()
 
-    def end_frame(self, matched_gids: Set[int]) -> None:
-        """Store previous-frame snapshot and optionally cleanup."""
+    def end_frame(self, visible_gids: Set[int]) -> None:
+        """Store previous-frame snapshot and optionally cleanup.
+
+        ``visible_gids`` should include both:
+        - objects updated from current YOLO detections
+        - objects considered visible via reprojection fallback
+        """
         self.prev_frame = {
             gid: self.objects[gid]
-            for gid in matched_gids
+            for gid in visible_gids
             if gid in self.objects
         }
         if self.inactive_limit > 0:
@@ -100,6 +105,8 @@ class GlobalObjectRegistry:
             "class_name": cls,
             "first_seen_frame": frame_idx,
             "last_seen_frame": frame_idx,
+            "last_seen_yolo_frame": frame_idx,
+            "last_seen_camera_view_frame": frame_idx,
             "observation_count": 1,
             "last_mask": mask,
         }
@@ -140,6 +147,8 @@ class GlobalObjectRegistry:
             obj["bbox_3d"] = compute_bbox(merged, fast=True)
 
         obj["last_seen_frame"] = frame_idx
+        obj["last_seen_yolo_frame"] = frame_idx
+        obj["last_seen_camera_view_frame"] = frame_idx
         obj["observation_count"] = obj.get("observation_count", 0) + 1
         if cls and not obj.get("class_name"):
             obj["class_name"] = cls
@@ -150,6 +159,18 @@ class GlobalObjectRegistry:
         if yolo_id >= 0:
             self.yolo_to_global[yolo_id] = gid
 
+        self._visible_this_frame.add(gid)
+
+    def mark_visible_in_camera(self, gid: int, frame_idx: int) -> None:
+        """Mark an existing object as visible in the current camera view.
+
+        This is used when YOLO misses an object, but reprojection indicates
+        that its 3D bbox is still visible in the image.
+        """
+        obj = self.objects.get(gid)
+        if obj is None:
+            return
+        obj["last_seen_camera_view_frame"] = frame_idx
         self._visible_this_frame.add(gid)
 
     # ------------------------------------------------------------------
@@ -175,6 +196,7 @@ class GlobalObjectRegistry:
                 continue
             frac = bbox_visibility_fraction(bbox, T_w_c, intrinsics, max_depth)
             if frac >= self.visibility_threshold:
+                self.mark_visible_in_camera(gid, self.current_frame)
                 extras.append(TrackedObject(
                     global_id=gid,
                     yolo_id=-1,
@@ -182,7 +204,7 @@ class GlobalObjectRegistry:
                     bbox_3d=bbox,
                     mask=obj.get("last_mask"),
                     first_seen=obj["first_seen_frame"],
-                    last_seen=obj.get("last_seen_frame", 0),
+                    last_seen=self.current_frame,
                     observation_count=obj.get("observation_count", 0),
                 ))
         return extras
@@ -232,7 +254,12 @@ class GlobalObjectRegistry:
     def _cleanup(self, frame_idx: int) -> None:
         to_remove = [
             gid for gid, obj in self.objects.items()
-            if frame_idx - obj.get("last_seen_frame", frame_idx) > self.inactive_limit
+            if frame_idx
+            - max(
+                obj.get("last_seen_frame", -1),
+                obj.get("last_seen_camera_view_frame", -1),
+            )
+            > self.inactive_limit
         ]
         for gid in to_remove:
             del self.objects[gid]

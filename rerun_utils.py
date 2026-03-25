@@ -98,6 +98,68 @@ def _project_points(pts_world: np.ndarray, T_w_c: np.ndarray,
     return np.stack([u, v], axis=1).astype(np.float32)
 
 
+def _rigidize_camera_pose(T_w_c: np.ndarray) -> Optional[np.ndarray]:
+    """Convert a possibly scaled Sim(3) pose into a rigid pose for rendering."""
+    if T_w_c is None:
+        return None
+
+    T = np.asarray(T_w_c, dtype=np.float64)
+    if T.shape != (4, 4) or not np.isfinite(T).all():
+        return None
+
+    A = T[:3, :3]
+    col_norms = np.linalg.norm(A, axis=0)
+    scale = float(np.mean(col_norms))
+    if not np.isfinite(scale) or scale < 1e-8:
+        return None
+
+    R_approx = A / scale
+    U, _, Vt = np.linalg.svd(R_approx)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        U[:, -1] *= -1.0
+        R = U @ Vt
+
+    T_vis = np.eye(4, dtype=np.float32)
+    T_vis[:3, :3] = R.astype(np.float32)
+    T_vis[:3, 3] = T[:3, 3].astype(np.float32)
+    return T_vis
+
+
+def _build_axis_remap_matrix(
+    swap_yz: bool = False,
+    flip_x: bool = False,
+    flip_y: bool = False,
+    flip_z: bool = False,
+) -> np.ndarray:
+    """Build linear axis remap matrix A where p' = A @ p."""
+    A = np.eye(3, dtype=np.float32)
+    if swap_yz:
+        A = A[[0, 2, 1], :]
+    if flip_x:
+        A[0, :] *= -1.0
+    if flip_y:
+        A[1, :] *= -1.0
+    if flip_z:
+        A[2, :] *= -1.0
+    return A
+
+
+def _apply_axis_remap_points(points: np.ndarray, axis_remap: np.ndarray) -> np.ndarray:
+    """Apply axis remap to (N,3) points."""
+    if points is None or points.size == 0:
+        return points
+    return (np.asarray(points, dtype=np.float32) @ axis_remap.T).astype(np.float32)
+
+
+def _apply_axis_remap_transform(transform_4x4: np.ndarray, axis_remap: np.ndarray) -> np.ndarray:
+    """Apply axis remap to a 4x4 world transform."""
+    out = np.eye(4, dtype=np.float32)
+    out[:3, :3] = axis_remap @ np.asarray(transform_4x4[:3, :3], dtype=np.float32)
+    out[:3, 3] = axis_remap @ np.asarray(transform_4x4[:3, 3], dtype=np.float32)
+    return out
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # Public API
 # ───────────────────────────────────────────────────────────────────────────
@@ -105,10 +167,18 @@ def _project_points(pts_world: np.ndarray, T_w_c: np.ndarray,
 class RerunVisualizer:
     """Manages per-frame Rerun logging for the YOLO-SSG pipeline."""
 
-    def __init__(self, recording_id: str = "yolo_ssg"):
+    def __init__(self, recording_id: str = "yolo_ssg", axis_remap: Optional[np.ndarray] = None):
         self._camera_positions: List[np.ndarray] = []
         self._recording_id = recording_id
         self._initialized = False
+        self._warned_invalid_camera_pose = False
+        if axis_remap is None:
+            self._axis_remap = np.eye(3, dtype=np.float32)
+        else:
+            A = np.asarray(axis_remap, dtype=np.float32)
+            if A.shape != (3, 3):
+                raise ValueError(f"axis_remap must be 3x3, got shape {A.shape}")
+            self._axis_remap = A
 
     # ------------------------------------------------------------------
     # Init  (call once before the tracking loop)
@@ -156,6 +226,9 @@ class RerunVisualizer:
         )
         rr.send_blueprint(blueprint)
 
+        rr.log("world3d", rr.ViewCoordinates.RDF, static=True)
+        rr.log("world3d/camera", rr.ViewCoordinates.RDF, static=True)
+
         # Static: world coordinate axes
         rr.log(
             "world3d/origin",
@@ -163,6 +236,17 @@ class RerunVisualizer:
                 origins=np.zeros((3, 3), dtype=np.float32),
                 vectors=np.eye(3, dtype=np.float32) * 0.3,
                 colors=np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8),
+            ),
+            static=True,
+        )
+
+        rr.log(
+            "world3d/camera/image",
+            rr.Pinhole(
+                resolution=[self._img_w, self._img_h],
+                focal_length=[self._fx, self._fy],
+                principal_point=[self._cx, self._cy],
+                image_plane_distance=0.3,
             ),
             static=True,
         )
@@ -215,39 +299,39 @@ class RerunVisualizer:
 
         # ── Camera pose, frustum with RGB thumbnail & trajectory ──
         if T_w_c is not None:
-            rr.log(
-                "world3d/camera",
-                rr.Transform3D(
-                    mat3x3=T_w_c[:3, :3].astype(np.float32),
-                    translation=T_w_c[:3, 3].astype(np.float32),
-                ),
-            )
-            # Pinhole frustum (shows as a pyramid in the 3-D view)
-            rr.log(
-                "world3d/camera/image",
-                rr.Pinhole(
-                    resolution=[self._img_w, self._img_h],
-                    focal_length=[self._fx, self._fy],
-                    principal_point=[self._cx, self._cy],
-                    image_plane_distance=0.3,
-                ),
-            )
-            # Small RGB attached to the frustum
-            small_rgb = cv2.resize(rgb, (self._img_w, self._img_h),
-                                   interpolation=cv2.INTER_AREA)
-            rr.log(
-                "world3d/camera/image/rgb",
-                rr.Image(small_rgb, color_model=rr.ColorModel.RGB),
-            )
-            self._camera_positions.append(T_w_c[:3, 3].astype(np.float32))
-            if len(self._camera_positions) >= 2:
+            T_vis = _rigidize_camera_pose(T_w_c)
+            if T_vis is None:
+                if not self._warned_invalid_camera_pose:
+                    print(
+                        "[Rerun] Invalid/non-finite camera pose for frustum rendering. "
+                        "Frustum will be hidden until poses become valid."
+                    )
+                    self._warned_invalid_camera_pose = True
+            else:
+                T_vis = _apply_axis_remap_transform(T_vis, self._axis_remap)
                 rr.log(
-                    "world3d/camera_trajectory",
-                    rr.LineStrips3D(
-                        strips=[np.array(self._camera_positions, dtype=np.float32)],
-                        colors=[[255, 255, 0]],  # yellow
+                    "world3d/camera",
+                    rr.Transform3D(
+                        mat3x3=T_vis[:3, :3].astype(np.float32),
+                        translation=T_vis[:3, 3].astype(np.float32),
                     ),
                 )
+                # Small RGB attached to the frustum
+                small_rgb = cv2.resize(rgb, (self._img_w, self._img_h),
+                                       interpolation=cv2.INTER_AREA)
+                rr.log(
+                    "world3d/camera/image/rgb",
+                    rr.Image(small_rgb, color_model=rr.ColorModel.RGB),
+                )
+                self._camera_positions.append(T_vis[:3, 3].astype(np.float32))
+                if len(self._camera_positions) >= 2:
+                    rr.log(
+                        "world3d/camera_trajectory",
+                        rr.LineStrips3D(
+                            strips=[np.array(self._camera_positions, dtype=np.float32)],
+                            colors=[[255, 255, 0]],  # yellow
+                        ),
+                    )
 
         # ── Object point clouds ──
         all_points = []
@@ -261,6 +345,7 @@ class RerunVisualizer:
             all_colors.append(np.tile(color, (len(pts), 1)))
 
         if all_points:
+            all_points = [_apply_axis_remap_points(p, self._axis_remap) for p in all_points]
             rr.log(
                 "world3d/objects/points",
                 rr.Points3D(
@@ -283,6 +368,7 @@ class RerunVisualizer:
             corners = _aabb_corners(aabb)
             if corners is None:
                 continue
+            corners = _apply_axis_remap_points(corners, self._axis_remap)
             is_vis = obj.get("visible_current_frame", False)
             color = [0, 255, 0] if is_vis else [255, 0, 0]  # green / red
             edge_pts = corners[_BOX_EDGES]  # (12, 2, 3)
@@ -333,11 +419,12 @@ class RerunVisualizer:
                 continue
             # bbox may be a BBox3D dataclass or a dict
             if hasattr(bbox, "aabb_min"):
-                centres[nid] = (bbox.aabb_min + bbox.aabb_max) / 2.0
+                c = (bbox.aabb_min + bbox.aabb_max) / 2.0
+                centres[nid] = (self._axis_remap @ np.asarray(c, dtype=np.float32)).astype(np.float32)
             elif isinstance(bbox, dict) and bbox.get("aabb"):
                 c = _aabb_center(bbox["aabb"])
                 if c is not None:
-                    centres[nid] = c
+                    centres[nid] = (self._axis_remap @ np.asarray(c, dtype=np.float32)).astype(np.float32)
 
         edge_color = np.array([255, 180, 50], dtype=np.uint8)   # orange
         label_color = np.array([255, 255, 255], dtype=np.uint8)  # white

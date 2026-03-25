@@ -11,13 +11,14 @@ Supported provider types:
 
 * ``gt``            – Ground-truth depth from the scene directory.
 * ``pi3_online``    – Pi3 streaming (v2 online provider, adapted).
-* ``pi3_offline``   – Pre-computed Pi3 metric-depth PNGs.
+* ``pi3_offline``   – Pre-computed Pi3 depth + pose (IsaacSim uses Sim(3) alignment).
 * ``dav3_online``   – DepthAnything V3 streaming (v2 online, adapted).
 * ``dav3_offline``  – Pre-computed DAv3 metric-depth PNGs.
 """
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from .base import DepthProvider
 
@@ -64,11 +65,11 @@ def build_depth_provider(
     if provider_type == "pi3_online":
         return _build_pi3_online(cfg)
     if provider_type == "pi3_offline":
-        return _build_offline_predicted(dataset_name, scene_p, cfg)
+        return _build_pi3_offline(dataset_name, scene_p, cfg)
     if provider_type == "dav3_online":
         return _build_dav3_online(cfg)
     if provider_type == "dav3_offline":
-        return _build_offline_predicted(dataset_name, scene_p, cfg)
+        return _build_dav3_offline(dataset_name, scene_p, cfg)
 
     raise ValueError(
         f"Unknown depth provider type: {provider_type!r}. "
@@ -150,17 +151,43 @@ _DEFAULT_MAX_DEPTH: dict[str, float] = {
 }
 
 
-def _build_offline_predicted(
-    dataset_name: str, scene_p: Path, cfg,
+def _resolve_scene_path(scene_p: Path, value, default_rel: str) -> Path:
+    raw = str(value) if value is not None else default_rel
+    p = Path(raw)
+    return p if p.is_absolute() else scene_p / p
+
+
+def _maybe_existing_path(path: Path) -> Optional[str]:
+    return str(path) if path.exists() else None
+
+
+def _build_metric_png_offline(
+    dataset_name: str,
+    scene_p: Path,
+    cfg,
+    *,
+    depth_subdir_key: str,
+    depth_default: str,
+    pose_path_key: Optional[str] = None,
+    pose_default: str = "traj.txt",
 ) -> DepthProvider:
     """MetricPngDepthProvider with dataset-appropriate defaults."""
     from .gt_depth import MetricPngDepthProvider
 
-    depth_subdir = str(
-        cfg.get("predicted_depth_dir", _DEPTH_DIRS.get(dataset_name, "depth"))
+    depth_dir = _resolve_scene_path(
+        scene_p,
+        cfg.get(depth_subdir_key, cfg.get("predicted_depth_dir")),
+        depth_default,
     )
-    depth_dir = scene_p / depth_subdir
-    pose_path = scene_p / "traj.txt"
+
+    pose_path = None
+    if pose_path_key is not None:
+        pose_candidate = _resolve_scene_path(
+            scene_p,
+            cfg.get(pose_path_key, cfg.get("predicted_pose_path")),
+            pose_default,
+        )
+        pose_path = _maybe_existing_path(pose_candidate)
 
     return MetricPngDepthProvider(
         depth_dir=str(depth_dir),
@@ -172,7 +199,65 @@ def _build_offline_predicted(
             cfg.get("max_depth", _DEFAULT_MAX_DEPTH.get(dataset_name, 10.0))
         ),
         min_depth=float(cfg.get("min_depth", 0.01)),
-        pose_path=str(pose_path) if pose_path.exists() else None,
+        pose_path=pose_path,
+    )
+
+
+def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
+    if dataset_name == "isaacsim":
+        from .pi3_offline import IsaacSimOfflinePi3DepthProvider
+
+        depth_dir = _resolve_scene_path(
+            scene_p,
+            cfg.get("pi3_offline_depth_dir", cfg.get("predicted_depth_dir")),
+            "pi3_depth",
+        )
+        pose_path = _resolve_scene_path(
+            scene_p,
+            cfg.get("pi3_offline_pose_path", cfg.get("predicted_pose_path")),
+            "pi3_camera_poses.txt",
+        )
+        transform_path = _resolve_scene_path(
+            scene_p,
+            cfg.get("pi3_offline_transform_path"),
+            "pi3_to_world_transform.json",
+        )
+
+        png_scale = cfg.get("pi3_offline_png_depth_scale", cfg.get("pi3_png_depth_scale"))
+        if png_scale is not None:
+            png_scale = float(png_scale)
+
+        return IsaacSimOfflinePi3DepthProvider(
+            depth_dir=str(depth_dir),
+            pose_path=_maybe_existing_path(pose_path),
+            transform_path=str(transform_path),
+            png_depth_scale=png_scale,
+            min_depth=float(cfg.get("min_depth", 0.01)),
+            max_depth=float(cfg.get("max_depth", 10.0)),
+            require_transform=bool(cfg.get("pi3_offline_require_transform", True)),
+        )
+
+    # Other datasets: keep generic metric-PNG behavior.
+    return _build_metric_png_offline(
+        dataset_name,
+        scene_p,
+        cfg,
+        depth_subdir_key="pi3_offline_depth_dir",
+        depth_default="pi3_depth",
+        pose_path_key="pi3_offline_pose_path",
+        pose_default="pi3_traj.txt",
+    )
+
+
+def _build_dav3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
+    return _build_metric_png_offline(
+        dataset_name,
+        scene_p,
+        cfg,
+        depth_subdir_key="dav3_offline_depth_dir",
+        depth_default="dav3_depth",
+        pose_path_key="dav3_offline_pose_path",
+        pose_default="dav3_traj.txt",
     )
 
 

@@ -28,3 +28,11 @@ python benchmark/benchmark_tracking_thud.py /home/yehia/Downloads/RGB-D --multi
 ### New benchmarking
 ```python -m benchmark.benchmark --dataset isaacsim --scene_path ~/rizo/3D_SSGG_IsaacSim_small/scene_1 --depth_provider gt --vis --vis_interval 1
 ```
+### New benchmarking on isaacsim with pi3_offile depth
+```
+python -m benchmark.benchmark --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3/cabinet_simple --depth_provider pi3_offline --vis --vis_interval 3
+
+python -m benchmark.benchmark --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3 --multi --depth_provider gt
+
+python -m benchmark.benchmark --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3 --multi --depth_provider pi3_offline
+```

@@ -70,6 +70,31 @@ def bbox_iou_2d(
     return float(inter / union) if union > 0 else 0.0
 
 
+def bbox_iou_3d(
+    box_a: Tuple[float, float, float, float, float, float],
+    box_b: Tuple[float, float, float, float, float, float],
+) -> float:
+    """IoU between two axis-aligned 3D boxes ``(xmin,ymin,zmin,xmax,ymax,zmax)``."""
+    if box_a is None or box_b is None:
+        return 0.0
+
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    z1 = max(box_a[2], box_b[2])
+    x2 = min(box_a[3], box_b[3])
+    y2 = min(box_a[4], box_b[4])
+    z2 = min(box_a[5], box_b[5])
+
+    if x2 <= x1 or y2 <= y1 or z2 <= z1:
+        return 0.0
+
+    inter = (x2 - x1) * (y2 - y1) * (z2 - z1)
+    vol_a = max(box_a[3] - box_a[0], 0.0) * max(box_a[4] - box_a[1], 0.0) * max(box_a[5] - box_a[2], 0.0)
+    vol_b = max(box_b[3] - box_b[0], 0.0) * max(box_b[4] - box_b[1], 0.0) * max(box_b[5] - box_b[2], 0.0)
+    union = vol_a + vol_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Data containers  (caller fills these, metrics funcs consume them)
 # ---------------------------------------------------------------------------
@@ -81,6 +106,7 @@ class GTInstance:
     class_name: str
     mask: Optional[np.ndarray] = None          # H×W bool / uint8
     bbox_xyxy: Optional[Tuple[float, ...]] = None  # (x1,y1,x2,y2)
+    bbox_xyzxyz: Optional[Tuple[float, ...]] = None  # (xmin,ymin,zmin,xmax,ymax,zmax)
 
 
 @dataclass
@@ -90,6 +116,7 @@ class PredInstance:
     class_name: Optional[str] = None
     mask: Optional[np.ndarray] = None
     bbox_xyxy: Optional[Tuple[float, ...]] = None
+    bbox_xyzxyz: Optional[Tuple[float, ...]] = None
 
 
 @dataclass
@@ -114,15 +141,32 @@ def match_greedy(
     gt_objects: List[GTInstance],
     pred_objects: List[PredInstance],
     iou_threshold: float = 0.3,
-    use_masks: bool = True,
+    use_masks: Optional[bool] = None,
+    match_mode: str = "mask2d",
 ) -> Tuple[Dict[int, int], Dict[int, float]]:
-    """Greedy bipartite matching by mask (or bbox) IoU.
+    """Greedy bipartite matching by one similarity mode.
+
+    Supported match modes:
+      - ``mask2d`` : mask IoU
+      - ``bbox2d`` : 2D bbox IoU
+      - ``bbox3d`` : 3D AABB IoU
+
+    ``use_masks`` is kept for backward compatibility:
+      - ``True`` -> ``mask2d``
+      - ``False`` -> ``bbox2d``
 
     Returns
     -------
     mapping : dict   gt_track_id → pred_id
     ious    : dict   gt_track_id → IoU
     """
+    if use_masks is not None:
+        match_mode = "mask2d" if use_masks else "bbox2d"
+
+    if match_mode not in {"mask2d", "bbox2d", "bbox3d"}:
+        raise ValueError(f"Unsupported match_mode '{match_mode}'. "
+                         "Use one of: mask2d, bbox2d, bbox3d.")
+
     if not gt_objects or not pred_objects:
         return {}, {}
 
@@ -130,10 +174,12 @@ def match_greedy(
     iou_matrix = np.zeros((n_gt, n_pred), dtype=np.float64)
     for i, gt in enumerate(gt_objects):
         for j, pr in enumerate(pred_objects):
-            if use_masks:
+            if match_mode == "mask2d":
                 iou_matrix[i, j] = mask_iou(gt.mask, pr.mask)
-            else:
+            elif match_mode == "bbox2d":
                 iou_matrix[i, j] = bbox_iou_2d(gt.bbox_xyxy, pr.bbox_xyxy)
+            else:  # bbox3d
+                iou_matrix[i, j] = bbox_iou_3d(gt.bbox_xyzxyz, pr.bbox_xyzxyz)
 
     # collect valid pairs, sort descending
     pairs = []

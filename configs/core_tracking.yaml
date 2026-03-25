@@ -18,7 +18,7 @@ tracker_cfg: "botsort.yaml"
 device: "0"
 
 # --- Mask pre-processing ---
-kernel_size: 5
+kernel_size: 13
 alpha: 0.7
 fast_mask: true
 
@@ -42,7 +42,13 @@ tracking_volume_ratio_threshold: 0.1
 reprojection_visibility_threshold: 0.2
 
 # --- Matching (benchmark) ---
+# One mode per benchmark run:
+#   mask2d | bbox2d | bbox3d
+match_mode: mask2d
 iou_threshold: 0.3
+# For 2D benchmark matching: when false, skip reprojection-only objects
+# (their masks are stale from older frames).
+benchmark_include_reprojected_masks: false
 
 # --- Classes to skip (structural / background) ---
 skip_classes:
@@ -116,6 +122,8 @@ ssg:
   # Rerun visualisation
   rerun: false
   vis_edge: false
+  # Remap Isaac RFU (Z-up) to Rerun RDF for correct visual orientation.
+  isaac_axis_fix: true
 
 # --- Visualisation ---
 visualization:
@@ -123,5 +131,6 @@ visualization:
   interval: 1
   show_matching: true
   show_2d: true
+  show_3d: false
   show_windows: true
   save_dir: null

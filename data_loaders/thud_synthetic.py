@@ -170,6 +170,7 @@ class THUDSyntheticLoader(DatasetLoader):
                     class_name=class_name,
                     mask=mask,
                     bbox_xyxy=bbox_xyxy,
+                    bbox_xyzxyz=_extract_bbox_xyzxyz(b3),
                 )
             )
         return instances
@@ -344,3 +345,33 @@ def _extract_mask(
     # 3-channel: ignore alpha
     target = np.array([b, g, r], dtype=np.uint8)
     return np.all(inst_img[:, :, :3] == target, axis=2)
+
+
+def _extract_bbox_xyzxyz(b3d: Dict[str, Any]) -> Optional[Tuple[float, ...]]:
+    """Best-effort parse of axis-aligned 3D bbox from THUD annotation entry."""
+    if not isinstance(b3d, dict):
+        return None
+
+    aabb = b3d.get("aabb_xyzmin_xyzmax")
+    if isinstance(aabb, (list, tuple)) and len(aabb) == 6:
+        return tuple(float(v) for v in aabb)
+
+    aabb = b3d.get("aabb")
+    if isinstance(aabb, dict):
+        mn = aabb.get("min")
+        mx = aabb.get("max")
+        if isinstance(mn, (list, tuple)) and isinstance(mx, (list, tuple)) and len(mn) == 3 and len(mx) == 3:
+            return (
+                float(mn[0]), float(mn[1]), float(mn[2]),
+                float(mx[0]), float(mx[1]), float(mx[2]),
+            )
+
+    center = b3d.get("center")
+    size = b3d.get("size")
+    if isinstance(center, dict) and isinstance(size, dict):
+        cx, cy, cz = float(center.get("x", 0.0)), float(center.get("y", 0.0)), float(center.get("z", 0.0))
+        sx, sy, sz = float(size.get("x", 0.0)), float(size.get("y", 0.0)), float(size.get("z", 0.0))
+        hx, hy, hz = sx * 0.5, sy * 0.5, sz * 0.5
+        return (cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz)
+
+    return None

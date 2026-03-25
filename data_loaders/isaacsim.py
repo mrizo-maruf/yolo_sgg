@@ -201,6 +201,7 @@ class IsaacSimLoader(DatasetLoader):
                     class_name=class_name,
                     mask=mask,
                     bbox_xyxy=bbox_xyxy,
+                    bbox_xyzxyz=_extract_bbox_xyzxyz(b3d),
                 )
             )
         return instances
@@ -291,3 +292,21 @@ def _infer_class_name(
         if isinstance(lab, dict) and lab:
             return str(next(iter(lab.values())))
     return "unknown"
+
+
+def _extract_bbox_xyzxyz(b3d: Dict[str, Any]) -> Optional[Tuple[float, ...]]:
+    """Best-effort parse of 3D AABB from a bbox_3d entry."""
+    aabb = b3d.get("aabb_xyzmin_xyzmax")
+    if isinstance(aabb, (list, tuple)) and len(aabb) == 6:
+        return tuple(float(v) for v in aabb)
+
+    aabb = b3d.get("aabb")
+    if isinstance(aabb, dict):
+        mn = aabb.get("min")
+        mx = aabb.get("max")
+        if isinstance(mn, (list, tuple)) and isinstance(mx, (list, tuple)) and len(mn) == 3 and len(mx) == 3:
+            return (
+                float(mn[0]), float(mn[1]), float(mn[2]),
+                float(mx[0]), float(mx[1]), float(mx[2]),
+            )
+    return None

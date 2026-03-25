@@ -22,13 +22,14 @@ Supported datasets: isaacsim, thud_synthetic, coda, scanetpp
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -41,7 +42,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from core.new_tracker import run_tracking
 from core.object_registry import GlobalObjectRegistry
-from core.types import TrackedFrame, TrackedObject
+from core.types import CameraIntrinsics, TrackedFrame
 from data_loaders import get_loader
 from depth_providers.factory import PROVIDER_CHOICES, build_depth_provider
 from metrics.tracking_metrics import (
@@ -54,9 +55,12 @@ from metrics.tracking_metrics import (
     save_metrics,
 )
 from benchmark.visualization import (
+    draw_boxes_with_labels,
     draw_masks_with_labels,
     plot_results,
+    visualize_3d_bboxes,
     visualize_matching,
+    visualize_matching_boxes,
 )
 
 
@@ -83,6 +87,7 @@ def benchmark_scene(
 
     n_frames = loader.get_num_frames()
     intrinsics = loader.get_intrinsics()
+    match_mode = _resolve_match_mode(cfg)
 
     print(f"\n{'=' * 60}")
     print(f"  BENCHMARK  –  {loader.scene_label}  (dataset: {dataset_name})")
@@ -91,11 +96,17 @@ def benchmark_scene(
     print(f"Intrinsics: fx={intrinsics.fx:.1f}  fy={intrinsics.fy:.1f}  "
           f"cx={intrinsics.cx:.1f}  cy={intrinsics.cy:.1f}  "
           f"image={intrinsics.width}x{intrinsics.height}")
+    print(f"Matching mode: {match_mode} ({_similarity_label(match_mode)})")
 
     # Quick check: does this loader support GT?
     test_gt = loader.get_gt_instances(0)
     if test_gt is None:
         print("[WARN] Loader returned no GT for frame 0 – metrics will be empty.")
+    elif match_mode == "bbox3d" and not any(g.bbox_xyzxyz is not None for g in test_gt):
+        raise ValueError(
+            "match_mode=bbox3d requires GT 3D AABBs, "
+            "but loader.get_gt_instances() returned none."
+        )
 
     # --- Object registry -----------------------------------------------------
     object_registry = GlobalObjectRegistry(
@@ -128,15 +139,24 @@ def benchmark_scene(
         gt_instances = loader.get_gt_instances(tf.frame_idx)
         if gt_instances is None:
             gt_instances = []
+        gt_instances = _prepare_gt_instances(gt_instances, tf, intrinsics, match_mode)
 
         # Build PredInstance list from TrackedFrame
-        pred_instances = _build_pred_instances(tf)
+        pred_instances = _build_pred_instances(
+            tf,
+            intrinsics=intrinsics,
+            match_mode=match_mode,
+            include_reprojected_masks=bool(
+                cfg.get("benchmark_include_reprojected_masks", False)
+            ),
+        )
 
         # Match GT ↔ pred
         mapping, ious = match_greedy(
             gt_instances,
             pred_instances,
             iou_threshold=float(cfg.get("iou_threshold", 0.3)),
+            match_mode=match_mode,
         )
 
         # Accumulate
@@ -160,11 +180,14 @@ def benchmark_scene(
                 tf.frame_idx,
                 vis_cfg,
                 vis_save,
+                match_mode=match_mode,
             )
 
     # --- Final metrics -------------------------------------------------------
     metrics = acc.compute()
-    print_summary(metrics, title=f"BENCHMARK – {loader.scene_label}")
+    metrics["match_mode"] = match_mode
+    metrics["similarity"] = _similarity_label(match_mode)
+    print_summary(metrics, title=f"BENCHMARK – {loader.scene_label} [{match_mode}]")
     return metrics
 
 
@@ -226,6 +249,7 @@ def benchmark_dataset(
 
     combined = {
         "dataset": dataset_name,
+        "match_mode": _resolve_match_mode(cfg),
         "per_scene": all_results,
         "overall": overall,
         "num_scenes": len(all_results),
@@ -257,19 +281,130 @@ def benchmark_dataset(
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_pred_instances(tf: TrackedFrame) -> List[PredInstance]:
-    """Convert ``TrackedFrame`` outputs to ``PredInstance`` list.
+def _resolve_match_mode(cfg) -> str:
+    mode = str(cfg.get("match_mode", "mask2d")).strip().lower()
+    valid = {"mask2d", "bbox2d", "bbox3d"}
+    if mode not in valid:
+        raise ValueError(f"Invalid match_mode '{mode}'. Choose one of: {sorted(valid)}")
+    return mode
 
-    Each ``TrackedObject`` in ``tf.objects`` has a ``global_id``,
-    ``class_name``, and ``mask``.  We pair these with the per-detection
-    masks from the YOLO output to get full-resolution masks.
-    """
+
+def _similarity_label(match_mode: str) -> str:
+    return {
+        "mask2d": "mask IoU",
+        "bbox2d": "2D bbox IoU",
+        "bbox3d": "3D AABB IoU",
+    }.get(match_mode, "IoU")
+
+
+def _bbox3d_to_xyzxyz(bbox) -> Optional[Tuple[float, ...]]:
+    if bbox is None:
+        return None
+    mn = getattr(bbox, "aabb_min", None)
+    mx = getattr(bbox, "aabb_max", None)
+    if mn is None or mx is None:
+        return None
+    return (
+        float(mn[0]), float(mn[1]), float(mn[2]),
+        float(mx[0]), float(mx[1]), float(mx[2]),
+    )
+
+
+def _corners_from_xyzxyz(b: Tuple[float, float, float, float, float, float]) -> np.ndarray:
+    xn, yn, zn, xx, yx, zx = b
+    return np.array([
+        [xn, yn, zn], [xn, yn, zx], [xn, yx, zn], [xn, yx, zx],
+        [xx, yn, zn], [xx, yn, zx], [xx, yx, zn], [xx, yx, zx],
+    ], dtype=np.float64)
+
+
+def _project_xyzxyz_to_2d(
+    bbox_xyzxyz: Optional[Tuple[float, ...]],
+    T_w_c: Optional[np.ndarray],
+    intrinsics: CameraIntrinsics,
+    min_depth: float = 1e-3,
+) -> Optional[Tuple[float, float, float, float]]:
+    if bbox_xyzxyz is None or T_w_c is None:
+        return None
+
+    try:
+        T_c_w = np.linalg.inv(T_w_c)
+    except np.linalg.LinAlgError:
+        return None
+
+    corners_w = _corners_from_xyzxyz(bbox_xyzxyz)
+    R = T_c_w[:3, :3]
+    t = T_c_w[:3, 3]
+    corners_c = (corners_w @ R.T) + t
+
+    valid = corners_c[:, 2] > min_depth
+    if not np.any(valid):
+        return None
+
+    z = corners_c[valid, 2]
+    u = corners_c[valid, 0] / z * intrinsics.fx + intrinsics.cx
+    v = corners_c[valid, 1] / z * intrinsics.fy + intrinsics.cy
+
+    x1 = float(np.clip(np.min(u), 0.0, intrinsics.width - 1))
+    y1 = float(np.clip(np.min(v), 0.0, intrinsics.height - 1))
+    x2 = float(np.clip(np.max(u), 0.0, intrinsics.width - 1))
+    y2 = float(np.clip(np.max(v), 0.0, intrinsics.height - 1))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _bbox_from_mask(mask: Optional[np.ndarray]) -> Optional[Tuple[float, float, float, float]]:
+    if mask is None:
+        return None
+    m = mask.astype(bool)
+    ys, xs = np.where(m)
+    if ys.size == 0 or xs.size == 0:
+        return None
+    return (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
+
+
+def _prepare_gt_instances(
+    gt_instances: List[GTInstance],
+    tf: TrackedFrame,
+    intrinsics: CameraIntrinsics,
+    match_mode: str,
+) -> List[GTInstance]:
+    prepared: List[GTInstance] = []
+    for gt in gt_instances:
+        bbox_xyxy = gt.bbox_xyxy
+        if bbox_xyxy is None and gt.bbox_xyzxyz is not None and match_mode in {"bbox2d", "bbox3d"}:
+            bbox_xyxy = _project_xyzxyz_to_2d(gt.bbox_xyzxyz, tf.T_w_c, intrinsics)
+        if bbox_xyxy is None and gt.mask is not None and match_mode == "bbox2d":
+            bbox_xyxy = _bbox_from_mask(gt.mask)
+        prepared.append(GTInstance(
+            track_id=gt.track_id,
+            class_name=gt.class_name,
+            mask=gt.mask,
+            bbox_xyxy=bbox_xyxy,
+            bbox_xyzxyz=gt.bbox_xyzxyz,
+        ))
+    return prepared
+
+
+def _build_pred_instances(
+    tf: TrackedFrame,
+    intrinsics: CameraIntrinsics,
+    match_mode: str,
+    include_reprojected_masks: bool = False,
+) -> List[PredInstance]:
+    """Convert ``TrackedFrame`` outputs to ``PredInstance`` list."""
     preds: List[PredInstance] = []
     for obj in tf.objects:
-        # Use the tracked object's own mask if available
-        mask = obj.mask
+        # Reprojection-only masks are stale, so keep old behavior only for mask2d.
+        if (
+            match_mode == "mask2d"
+            and not include_reprojected_masks
+            and int(obj.yolo_id) < 0
+        ):
+            continue
 
-        # Fall back: try to find in tf.masks via yolo_id matching
+        mask = obj.mask
         if mask is None and tf.track_ids is not None and tf.masks:
             yolo_tid = obj.yolo_id
             if yolo_tid is not None and yolo_tid >= 0:
@@ -277,10 +412,17 @@ def _build_pred_instances(tf: TrackedFrame) -> List[PredInstance]:
                 if len(idxs) > 0 and idxs[0] < len(tf.masks):
                     mask = tf.masks[idxs[0]]
 
+        bbox_xyzxyz = _bbox3d_to_xyzxyz(obj.bbox_3d)
+        bbox_xyxy = _project_xyzxyz_to_2d(bbox_xyzxyz, tf.T_w_c, intrinsics)
+        if bbox_xyxy is None and mask is not None:
+            bbox_xyxy = _bbox_from_mask(mask)
+
         preds.append(PredInstance(
             pred_id=obj.global_id,
             class_name=obj.class_name,
             mask=mask,
+            bbox_xyxy=bbox_xyxy,
+            bbox_xyzxyz=bbox_xyzxyz,
         ))
     return preds
 
@@ -324,6 +466,7 @@ def _visualize_frame(
     frame_idx: int,
     vis_cfg: dict,
     vis_save: Optional[str],
+    match_mode: str,
 ) -> None:
     """Render 2-D matching + tracking panels."""
     import cv2 as cv
@@ -334,19 +477,66 @@ def _visualize_frame(
 
     save_match = None
     save_2d = None
+    save_mode_dir = vis_save
     if vis_save:
-        save_match = os.path.join(vis_save, f"matching_{frame_idx:06d}.png")
-        save_2d = os.path.join(vis_save, f"tracking_2d_{frame_idx:06d}.png")
+        save_mode_dir = os.path.join(vis_save, match_mode)
+        os.makedirs(save_mode_dir, exist_ok=True)
+        save_match = os.path.join(save_mode_dir, f"matching_{frame_idx:06d}.png")
+        save_2d = os.path.join(save_mode_dir, f"tracking_2d_{frame_idx:06d}.png")
 
     show = vis_cfg.get("show_windows", True)
 
+    if match_mode == "mask2d":
+        if vis_cfg.get("show_matching", True):
+            visualize_matching(
+                rgb=rgb,
+                gt_masks=[g.mask for g in gt_instances],
+                gt_ids=[g.track_id for g in gt_instances],
+                gt_labels=[g.class_name for g in gt_instances],
+                pred_masks=[p.mask for p in pred_instances],
+                pred_ids=[p.pred_id for p in pred_instances],
+                pred_labels=[p.class_name or "" for p in pred_instances],
+                mapping=mapping,
+                ious=ious,
+                frame_idx=frame_idx,
+                save_path=save_match,
+                show=show,
+            )
+
+        if vis_cfg.get("show_2d", True):
+            labels = [f"G:{p.pred_id} {p.class_name or ''}" for p in pred_instances]
+            overlay = draw_masks_with_labels(
+                rgb,
+                [p.mask for p in pred_instances],
+                [p.pred_id for p in pred_instances],
+                labels,
+                title=f"Frame {frame_idx}",
+            )
+            if show:
+                import matplotlib.pyplot as plt
+                plt.figure(figsize=(14, 8))
+                plt.imshow(cv.cvtColor(overlay, cv.COLOR_BGR2RGB))
+                plt.title(f"Tracking – Frame {frame_idx}")
+                plt.axis("off")
+                plt.tight_layout()
+                if save_2d:
+                    plt.savefig(save_2d, dpi=150, bbox_inches="tight")
+                plt.show()
+            elif save_2d:
+                cv.imwrite(save_2d, overlay)
+        return
+
+    # bbox2d / bbox3d visualizations
+    gt_boxes = [g.bbox_xyxy for g in gt_instances]
+    pred_boxes = [p.bbox_xyxy for p in pred_instances]
+
     if vis_cfg.get("show_matching", True):
-        visualize_matching(
+        visualize_matching_boxes(
             rgb=rgb,
-            gt_masks=[g.mask for g in gt_instances],
+            gt_boxes=gt_boxes,
             gt_ids=[g.track_id for g in gt_instances],
             gt_labels=[g.class_name for g in gt_instances],
-            pred_masks=[p.mask for p in pred_instances],
+            pred_boxes=pred_boxes,
             pred_ids=[p.pred_id for p in pred_instances],
             pred_labels=[p.class_name or "" for p in pred_instances],
             mapping=mapping,
@@ -358,18 +548,18 @@ def _visualize_frame(
 
     if vis_cfg.get("show_2d", True):
         labels = [f"G:{p.pred_id} {p.class_name or ''}" for p in pred_instances]
-        overlay = draw_masks_with_labels(
-            rgb,
-            [p.mask for p in pred_instances],
-            [p.pred_id for p in pred_instances],
-            labels,
+        overlay = draw_boxes_with_labels(
+            rgb=rgb,
+            boxes=pred_boxes,
+            ids=[p.pred_id for p in pred_instances],
+            labels=labels,
             title=f"Frame {frame_idx}",
         )
         if show:
             import matplotlib.pyplot as plt
             plt.figure(figsize=(14, 8))
             plt.imshow(cv.cvtColor(overlay, cv.COLOR_BGR2RGB))
-            plt.title(f"Tracking – Frame {frame_idx}")
+            plt.title(f"Tracking ({match_mode}) – Frame {frame_idx}")
             plt.axis("off")
             plt.tight_layout()
             if save_2d:
@@ -377,6 +567,73 @@ def _visualize_frame(
             plt.show()
         elif save_2d:
             cv.imwrite(save_2d, overlay)
+
+    if match_mode == "bbox3d" and save_mode_dir:
+        _save_3d_frame_artifacts(
+            out_dir=save_mode_dir,
+            frame_idx=frame_idx,
+            gt_instances=gt_instances,
+            pred_instances=pred_instances,
+            mapping=mapping,
+            ious=ious,
+        )
+
+    if match_mode == "bbox3d" and show and vis_cfg.get("show_3d", False):
+        gt_bboxes = [
+            {"track_id": g.track_id, "aabb": list(g.bbox_xyzxyz)}
+            for g in gt_instances
+            if g.bbox_xyzxyz is not None
+        ]
+        pred_bboxes = [
+            {"track_id": p.pred_id, "aabb": list(p.bbox_xyzxyz)}
+            for p in pred_instances
+            if p.bbox_xyzxyz is not None
+        ]
+        if gt_bboxes or pred_bboxes:
+            visualize_3d_bboxes(
+                gt_bboxes=gt_bboxes,
+                pred_bboxes=pred_bboxes,
+                frame_idx=frame_idx,
+                window_title=f"3D Matching – Frame {frame_idx}",
+            )
+
+
+def _save_3d_frame_artifacts(
+    out_dir: str,
+    frame_idx: int,
+    gt_instances: List[GTInstance],
+    pred_instances: List[PredInstance],
+    mapping: Dict[int, int],
+    ious: Dict[int, float],
+) -> None:
+    art_dir = Path(out_dir) / "bbox3d_artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "frame_idx": int(frame_idx),
+        "mapping": {str(k): int(v) for k, v in mapping.items()},
+        "ious": {str(k): float(v) for k, v in ious.items()},
+        "gt": [
+            {
+                "track_id": int(g.track_id),
+                "class_name": str(g.class_name),
+                "bbox_xyzxyz": list(g.bbox_xyzxyz) if g.bbox_xyzxyz is not None else None,
+                "bbox_xyxy": list(g.bbox_xyxy) if g.bbox_xyxy is not None else None,
+            }
+            for g in gt_instances
+        ],
+        "pred": [
+            {
+                "pred_id": int(p.pred_id),
+                "class_name": str(p.class_name) if p.class_name is not None else "",
+                "bbox_xyzxyz": list(p.bbox_xyzxyz) if p.bbox_xyzxyz is not None else None,
+                "bbox_xyxy": list(p.bbox_xyxy) if p.bbox_xyxy is not None else None,
+            }
+            for p in pred_instances
+        ],
+    }
+    out_path = art_dir / f"frame_{frame_idx:06d}.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
 
 def _print_aggregate(overall: Dict, keys: List[str]) -> None:
@@ -534,6 +791,13 @@ Examples
                    choices=list(PROVIDER_CHOICES),
                    help="Depth provider type (overrides config). "
                         "Default from config: 'gt'.")
+    p.add_argument(
+        "--match_mode",
+        type=str,
+        default=None,
+        choices=["mask2d", "bbox2d", "bbox3d"],
+        help="Single matching mode for the run.",
+    )
 
     # Model overrides
     p.add_argument("--yolo_model", type=str, default=None,
@@ -578,6 +842,8 @@ def main() -> int:
         cfg.is_open_vocabulary = args.is_open_vocab
     if args.depth_provider:
         cfg.depth_provider = args.depth_provider
+    if args.match_mode:
+        cfg.match_mode = args.match_mode
     if args.vis:
         cfg.visualization = cfg.get("visualization", {})
         cfg.visualization.enabled = True

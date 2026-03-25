@@ -270,14 +270,16 @@ def run_tracking(
                 observation_count=reg_obj.get("observation_count", 0),
             ))
 
-        object_registry.end_frame(matched_gids)
-
         # Reprojection-visible objects
-        detected_gids = {o.global_id for o in frame_objs}
+        detected_gids = matched_gids
         extra = object_registry.get_reprojection_visible(
             T_w_c, intrinsics, detected_gids,
         )
-        # frame_objs.extend(extra)
+        visible_gids = set(matched_gids)
+        if extra:
+            frame_objs.extend(extra)
+            visible_gids.update(o.global_id for o in extra)
+        object_registry.end_frame(visible_gids)
         timings["tracking_3d_ms"] = (time.perf_counter() - t0) * 1000
 
         yield TrackedFrame(

@@ -126,8 +126,20 @@ def main() -> int:
     ssg_cfg = OmegaConf.to_container(cfg.get("ssg", {}), resolve=True)
     rerun_vis = None
     if ssg_cfg.get("rerun", False):
-        from rerun_utils import RerunVisualizer
-        rerun_vis = RerunVisualizer(recording_id=f"yolo_ssg_{dataset_name}")
+        from rerun_utils import RerunVisualizer, _build_axis_remap_matrix
+
+        apply_isaac_axis_fix = bool(ssg_cfg.get("isaac_axis_fix", dataset_name == "isaacsim"))
+        axis_remap = None
+        if apply_isaac_axis_fix and dataset_name == "isaacsim":
+            # Isaac/world is typically RFU (Z-up), while this Rerun setup uses RDF.
+            # Remap RFU -> RDF: (x, y, z) -> (x, -z, y).
+            axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
+            print("[Rerun] Applying Isaac axis remap (RFU -> RDF).")
+
+        rerun_vis = RerunVisualizer(
+            recording_id=f"yolo_ssg_{dataset_name}",
+            axis_remap=axis_remap,
+        )
         rerun_vis.init(
             img_w=intrinsics.width,
             img_h=intrinsics.height,
