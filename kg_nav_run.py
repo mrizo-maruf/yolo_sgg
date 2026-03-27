@@ -669,7 +669,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="KG-Nav: Track objects, build scene graph once at the end.",
     )
     
-    p.add_argument("--path", default=f"/home/yehia/Downloads/kg_nav_2_IsaacSimData/{scene_name}",
+    p.add_argument("--path", default=f"/home/maribjonov_mr/FastSSD/kg_nav_IsaacSimData/{scene_name}",
                    help="Path to the scene directory.")
     p.add_argument("--dataset", type=str, default=None,
                    choices=["isaacsim", "thud_synthetic", "thud_real", "code", "any_scene"],
@@ -692,6 +692,6 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Print VL-SAT relation histogram summary.")
     return p
 
-scene_name = "scene_8"
+scene_name = "scene_0"
 if __name__ == "__main__":
     sys.exit(main())

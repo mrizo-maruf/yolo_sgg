@@ -7,8 +7,8 @@
 depth_provider: gt
 
 # --- YOLO model ---
-is_open_vocabulary: false
-yolo_model: "yoloe-11l-seg-pf.pt"
+is_open_vocabulary: true
+yolo_model: "yoloe-11l-seg.pt"
 conf: 0.25
 iou: 0.5
 verbose: false
