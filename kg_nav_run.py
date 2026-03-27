@@ -170,7 +170,14 @@ def edges_bs(all_objs: dict, T_w_c: np.ndarray) -> dict:
     return bs_edges
 
 
-def edges_vlsat(all_objs: dict, vlsat_predictor) -> dict:
+def edges_vlsat(
+    all_objs: dict,
+    vlsat_predictor,
+    relation_threshold: float = 0.35,
+    max_relations_per_pair: int = 3,
+    force_single_label: bool = False,
+    debug_scores: bool = False,
+) -> dict:
     """VL-SAT neural edge predictor.
 
     Extracts accumulated point clouds from the registry, converts the
@@ -182,13 +189,22 @@ def edges_vlsat(all_objs: dict, vlsat_predictor) -> dict:
         all_objs:  dict from ``object_registry.get_all_objects()``.
         vlsat_predictor:  initialised ``EdgePredictor`` instance.
 
+    Decoding:
+        MMGNet is commonly trained with ``multi_rel_outputs=true`` (multi-label),
+        so each edge can have multiple valid relations. In that case we keep all
+        relations with score >= ``relation_threshold`` (optionally capped by
+        ``max_relations_per_pair``). If no relation passes threshold, we skip
+        the edge ("none").
+
+        If ``force_single_label=True`` (or model is single-label), we use
+        ``argmax`` decoding for one relation per directed pair.
+
     Returns:
         dict  node_id -> list of {"target_id": int, "relation_type": str}
     """
     # Collect objects with enough accumulated points
     valid_ids: list[int] = []
     point_clouds: list[np.ndarray] = []
-    class_names: list[str] = []
 
     for gid, obj in all_objs.items():
         pts = obj.get('points_accumulated')
@@ -200,7 +216,6 @@ def edges_vlsat(all_objs: dict, vlsat_predictor) -> dict:
             pts_conv = pts[:, [0, 2, 1]].copy()   # Y ↔ Z
             pts_conv[:, 2] = -pts_conv[:, 2]       # negate new-Z (was Y)
             point_clouds.append(pts_conv)
-            class_names.append(obj.get('class_name', 'unknown'))
 
     vlsat_edges: dict[int, list] = {gid: [] for gid in all_objs}
 
@@ -208,7 +223,12 @@ def edges_vlsat(all_objs: dict, vlsat_predictor) -> dict:
         print("[edges_vlsat] Need ≥2 objects with point clouds, skipping.")
         return vlsat_edges
 
-    num_points = vlsat_predictor.config.dataset.num_points   # 4096
+    num_points = vlsat_predictor.config.dataset.num_points
+    model_multi_rel = bool(getattr(vlsat_predictor.config.MODEL, "multi_rel_outputs", False))
+    decode_multi_rel = model_multi_rel and not force_single_label
+
+    if max_relations_per_pair <= 0:
+        max_relations_per_pair = 1
 
     obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids = \
         vlsat_predictor.preprocess_poinclouds(point_clouds, num_points)
@@ -217,24 +237,46 @@ def edges_vlsat(all_objs: dict, vlsat_predictor) -> dict:
         obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids,
     )
 
+    relation_hist: dict[str, int] = {}
+
     # Convert to per-node edge dict
     for k in range(predicted_relations.shape[0]):
         src_idx = edge_indices[0][k].item()
         tgt_idx = edge_indices[1][k].item()
-
-        rel_id = torch.argmax(predicted_relations[k]).item()
-        rel_name = vlsat_predictor.rel_id_to_rel_name.get(rel_id, "none")
-
-        if rel_name == "none":
-            continue
-
         src_gid = valid_ids[src_idx]
         tgt_gid = valid_ids[tgt_idx]
+        rel_scores = predicted_relations[k]
 
-        vlsat_edges[src_gid].append({
-            "target_id": int(tgt_gid),
-            "relation_type": rel_name,
-        })
+        if decode_multi_rel:
+            candidate_rel_ids = torch.where(rel_scores >= relation_threshold)[0].tolist()
+            if not candidate_rel_ids:
+                continue
+            candidate_rel_ids = sorted(
+                candidate_rel_ids,
+                key=lambda rid: float(rel_scores[rid]),
+                reverse=True,
+            )[:max_relations_per_pair]
+        else:
+            candidate_rel_ids = [int(torch.argmax(rel_scores).item())]
+
+        for rel_id in candidate_rel_ids:
+            rel_name = vlsat_predictor.rel_id_to_rel_name.get(rel_id, "none")
+            if rel_name == "none":
+                continue
+            vlsat_edges[src_gid].append({
+                "target_id": int(tgt_gid),
+                "relation_type": rel_name,
+            })
+            relation_hist[rel_name] = relation_hist.get(rel_name, 0) + 1
+
+    if debug_scores:
+        top_hist = sorted(relation_hist.items(), key=lambda x: x[1], reverse=True)[:10]
+        print(
+            "[edges_vlsat] decode="
+            f"{'multi-label' if decode_multi_rel else 'argmax'} "
+            f"(threshold={relation_threshold:.2f}, max_per_pair={max_relations_per_pair}) "
+            f"top relations={top_hist}"
+        )
 
     return vlsat_edges
 
@@ -335,6 +377,14 @@ def main() -> int:
         cfg.ssg.save_graph = True
     if args.vlsat:
         cfg.ssg.use_vlsat = True
+    if args.vlsat_rel_thr is not None:
+        cfg.ssg.vlsat_relation_threshold = float(args.vlsat_rel_thr)
+    if args.vlsat_max_rels is not None:
+        cfg.ssg.vlsat_max_relations_per_pair = int(args.vlsat_max_rels)
+    if args.vlsat_force_single_label:
+        cfg.ssg.vlsat_force_single_label = True
+    if args.vlsat_debug_scores:
+        cfg.ssg.vlsat_debug_scores = True
 
     dataset_name = cfg.get("dataset", args.dataset or "isaacsim")
     yutils.configure_globals(cfg)
@@ -467,7 +517,14 @@ def main() -> int:
         print("Initialising VL-SAT edge predictor …")
         vlsat_pred = _init_vlsat_predictor()
         t0 = time.perf_counter()
-        vlsat_edge_map = edges_vlsat(all_objs, vlsat_pred)
+        vlsat_edge_map = edges_vlsat(
+            all_objs,
+            vlsat_pred,
+            relation_threshold=float(ssg_cfg.get("vlsat_relation_threshold", 0.35)),
+            max_relations_per_pair=int(ssg_cfg.get("vlsat_max_relations_per_pair", 3)),
+            force_single_label=bool(ssg_cfg.get("vlsat_force_single_label", False)),
+            debug_scores=bool(ssg_cfg.get("vlsat_debug_scores", False)),
+        )
         vlsat_time = (time.perf_counter() - t0) * 1000
         n_vlsat = sum(len(v) for v in vlsat_edge_map.values())
         print(f"  VL-SAT edges: {n_vlsat}  ({vlsat_time:.2f}ms)")
@@ -537,6 +594,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-graph", action="store_true", help="Save final scene graph as JSON.")
     p.add_argument("--vlsat", action="store_true",
                    help="Run VL-SAT neural edge predictor (requires GPU).")
+    p.add_argument("--vlsat-rel-thr", type=float, default=None,
+                   help="VL-SAT relation threshold for multi-label decoding (default from config).")
+    p.add_argument("--vlsat-max-rels", type=int, default=None,
+                   help="Max VL-SAT relations to keep per directed pair (default from config).")
+    p.add_argument("--vlsat-force-single-label", action="store_true",
+                   help="Force old argmax decoding for VL-SAT (one relation per pair).")
+    p.add_argument("--vlsat-debug-scores", action="store_true",
+                   help="Print VL-SAT relation histogram summary.")
     return p
 
 scene_name = "scene_8"
