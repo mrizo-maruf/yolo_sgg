@@ -290,9 +290,9 @@ def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
             "track_id": int(node_id),
             "class_name": class_name,
             "bbox_3d": _bbox_to_serializable(bbox_3d),
-            # "edges_sv": edges_list,
+            "edges_sv": edges_list,
             "edges_bs": node_bs,
-            # "edges_vlsat": node_vlsat,
+            "edges_vlsat": node_vlsat,
         }
 
     output = {
