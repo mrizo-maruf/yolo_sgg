@@ -12,7 +12,7 @@ import torch
 class VLSATEdgePredictorService:
     """
     One-time initialized VL-SAT inference service.
-    Accepts object bounding boxes, builds synthetic parallelepiped point clouds,
+    Accepts object point clouds (preferred) or object bounding boxes,
     runs VL-SAT once per scene, and exposes directed pair relation names.
     """
 
@@ -139,24 +139,19 @@ class VLSATEdgePredictorService:
         return obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids
 
     @torch.no_grad()
-    def predict_pair_relations_from_bboxes(
+    def predict_pair_relations_from_pointclouds(
         self,
-        centers_xyz: np.ndarray,
-        extents_xyz: np.ndarray,
+        point_clouds_xyz: List[np.ndarray],
     ) -> Dict[Tuple[int, int], str]:
         """
         Returns directed pair relation map: (src_idx, dst_idx) -> relation_name.
+        Uses provided object point clouds directly.
         """
-        num_obj = centers_xyz.shape[0]
-        if num_obj < 2:
+        if len(point_clouds_xyz) < 2:
             return {}
 
-        points: List[np.ndarray] = []
-        for i in range(num_obj):
-            points.append(self._sample_bbox_parallelepiped(centers_xyz[i], extents_xyz[i], self.num_points))
-
         obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids = self._preprocess_pointclouds(
-            points, self.num_points
+            point_clouds_xyz, self.num_points
         )
 
         device = self.config.DEVICE
@@ -186,13 +181,13 @@ class VLSATEdgePredictorService:
         return out
 
     @torch.no_grad()
-    def predict_pair_relation_ids_from_bboxes(
+    def predict_pair_relations_from_bboxes(
         self,
         centers_xyz: np.ndarray,
         extents_xyz: np.ndarray,
-    ) -> Dict[Tuple[int, int], int]:
+    ) -> Dict[Tuple[int, int], str]:
         """
-        Returns directed pair relation-id map: (src_idx, dst_idx) -> rel_id (0..num_rel-1).
+        Returns directed pair relation map: (src_idx, dst_idx) -> relation_name.
         """
         num_obj = centers_xyz.shape[0]
         if num_obj < 2:
@@ -201,9 +196,22 @@ class VLSATEdgePredictorService:
         points: List[np.ndarray] = []
         for i in range(num_obj):
             points.append(self._sample_bbox_parallelepiped(centers_xyz[i], extents_xyz[i], self.num_points))
+        return self.predict_pair_relations_from_pointclouds(points)
+
+    @torch.no_grad()
+    def predict_pair_relation_ids_from_pointclouds(
+        self,
+        point_clouds_xyz: List[np.ndarray],
+    ) -> Dict[Tuple[int, int], int]:
+        """
+        Returns directed pair relation-id map: (src_idx, dst_idx) -> rel_id (0..num_rel-1).
+        Uses provided object point clouds directly.
+        """
+        if len(point_clouds_xyz) < 2:
+            return {}
 
         obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids = self._preprocess_pointclouds(
-            points, self.num_points
+            point_clouds_xyz, self.num_points
         )
 
         device = self.config.DEVICE
@@ -230,3 +238,21 @@ class VLSATEdgePredictorService:
             # our convention reserves 0 for "none / not-computed".
             out[(src_i, dst_i)] = int(rel_ids[k]) + 1
         return out
+
+    @torch.no_grad()
+    def predict_pair_relation_ids_from_bboxes(
+        self,
+        centers_xyz: np.ndarray,
+        extents_xyz: np.ndarray,
+    ) -> Dict[Tuple[int, int], int]:
+        """
+        Returns directed pair relation-id map: (src_idx, dst_idx) -> rel_id (0..num_rel-1).
+        """
+        num_obj = centers_xyz.shape[0]
+        if num_obj < 2:
+            return {}
+
+        points: List[np.ndarray] = []
+        for i in range(num_obj):
+            points.append(self._sample_bbox_parallelepiped(centers_xyz[i], extents_xyz[i], self.num_points))
+        return self.predict_pair_relation_ids_from_pointclouds(points)

@@ -176,6 +176,8 @@ def edges_vlsat(
     relation_threshold: float = 0.35,
     max_relations_per_pair: int = 3,
     force_single_label: bool = False,
+    ensure_pairwise_edges: bool = True,
+    min_points_per_object: int = 10,
     debug_scores: bool = False,
 ) -> dict:
     """VL-SAT neural edge predictor.
@@ -205,10 +207,11 @@ def edges_vlsat(
     # Collect objects with enough accumulated points
     valid_ids: list[int] = []
     point_clouds: list[np.ndarray] = []
+    skipped_for_points = 0
 
     for gid, obj in all_objs.items():
         pts = obj.get('points_accumulated')
-        if pts is not None and len(pts) >= 10:
+        if pts is not None and len(pts) >= min_points_per_object:
             valid_ids.append(gid)
             # Axis convention: our pipeline stores world-frame points
             # with Z-up (IsaacSim).  3RScan / VL-SAT uses Y-up.
@@ -216,11 +219,17 @@ def edges_vlsat(
             pts_conv = pts[:, [0, 2, 1]].copy()   # Y ↔ Z
             pts_conv[:, 2] = -pts_conv[:, 2]       # negate new-Z (was Y)
             point_clouds.append(pts_conv)
+        else:
+            skipped_for_points += 1
 
     vlsat_edges: dict[int, list] = {gid: [] for gid in all_objs}
 
     if len(valid_ids) < 2:
-        print("[edges_vlsat] Need ≥2 objects with point clouds, skipping.")
+        print(
+            "[edges_vlsat] Need ≥2 objects with enough points "
+            f"(min_points_per_object={min_points_per_object}), "
+            f"valid={len(valid_ids)}, skipped={skipped_for_points}. Skipping."
+        )
         return vlsat_edges
 
     num_points = vlsat_predictor.config.dataset.num_points
@@ -250,7 +259,10 @@ def edges_vlsat(
         if decode_multi_rel:
             candidate_rel_ids = torch.where(rel_scores >= relation_threshold)[0].tolist()
             if not candidate_rel_ids:
-                continue
+                if ensure_pairwise_edges:
+                    candidate_rel_ids = [int(torch.argmax(rel_scores).item())]
+                else:
+                    continue
             candidate_rel_ids = sorted(
                 candidate_rel_ids,
                 key=lambda rid: float(rel_scores[rid]),
@@ -274,7 +286,10 @@ def edges_vlsat(
         print(
             "[edges_vlsat] decode="
             f"{'multi-label' if decode_multi_rel else 'argmax'} "
-            f"(threshold={relation_threshold:.2f}, max_per_pair={max_relations_per_pair}) "
+            f"(threshold={relation_threshold:.2f}, max_per_pair={max_relations_per_pair}, "
+            f"ensure_pairwise_edges={ensure_pairwise_edges}, "
+            f"min_points_per_object={min_points_per_object}, "
+            f"valid_objs={len(valid_ids)}, skipped_objs={skipped_for_points}) "
             f"top relations={top_hist}"
         )
 
@@ -349,6 +364,44 @@ def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
     print(f"\nScene graph saved to {out_path}\n")
 
 
+def _parse_edges_cli(raw: str) -> set[str]:
+    """Parse CLI edge selection string into canonical keys: {sv, bs, vlsat}."""
+    tokens: list[str] = []
+    for chunk in str(raw).split(","):
+        for part in chunk.split():
+            p = part.strip().lower()
+            if p:
+                tokens.append(p)
+
+    if not tokens:
+        raise ValueError("empty edge selection")
+
+    alias = {
+        "all": "all",
+        "*": "all",
+        "sv": "sv",
+        "sceneverse": "sv",
+        "scenverse": "sv",
+        "scene-verse": "sv",
+        "basic": "sv",
+        "bs": "bs",
+        "baseline": "bs",
+        "vlsat": "vlsat",
+        "vl-sat": "vlsat",
+    }
+
+    selected: set[str] = set()
+    for t in tokens:
+        if t not in alias:
+            allowed = "all, bs, sv, vlsat (comma-separated)"
+            raise ValueError(f"Unknown edge selector '{t}'. Allowed: {allowed}")
+        canon = alias[t]
+        if canon == "all":
+            return {"sv", "bs", "vlsat"}
+        selected.add(canon)
+    return selected
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -375,8 +428,17 @@ def main() -> int:
         cfg.ssg.print_tracking_info = True
     if args.save_graph:
         cfg.ssg.save_graph = True
-    if args.vlsat:
-        cfg.ssg.use_vlsat = True
+    if args.edges is not None:
+        try:
+            selected_edges = _parse_edges_cli(args.edges)
+        except ValueError as exc:
+            raise SystemExit(f"--edges: {exc}") from exc
+        cfg.ssg.basic_edges = "sv" in selected_edges
+        cfg.ssg.baseline_edges = "bs" in selected_edges
+        cfg.ssg.vlsat_edges = "vlsat" in selected_edges
+        # Backward-compat key used in this script:
+        cfg.ssg.use_vlsat = cfg.ssg.vlsat_edges
+
     if args.vlsat_rel_thr is not None:
         cfg.ssg.vlsat_relation_threshold = float(args.vlsat_rel_thr)
     if args.vlsat_max_rels is not None:
@@ -502,18 +564,28 @@ def main() -> int:
             'visible_current_frame': True,
         })
 
-    t0 = time.perf_counter()
-    edges(graph, frame_objs, last_T_w_c, last_depth_m)
-    sv_time = (time.perf_counter() - t0) * 1000
+    sv_time = 0.0
+    if ssg_cfg.get("basic_edges", True):
+        t0 = time.perf_counter()
+        edges(graph, frame_objs, last_T_w_c, last_depth_m)
+        sv_time = (time.perf_counter() - t0) * 1000
+    else:
+        print("SceneVerse edges disabled.")
 
-    t0 = time.perf_counter()
-    bs_edge_map = edges_bs(all_objs, last_T_w_c)
-    bs_time = (time.perf_counter() - t0) * 1000
+    bs_edge_map: dict | None = None
+    bs_time = 0.0
+    if ssg_cfg.get("baseline_edges", True):
+        t0 = time.perf_counter()
+        bs_edge_map = edges_bs(all_objs, last_T_w_c)
+        bs_time = (time.perf_counter() - t0) * 1000
+    else:
+        print("Baseline edges disabled.")
 
     # --- VL-SAT neural edges (optional) -------------------------------------
     vlsat_edge_map: dict | None = None
     vlsat_time = 0.0
-    if ssg_cfg.get("use_vlsat", False):
+    use_vlsat = bool(ssg_cfg.get("use_vlsat", ssg_cfg.get("vlsat_edges", False)))
+    if use_vlsat:
         print("Initialising VL-SAT edge predictor …")
         vlsat_pred = _init_vlsat_predictor()
         t0 = time.perf_counter()
@@ -523,21 +595,36 @@ def main() -> int:
             relation_threshold=float(ssg_cfg.get("vlsat_relation_threshold", 0.35)),
             max_relations_per_pair=int(ssg_cfg.get("vlsat_max_relations_per_pair", 3)),
             force_single_label=bool(ssg_cfg.get("vlsat_force_single_label", False)),
+            ensure_pairwise_edges=bool(ssg_cfg.get("vlsat_ensure_pairwise_edges", True)),
+            min_points_per_object=int(ssg_cfg.get("vlsat_min_points_per_object", 10)),
             debug_scores=bool(ssg_cfg.get("vlsat_debug_scores", False)),
         )
         vlsat_time = (time.perf_counter() - t0) * 1000
         n_vlsat = sum(len(v) for v in vlsat_edge_map.values())
         print(f"  VL-SAT edges: {n_vlsat}  ({vlsat_time:.2f}ms)")
 
-    timing_parts = f"SV={sv_time:.2f}ms  BS={bs_time:.2f}ms"
+    timing_parts_parts = []
+    if ssg_cfg.get("basic_edges", True):
+        timing_parts_parts.append(f"SV={sv_time:.2f}ms")
+    if ssg_cfg.get("baseline_edges", True):
+        timing_parts_parts.append(f"BS={bs_time:.2f}ms")
     if vlsat_edge_map is not None:
-        timing_parts += f"  VLSAT={vlsat_time:.2f}ms"
-    edge_counts = (f"SV edges: {graph.number_of_edges()}  |  "
-                   f"BS edges: {sum(len(v) for v in bs_edge_map.values())}")
+        timing_parts_parts.append(f"VLSAT={vlsat_time:.2f}ms")
+
+    edge_count_parts = []
+    if ssg_cfg.get("basic_edges", True):
+        edge_count_parts.append(f"SV edges: {graph.number_of_edges()}")
+    if bs_edge_map is not None:
+        edge_count_parts.append(f"BS edges: {sum(len(v) for v in bs_edge_map.values())}")
     if vlsat_edge_map is not None:
-        edge_counts += f"  |  VLSAT edges: {sum(len(v) for v in vlsat_edge_map.values())}"
-    print(f"Edge computation: {timing_parts}  |  "
-          f"Nodes: {graph.number_of_nodes()}  |  {edge_counts}")
+        edge_count_parts.append(f"VLSAT edges: {sum(len(v) for v in vlsat_edge_map.values())}")
+
+    timing_parts = "  ".join(timing_parts_parts) if timing_parts_parts else "none"
+    edge_counts = "  |  ".join(edge_count_parts) if edge_count_parts else "none"
+    print(
+        f"Edge computation: {timing_parts}  |  "
+        f"Nodes: {graph.number_of_nodes()}  |  {edge_counts}"
+    )
 
     # ── Visualize ────────────────────────────────────────────────────────────
     if ssg_cfg.get("vis_graph", False):
@@ -592,8 +679,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-resources", action="store_true", help="Print per-frame resource usage.")
     p.add_argument("--print-tracking", action="store_true", help="Print per-frame tracking info.")
     p.add_argument("--save-graph", action="store_true", help="Save final scene graph as JSON.")
-    p.add_argument("--vlsat", action="store_true",
-                   help="Run VL-SAT neural edge predictor (requires GPU).")
+    p.add_argument("--edges", type=str, default=None,
+                   help="Edge predictors to run: all | bs | sv | vlsat, or comma-separated combos "
+                        "(e.g. bs,sv).")
     p.add_argument("--vlsat-rel-thr", type=float, default=None,
                    help="VL-SAT relation threshold for multi-label decoding (default from config).")
     p.add_argument("--vlsat-max-rels", type=int, default=None,

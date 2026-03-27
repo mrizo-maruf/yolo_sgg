@@ -16,6 +16,11 @@ vertical_aperture: 45
 min_depth: 0.01
 max_depth: 10.0
 png_max_value: 65535
+# Pose indexing mode:
+#   auto         -> infer from frame/depth numbering (000000 => index, 000001 => frame_number)
+#   index        -> pose line i maps to frame i
+#   frame_number -> pose line (frame_number - 1)
+pose_lookup_mode: auto
 
 # --- Offline Pi3 depth (for depth_provider: pi3_offline) ---
 # Pi3 output dir from Pi3_for_yolo_sgg/run.py
@@ -27,6 +32,7 @@ pi3_offline_transform_path: "pi3_full_to_world_transform.json"
 # If null, provider reads png_depth_scale from pi3_depth/pi3_depth_meta.txt
 pi3_offline_png_depth_scale: null
 pi3_offline_require_transform: true
+pi3_offline_pose_lookup_mode: auto
 
 # --- Offline DepthAnythingV3 (for depth_provider: dav3_offline) ---
 dav3_offline_depth_dir: "dav3_depth"
@@ -48,6 +54,28 @@ pi3: false
 dav3: false
 require_all_ids: true
 
+fixed_nice_room_nikita_class_names:
+  - "couch"
+  - "box"
+  - "table"
+  - "teddy bear"
+  - "bookshelf"
+  - "books"
+  - "vase"
+  - "plant"
+  - "buddha statue"
+  - "statue"
+  - "chiffonier"
+  - "lamp"
+  - "trash can"
+  - "chair"
+  - "painting"
+  - "pen"
+  - "glass"
+  - "notebook"
+  - "chessboard"
+  - "curtain"
+  - "clock"
 scene_0_class_names:
   - "chair"
   - "box"

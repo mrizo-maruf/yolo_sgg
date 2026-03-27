@@ -23,8 +23,8 @@ alpha: 0.7
 fast_mask: true
 
 # --- Point cloud ---
-max_points_per_obj: 2000
-max_accumulated_points: 10000
+max_points_per_obj: 250
+max_accumulated_points: 500
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 
@@ -111,9 +111,21 @@ ssg:
   save_graph_dir: "results/scene_graphs"
 
   # Edge predictors
-  basic_edges: true
+  basic_edges: false
   baseline_edges: true
-  vlsat_edges: true
+  vlsat_edges: false
+  # VL-SAT decoding controls (for kg_nav_run.py)
+  # When model is multi-label, keep relations with score >= threshold.
+  vlsat_relation_threshold: 0.35
+  vlsat_max_relations_per_pair: 3
+  # Force old argmax behavior if needed for A/B checks.
+  vlsat_force_single_label: false
+  # Keep at least one relation per directed pair among valid objects.
+  vlsat_ensure_pairwise_edges: true
+  # Objects with fewer accumulated points are excluded from VL-SAT.
+  vlsat_min_points_per_object: 10
+  # Print relation histogram for quick debugging.
+  vlsat_debug_scores: false
 
   # Save
   save_local_graph: false

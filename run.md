@@ -13,3 +13,10 @@ python new_run.py --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_Data
 ```
 python new_run.py --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3/cabinet_simple --depth_provider pi3_offline
 ```
+
+### running kg_nav_run
+```
+python kg_nav_run.py --edges vlsat --save-graph
+
+python kg_nav_run.py --edges bs,sv --save-graph
+```
