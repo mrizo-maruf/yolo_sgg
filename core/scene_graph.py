@@ -58,7 +58,7 @@ class SceneGraph:
         if cfg.get("baseline_edges", True):
             self._edge_predictors.append(BaselineEdgePredictor())
         if cfg.get("vlsat_edges", False):
-            self._edge_predictors.append(VLSATEdgePredictor())
+            self._edge_predictors.append(VLSATEdgePredictor(cfg))
 
         self._save_dir = Path(cfg.get("save_graph_dir", "results/scene_graphs"))
         self._last_local: Optional[nx.MultiDiGraph] = None
@@ -318,8 +318,15 @@ class VLSATEdgePredictor(_EdgePredictor):
     Lazily initialises the model on first call.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cfg: Optional[DictConfig] = None) -> None:
         self._predictor = None
+        cfg = cfg or {}
+        self._relation_threshold = float(cfg.get("vlsat_relation_threshold", 0.35))
+        self._max_relations_per_pair = max(1, int(cfg.get("vlsat_max_relations_per_pair", 3)))
+        self._force_single_label = bool(cfg.get("vlsat_force_single_label", False))
+        self._ensure_pairwise_edges = bool(cfg.get("vlsat_ensure_pairwise_edges", True))
+        self._min_points_per_object = int(cfg.get("vlsat_min_points_per_object", 10))
+        self._debug_scores = bool(cfg.get("vlsat_debug_scores", False))
 
     def predict(self, graph, object_registry=None, T_w_c=None,
                 depth_m=None, intrinsics=None) -> None:
@@ -332,24 +339,36 @@ class VLSATEdgePredictor(_EdgePredictor):
         # Collect objects with enough accumulated points
         valid_ids: List[int] = []
         point_clouds: List[np.ndarray] = []
+        skipped_for_points = 0
         for gid, obj in all_objs.items():
             if gid not in graph.nodes:
                 continue
             pts = obj.get("points_accumulated")
-            if pts is not None and len(pts) >= 10:
+            if pts is not None and len(pts) >= self._min_points_per_object:
                 valid_ids.append(gid)
                 # Axis convention: world frame (Z-up) → 3RScan/VL-SAT (Y-up)
                 pts_conv = pts[:, [0, 2, 1]].copy()
                 pts_conv[:, 2] = -pts_conv[:, 2]
                 point_clouds.append(pts_conv)
+            else:
+                skipped_for_points += 1
 
         if len(valid_ids) < 2:
+            if self._debug_scores:
+                print(
+                    "[VLSAT] Need ≥2 objects with enough points "
+                    f"(min_points_per_object={self._min_points_per_object}), "
+                    f"valid={len(valid_ids)}, skipped={skipped_for_points}. Skipping."
+                )
             return
 
         if self._predictor is None:
             self._predictor = _init_vlsat()
 
         import torch
+
+        model_multi_rel = bool(getattr(self._predictor.config.MODEL, "multi_rel_outputs", False))
+        decode_multi_rel = model_multi_rel and not self._force_single_label
 
         num_points = self._predictor.config.dataset.num_points
         obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids = \
@@ -358,17 +377,48 @@ class VLSATEdgePredictor(_EdgePredictor):
             obj_points, obj_2d_feats, edge_indices, descriptor, batch_ids,
         )
 
+        relation_hist: Dict[str, int] = {}
         for k in range(predicted.shape[0]):
             src_idx = edge_indices[0][k].item()
             tgt_idx = edge_indices[1][k].item()
-            rel_id = torch.argmax(predicted[k]).item()
-            rel_name = self._predictor.rel_id_to_rel_name.get(rel_id, "none")
-            if rel_name == "none":
-                continue
             src_gid = valid_ids[src_idx]
             tgt_gid = valid_ids[tgt_idx]
-            graph.add_edge(src_gid, tgt_gid,
-                           label=rel_name, label_class="vlsat")
+            rel_scores = predicted[k]
+
+            if decode_multi_rel:
+                rel_ids = torch.where(rel_scores >= self._relation_threshold)[0].tolist()
+                if not rel_ids:
+                    if self._ensure_pairwise_edges:
+                        rel_ids = [int(torch.argmax(rel_scores).item())]
+                    else:
+                        continue
+                rel_ids = sorted(
+                    rel_ids,
+                    key=lambda rid: float(rel_scores[rid]),
+                    reverse=True,
+                )[:self._max_relations_per_pair]
+            else:
+                rel_ids = [int(torch.argmax(rel_scores).item())]
+
+            for rel_id in rel_ids:
+                rel_name = self._predictor.rel_id_to_rel_name.get(rel_id, "none")
+                if rel_name == "none":
+                    continue
+                graph.add_edge(src_gid, tgt_gid, label=rel_name, label_class="vlsat")
+                relation_hist[rel_name] = relation_hist.get(rel_name, 0) + 1
+
+        if self._debug_scores:
+            top_hist = sorted(relation_hist.items(), key=lambda x: x[1], reverse=True)[:10]
+            print(
+                "[VLSAT] decode="
+                f"{'multi-label' if decode_multi_rel else 'argmax'} "
+                f"(threshold={self._relation_threshold:.2f}, "
+                f"max_per_pair={self._max_relations_per_pair}, "
+                f"ensure_pairwise_edges={self._ensure_pairwise_edges}, "
+                f"min_points_per_object={self._min_points_per_object}, "
+                f"valid_objs={len(valid_ids)}, skipped_objs={skipped_for_points}) "
+                f"top relations={top_hist}"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
