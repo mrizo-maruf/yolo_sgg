@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
+import re
 import cv2
 import numpy as np
 from PIL import Image
@@ -141,21 +142,19 @@ class ScanNetPPDepthProvider(DepthProvider):
         min_depth: float = 0.01,
         pose_path: Optional[str] = None,
         pose_lookup: str = "index",
+        depth_files: Optional[List[int]] = None,
     ) -> None:
         self._depth_dir = Path(depth_dir)
         self._filename_pattern = filename_pattern
         self._depth_scale = depth_scale
         self._max_depth = max_depth
         self._min_depth = min_depth
+        self._depth_files = sorted(self._depth_dir.glob("*.png"))
         self._pose_lookup = pose_lookup
         self._poses = _load_poses_txt(pose_path)
 
     def _depth_path(self, frame_idx: int) -> Path:
-        filename = self._filename_pattern.format(
-            frame_idx=frame_idx,
-            frame_number=frame_idx,
-        )
-        return self._depth_dir / filename
+        return self._depth_files[frame_idx]
 
     def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
         path = self._depth_path(frame_idx)

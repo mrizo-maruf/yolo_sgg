@@ -9,6 +9,9 @@ ScanNet++ directory layout::
         bbox/bboxes000000_info.json  ...   (sequential 0-based index)
         traj.txt                           (one 4×4 per line, 16 floats)
 
+        pi3_traj.txt                       (one 4×4 per line, 16 floats)
+        pi3_depth/frame_0000.png           (sequential 0-based index)
+
 Can also be run standalone to visualize GT labels::
 
     python -m data_loaders.scanetpp --scene /path/to/scene                  # all frames
@@ -103,14 +106,13 @@ class ScanNetPPLoader(DatasetLoader):
         return img, str(path)
 
     def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
-        fnum = self._frame_number(frame_idx)
-        return self._depth_provider.get_depth(fnum)
+        # fnum = self._frame_number(frame_idx)
+        return self._depth_provider.get_depth(frame_idx)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        fnum = self._frame_number(frame_idx)
 
         # Prefer depth-provider pose (e.g. Pi3 predicted)
-        pred_pose = self._depth_provider.get_pose(fnum)
+        pred_pose = self._depth_provider.get_pose(frame_idx)
         if pred_pose is not None:
             return pred_pose
 
@@ -130,11 +132,11 @@ class ScanNetPPLoader(DatasetLoader):
         sample_ratio: float = 0.5,
     ):
         """Override to pass fnum (actual frame number) to the depth provider."""
-        fnum = self._frame_number(frame_idx)
+        # fnum = self._frame_number(frame_idx)
         T_w_c = self.get_pose(frame_idx)
         intrinsics = self.get_intrinsics()
         return self._depth_provider.get_masked_pcds(
-            fnum, masks, T_w_c, intrinsics,
+            frame_idx, masks, T_w_c, intrinsics,
             max_points=max_points, sample_ratio=sample_ratio,
         )
 
