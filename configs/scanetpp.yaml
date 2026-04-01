@@ -28,7 +28,13 @@ loader_skip_labels:
 
 load_rgb: true
 load_depth: false
+pi3: false
+dav3: false
+require_all_ids: true
 
+
+save_graph_dir: "results/scene_graphs"
+benchmark_metrics_path: "./results/scanetpp_metrics/"
 
 scene0cf2e9402d_class_names:
   - "fridge"
@@ -39,3 +45,82 @@ scene0cf2e9402d_class_names:
   - "bottle"
   - "pot"
   - "socker"
+
+scene0b31f3119_class_names:
+  - "chair"
+  - "screen"
+  - "pc"
+  - "table"
+  - "desk"
+  - "door"
+  - "clock"
+  - "window"
+  - "socket"
+  - "lamp"
+  - "projector"
+  - "mouse"
+  - "keyboard"
+  - "pen"
+  - "marker"
+  - "paper"
+  - "book"
+  - "whiteboard"
+  - "box"
+  - "trash can"
+  - "bucket"
+  - "tripod"
+  - "wire"
+
+scene0a76e06478_class_names:
+  - "bed"
+  - "pillow"
+  - "blanket"
+  - "door"
+  - "window"
+  - "lamp"
+  - "chair"
+  - "table"
+  - "bag"
+  - "painting"
+  - "curtain"
+  - "shelf"
+  - "book"
+  - "toy"
+  - "laptop"
+  - "bucket"
+  - "trash can"
+  - "keys"
+  - "clothes"
+  - "box"
+  - "pen"
+
+Scene0a7cc12c0e_class_names:
+  - "bed"
+  - "pillow"
+  - "blanket"
+  - "door"
+  - "window"
+  - "lamp"
+  - "chair"
+  - "table"
+  - "bag"
+  - "painting"
+  - "curtain"
+  - "shelf"
+  - "book"
+  - "toy"
+  - "laptop"
+  - "bucket"
+  - "trash can"
+  - "keys"
+  - "clothes"
+  - "box"
+  - "pen"
+  - "luggage"
+  - "bottle"
+  - "fan"
+  - "sink"
+  - "laptop"
+  - "microwave"
+
+
