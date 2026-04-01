@@ -146,6 +146,11 @@ def main() -> int:
             # Remap RFU -> RDF: (x, y, z) -> (x, -z, y).
             axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
             print("[Rerun] Applying Isaac axis remap (RFU -> RDF).")
+        elif dataset_name == "scanetpp":
+            # ScanNet++ world is Z-up; Rerun view is RDF.
+            # Remap: (x, y, z) -> (x, -z, y) to fix 90° X-axis inversion.
+            axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
+            print("[Rerun] Applying ScanNet++ axis remap (Z-up -> RDF).")
 
         rerun_vis = RerunVisualizer(
             recording_id=f"yolo_ssg_{dataset_name}",

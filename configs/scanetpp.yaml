@@ -28,3 +28,14 @@ loader_skip_labels:
 
 load_rgb: true
 load_depth: false
+
+
+scene0cf2e9402d_class_names:
+  - "fridge"
+  - "sink"
+  - "microwave"
+  - "washing machine"
+  - "door"
+  - "bottle"
+  - "pot"
+  - "socker"
