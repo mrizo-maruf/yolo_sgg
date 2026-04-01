@@ -449,6 +449,9 @@ def _build_pi3_online(dataset_name: str, cfg) -> DepthProvider:
         inject_condition=_parse_inject_condition(cfg.get("pi3_inject_condition", [])),
         intrinsics=K,
         intrinsics_image_size=K_size,
+        use_original_size=bool(cfg.get("pi3_use_original_size", True)),
+        pixel_limit=int(cfg.get("pi3_pixel_limit", 255000)),
+        patch_size=int(cfg.get("pi3_patch_size", 14)),
     )
 
 

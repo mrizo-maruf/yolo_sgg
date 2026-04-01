@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import math
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -59,6 +60,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         inject_condition: Optional[Sequence[str]] = None,
         intrinsics: Optional[np.ndarray] = None,          # 3x3 (base resolution)
         intrinsics_image_size: Optional[tuple[int, int]] = None,  # (H, W)
+        use_original_size: bool = True,
+        pixel_limit: int = 255000,
+        patch_size: int = 14,
     ) -> None:
         self._model_name = str(model_name)
 
@@ -75,6 +79,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._max_depth = float(max_depth)
         self._conf_threshold = float(conf_threshold)
         self._inject_condition = [str(x) for x in (inject_condition or [])]
+        self._use_original_size = bool(use_original_size)
+        self._pixel_limit = int(max(1, pixel_limit))
+        self._patch_size = int(max(1, patch_size))
 
         self._base_K = self._validate_intrinsics(intrinsics)
         self._base_intrinsics_size = self._validate_intrinsics_image_size(
@@ -211,8 +218,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     def _build_intrinsics_seq(
         self,
         n_frames: int,
-        frame_h: int,
-        frame_w: int,
+        raw_h: int,
+        raw_w: int,
+        model_h: int,
+        model_w: int,
+        apply_resize_scaling: bool,
         device: str,
     ):
         if torch is None:
@@ -221,12 +231,16 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             return None
 
         if self._base_intrinsics_size is None:
-            base_h, base_w = frame_h, frame_w
+            base_h, base_w = raw_h, raw_w
         else:
             base_h, base_w = self._base_intrinsics_size
 
-        sx = float(frame_w) / float(base_w)
-        sy = float(frame_h) / float(base_h)
+        if apply_resize_scaling:
+            sx = float(model_w) / float(base_w)
+            sy = float(model_h) / float(base_h)
+        else:
+            sx = 1.0
+            sy = 1.0
 
         K = self._base_K.copy()
         K[0, 0] *= sx
@@ -236,6 +250,30 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
 
         K_t = torch.as_tensor(K, dtype=torch.float32, device=device)
         return K_t.view(1, 1, 3, 3).repeat(1, n_frames, 1, 1)
+
+    def _compute_model_size(self, raw_h: int, raw_w: int) -> tuple[int, int]:
+        p = self._patch_size
+        if self._use_original_size:
+            h = int(math.ceil(raw_h / p) * p)
+            w = int(math.ceil(raw_w / p) * p)
+            return h, w
+
+        if raw_h <= 0 or raw_w <= 0:
+            return p, p
+
+        scale = math.sqrt(self._pixel_limit / float(raw_h * raw_w))
+        h_t = raw_h * scale
+        w_t = raw_w * scale
+        k = max(1, round(h_t / p))
+        m = max(1, round(w_t / p))
+        while (k * p) * (m * p) > self._pixel_limit and (k > 1 or m > 1):
+            if (k / max(1, m)) > (h_t / max(1e-9, w_t)):
+                k -= 1
+            else:
+                m -= 1
+            k = max(1, k)
+            m = max(1, m)
+        return int(k * p), int(m * p)
 
     def _process_window(self, force: bool) -> None:
         if not self._buffer:
@@ -266,7 +304,29 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                 )
             rgbs_norm.append(np.ascontiguousarray(rgb))
 
-        imgs_np = np.stack(rgbs_norm, axis=0)  # (T, H, W, 3)
+        model_h, model_w = self._compute_model_size(ref_h, ref_w)
+
+        preprocess_mode = "none"
+        if self._use_original_size and (model_h != ref_h or model_w != ref_w):
+            preprocess_mode = "pad"
+        elif (not self._use_original_size) and (model_h != ref_h or model_w != ref_w):
+            preprocess_mode = "resize"
+
+        if preprocess_mode == "pad":
+            prepped = []
+            for rgb in rgbs_norm:
+                canvas = np.zeros((model_h, model_w, 3), dtype=rgb.dtype)
+                canvas[:ref_h, :ref_w] = rgb
+                prepped.append(canvas)
+        elif preprocess_mode == "resize":
+            prepped = [
+                cv2.resize(rgb, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
+                for rgb in rgbs_norm
+            ]
+        else:
+            prepped = rgbs_norm
+
+        imgs_np = np.stack(prepped, axis=0)  # (T, H, W, 3)
         imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float() / 255.0
         imgs = imgs.to(self._device)
 
@@ -275,8 +335,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         chunk_eff = min(self._window_size, n_frames)
         intrinsics_seq = self._build_intrinsics_seq(
             n_frames=n_frames,
-            frame_h=ref_h,
-            frame_w=ref_w,
+            raw_h=ref_h,
+            raw_w=ref_w,
+            model_h=model_h,
+            model_w=model_w,
+            apply_resize_scaling=(preprocess_mode == "resize"),
             device=self._device,
         )
 
@@ -312,6 +375,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
 
         for i, idx in enumerate(indices):
             dm = depth_maps[i].astype(np.float32)
+            if preprocess_mode == "pad":
+                dm = dm[:ref_h, :ref_w]
+            elif preprocess_mode == "resize":
+                dm = cv2.resize(dm, (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
+
             if self._target_size is not None:
                 dm = cv2.resize(
                     dm,
@@ -328,6 +396,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
 
         self._evict_old(self._depth_cache)
         self._evict_old(self._pose_cache)
+
+        # While warming up (< window_size), keep full causal history so overlap
+        # logic can kick in once the first full window is available.
+        if force and len(indices) < self._window_size:
+            return
 
         # Slide temporal window: keep only overlap tail for next chunk.
         keep_n = min(self._overlap, max(0, len(indices) - 1))
