@@ -172,6 +172,21 @@ def _build_metric_png_offline(
     pose_default: str = "traj.txt",
 ) -> DepthProvider:
     """MetricPngDepthProvider with dataset-appropriate defaults."""
+
+    if dataset_name == "scanetpp":
+        from .gt_depth import ScanNetPPDepthProvider
+
+        depth_dir = scene_p / "pi3_depth"
+        pose_path = scene_p / "pi3_traj.txt"
+        return ScanNetPPDepthProvider(
+            depth_dir=str(depth_dir),
+            filename_pattern="frame_{frame_idx:04d}.png",
+            depth_scale=float(cfg.get("depth_scale", 1000.0)),
+            max_depth=float(cfg.get("max_depth", 10.0)),
+            min_depth=float(cfg.get("min_depth", 0.01)),
+            pose_path=str(pose_path) if pose_path.exists() else None,
+        )
+
     from .gt_depth import MetricPngDepthProvider
 
     depth_dir = _resolve_scene_path(
