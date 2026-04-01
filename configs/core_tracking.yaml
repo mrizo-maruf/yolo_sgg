@@ -23,8 +23,8 @@ alpha: 0.7
 fast_mask: true
 
 # --- Point cloud ---
-max_points_per_obj: 250
-max_accumulated_points: 500
+max_points_per_obj: 1000
+max_accumulated_points: 5000
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 
@@ -40,6 +40,10 @@ tracking_distance_threshold: 1
 tracking_inactive_limit: 0          # 0 = never remove
 tracking_volume_ratio_threshold: 0.1
 reprojection_visibility_threshold: 0.2
+
+# --- Post-frame merge (collapse duplicate objects) ---
+merge_iou_threshold: 0.7
+merge_containment_threshold: 0.7
 
 # --- Matching (benchmark) ---
 # One mode per benchmark run:

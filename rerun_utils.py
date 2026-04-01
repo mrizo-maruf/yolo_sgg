@@ -285,7 +285,7 @@ class RerunVisualizer:
                      rgb, vis_edges)
 
         # === Panel 2: Semantic Segmentation =================================
-        self._log_segmentation(rgb, masks_clean, track_ids)
+        self._log_segmentation(rgb, masks_clean, track_ids, class_names)
 
         # === Panel 3: RGB + Reprojected 2-D Boxes ===========================
         self._log_rgb_with_boxes(rgb, object_registry, T_w_c, img_w, img_h)
@@ -466,12 +466,13 @@ class RerunVisualizer:
     # ------------------------------------------------------------------
     def _log_segmentation(self, rgb: np.ndarray,
                           masks_clean: List[np.ndarray],
-                          track_ids: np.ndarray):
+                          track_ids: np.ndarray,
+                          class_names: Optional[List[str]] = None):
         """Overlay coloured instance masks on the RGB image."""
         h, w = rgb.shape[:2]
         overlay = rgb.copy()
 
-        for mask, tid in zip(masks_clean, track_ids):
+        for i, (mask, tid) in enumerate(zip(masks_clean, track_ids)):
             if mask is None:
                 continue
             # Ensure mask is binary uint8 matching image dims
@@ -482,6 +483,34 @@ class RerunVisualizer:
             color = _track_color_u8(int(tid))
             for c in range(3):
                 overlay[:, :, c] = np.where(binary, color[c], overlay[:, :, c])
+
+            # Draw class name label at mask center
+            cls = None
+            if class_names and i < len(class_names):
+                cls = class_names[i]
+            if cls:
+                ys, xs = np.where(binary)
+                if len(ys) > 0:
+                    cx = int(np.mean(xs))
+                    cy = int(np.mean(ys))
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    scale = 0.5
+                    thickness = 1
+                    (tw, th), baseline = cv2.getTextSize(cls, font, scale, thickness)
+                    # Black background rectangle
+                    pad = 3
+                    cv2.rectangle(
+                        overlay,
+                        (cx - tw // 2 - pad, cy - th // 2 - pad),
+                        (cx + tw // 2 + pad, cy + th // 2 + pad + baseline),
+                        (0, 0, 0), cv2.FILLED,
+                    )
+                    # White text
+                    cv2.putText(
+                        overlay, cls,
+                        (cx - tw // 2, cy + th // 2),
+                        font, scale, (255, 255, 255), thickness, cv2.LINE_AA,
+                    )
 
         rr.log(
             "seg_view/segmentation",

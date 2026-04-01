@@ -24,11 +24,11 @@ pose_lookup_mode: auto
 
 # --- Offline Pi3 depth (for depth_provider: pi3_offline) ---
 # Pi3 output dir from Pi3_for_yolo_sgg/run.py
-pi3_offline_depth_dir: "pi3_full_depth"
+pi3_offline_depth_dir: "pi3_depth"
 # Pi3 camera poses saved by Pi3_for_yolo_sgg/run.py
-pi3_offline_pose_path: "pi3_full_camera_poses.txt"
+pi3_offline_pose_path: "pi3_camera_poses.txt"
 # Scene-level Sim(3) from align_pi3_gt.py --save_transform
-pi3_offline_transform_path: "pi3_full_to_world_transform.json"
+pi3_offline_transform_path: "pi3_to_world_transform.json"
 # If null, provider reads png_depth_scale from pi3_depth/pi3_depth_meta.txt
 pi3_offline_png_depth_scale: null
 pi3_offline_require_transform: true
@@ -76,13 +76,14 @@ fixed_nice_room_nikita_class_names:
   - "chessboard"
   - "curtain"
   - "clock"
+  - "object"
 scene_0_class_names:
-  - "chair"
-  - "box"
-  - "table"
   - "teddy bear"
+  - "box"
+  - "oven"
+  - "table"
   - "ladder"
-  - "stool"
+  - "chair"
   - "palm tree"
   - "clock"
   - "cabinet"
@@ -91,6 +92,7 @@ scene_0_class_names:
   - "vase"
   - "sofa"
   - "trash can"
+  - "desk"
 
 save_graph_dir: "results/scene_graphs"
 # class names for open vocabulary evaluation (if enabled)

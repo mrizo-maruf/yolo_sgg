@@ -1,41 +1,52 @@
-# YOLO SSG - Scene Graph Generation Requirements
-# Python 3.10 recommended
+# YOLO-SGG — Scene Graph Generation Requirements
+# Python 3.10+ recommended
 
-# Core Dependencies
+# ── Core ──────────────────────────────────────────────
 numpy>=1.24.0
 opencv-python>=4.8.0
 torch>=2.0.0
 torchvision>=0.15.0
-
-# Computer Vision & 3D
-open3d>=0.17.0
 Pillow>=10.0.0
 
-# Scene Graph & Network
-networkx>=3.1
-matplotlib>=3.7.0
+# ── YOLO / Object Detection ──────────────────────────
+ultralytics>=8.1.0
 
-# Configuration & Utilities
-omegaconf>=2.3.0
-tqdm>=4.65.0
-
-# Geometry Processing
+# ── 3D / Geometry ────────────────────────────────────
+open3d>=0.17.0
 shapely>=2.0.0
 trimesh>=3.21.0
 pyvista>=0.40.0
 
-# Deep Learning & Tracking
-# Note: ultralytics-yolo-extension (YOLOE) needs to be installed separately
-# Install with: pip install git+https://github.com/your-repo/ultralytics-yoloe.git
-# or place the custom YOLOE package in your environment
+# ── Scene Graph & Graphs ─────────────────────────────
+networkx>=3.1
 
-# Symbolic Math (for relationship calculations)
+# ── Visualization ────────────────────────────────────
+matplotlib>=3.7.0
+rerun-sdk>=0.16.0
+
+# ── Configuration & Utilities ────────────────────────
+omegaconf>=2.3.0
+tqdm>=4.65.0
+PyYAML>=6.0
+
+# ── Symbolic Math (relationship calculations) ────────
 sympy>=1.12
 
-# VGGT Dependencies (optional, for VGGT-based processing)
-# Install VGGT separately if needed:
-# pip install git+https://github.com/ahkhan-repo/VGGT.git
+tensorboard>=2.12.0
+# ── Optional: pytorch3d (used in kg_nav_run.py) ─────
+# Requires a build from source or a matching prebuilt wheel:
+#   pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+# pytorch3d
 
-# Development & Testing (optional)
-pytest>=7.3.0
-jupyter>=1.0.0
+# ── Optional: VL-SAT model dependencies ─────────────
+# Needed only when running the vl_sat_model/ module
+# torch-geometric>=2.3.0
+# torch-scatter>=2.1.0
+# ftfy>=6.1.0
+# regex>=2023.0
+# plyfile>=1.0.0
+# clip  (install via: pip install git+https://github.com/openai/CLIP.git)
+
+# ── Development & Testing (optional) ────────────────
+# pytest>=7.3.0
+# jupyter>=1.0.0

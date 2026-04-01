@@ -83,6 +83,15 @@ def main() -> int:
     if args.vis_edge:
         cfg.ssg = cfg.get("ssg", {})
         cfg.ssg.vis_edge = True
+    if args.edges is not None:
+        try:
+            selected_edges = _parse_edges_cli(args.edges)
+        except ValueError as exc:
+            raise SystemExit(f"--edges: {exc}") from exc
+        cfg.ssg = cfg.get("ssg", {})
+        cfg.ssg.basic_edges = "sv" in selected_edges
+        cfg.ssg.baseline_edges = "bs" in selected_edges
+        cfg.ssg.vlsat_edges = "vlsat" in selected_edges
 
     dataset_name = args.dataset
 
@@ -117,6 +126,8 @@ def main() -> int:
         inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
         volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
         visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
+        merge_iou_threshold=float(cfg.get("merge_iou_threshold", 0.5)),
+        merge_containment_threshold=float(cfg.get("merge_containment_threshold", 0.7)),
     )
 
     # SceneGraph
@@ -309,6 +320,44 @@ def _save_objects_json(
     print(f"\nTracked objects saved to {out_path}")
 
 
+def _parse_edges_cli(raw: str) -> set[str]:
+    """Parse CLI edge selection string into canonical keys: {sv, bs, vlsat}."""
+    tokens: list[str] = []
+    for chunk in str(raw).split(","):
+        for part in chunk.split():
+            p = part.strip().lower()
+            if p:
+                tokens.append(p)
+
+    if not tokens:
+        raise ValueError("empty edge selection")
+
+    alias = {
+        "all": "all",
+        "*": "all",
+        "sv": "sv",
+        "sceneverse": "sv",
+        "scenverse": "sv",
+        "scene-verse": "sv",
+        "basic": "sv",
+        "bs": "bs",
+        "baseline": "bs",
+        "vlsat": "vlsat",
+        "vl-sat": "vlsat",
+    }
+
+    selected: set[str] = set()
+    for t in tokens:
+        if t not in alias:
+            allowed = "all, bs, sv, vlsat (comma-separated)"
+            raise ValueError(f"Unknown edge selector '{t}'. Allowed: {allowed}")
+        canon = alias[t]
+        if canon == "all":
+            return {"sv", "bs", "vlsat"}
+        selected.add(canon)
+    return selected
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════
@@ -341,6 +390,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Save scene graph as JSON.")
     p.add_argument("--save_global_graph", action="store_true",
                    help="Save global scene graph as JSON.")
+    p.add_argument("--edges", type=str, default=None,
+                   help="Edge predictors to run: all | bs | sv | vlsat, or comma-separated combos "
+                        "(e.g. bs,sv).")
     return p
 
 

@@ -28,6 +28,7 @@ class GlobalObjectRegistry:
     __slots__ = (
         "overlap_threshold", "distance_threshold", "max_points",
         "inactive_limit", "volume_ratio_threshold", "visibility_threshold",
+        "merge_iou_threshold", "merge_containment_threshold",
         "objects", "_next_id", "prev_frame", "yolo_to_global",
         "current_frame", "_visible_this_frame",
     )
@@ -40,6 +41,8 @@ class GlobalObjectRegistry:
         inactive_limit: int = 0,
         volume_ratio_threshold: float = 0.1,
         visibility_threshold: float = 0.2,
+        merge_iou_threshold: float = 0.5,
+        merge_containment_threshold: float = 0.7,
     ) -> None:
         self.overlap_threshold = overlap_threshold
         self.distance_threshold = distance_threshold
@@ -47,6 +50,8 @@ class GlobalObjectRegistry:
         self.inactive_limit = inactive_limit
         self.volume_ratio_threshold = volume_ratio_threshold
         self.visibility_threshold = visibility_threshold
+        self.merge_iou_threshold = merge_iou_threshold
+        self.merge_containment_threshold = merge_containment_threshold
 
         self.objects: Dict[int, dict] = {}
         self._next_id = 1
@@ -246,6 +251,131 @@ class GlobalObjectRegistry:
                 observation_count=obj.get("observation_count", 0),
             ))
         return visible
+
+    # ------------------------------------------------------------------
+    # Object merging — collapse duplicates that grew to overlap
+    # ------------------------------------------------------------------
+
+    def merge_overlapping_objects(self) -> List[tuple]:
+        """Detect and merge registry objects whose bboxes significantly overlap.
+
+        Called after ``end_frame`` to clean up duplicates that arose when a
+        partial re-observation was incorrectly registered as a new object
+        and later grew to overlap the original.
+
+        Thresholds are read from ``self.merge_iou_threshold`` and
+        ``self.merge_containment_threshold`` (set via config).
+
+        Returns list of ``(absorbed_gid, survivor_gid)`` pairs.
+        """
+        from core.geometry import aabb_iou, aabb_containment
+
+        if len(self.objects) < 2:
+            return []
+
+        iou_th = self.merge_iou_threshold
+        cont_th = self.merge_containment_threshold
+
+        gids = list(self.objects.keys())
+        merged_pairs: List[tuple] = []
+        absorbed: Set[int] = set()
+
+        for i in range(len(gids)):
+            if gids[i] in absorbed:
+                continue
+            for j in range(i + 1, len(gids)):
+                if gids[j] in absorbed:
+                    continue
+                # gids[i] may have been absorbed during a previous j iteration
+                # (when it had fewer observations than gids[j'])
+                if gids[i] in absorbed:
+                    break
+
+                obj_a = self.objects[gids[i]]
+                obj_b = self.objects[gids[j]]
+                bbox_a = obj_a.get("bbox_3d")
+                bbox_b = obj_b.get("bbox_3d")
+
+                if bbox_a is None or bbox_b is None:
+                    continue
+
+                iou = aabb_iou(bbox_a, bbox_b)
+                containment = aabb_containment(bbox_a, bbox_b)
+
+                if iou >= iou_th or containment >= cont_th:
+                    # Survivor = the object seen in more frames (tie → older)
+                    cnt_a = obj_a.get("observation_count", 0)
+                    cnt_b = obj_b.get("observation_count", 0)
+                    if cnt_a >= cnt_b:
+                        survivor, absorbed_id = gids[i], gids[j]
+                    else:
+                        survivor, absorbed_id = gids[j], gids[i]
+
+                    self._merge_into(survivor, absorbed_id)
+                    absorbed.add(absorbed_id)
+                    merged_pairs.append((absorbed_id, survivor))
+                    # If the outer-loop object was absorbed, stop the inner loop
+                    if absorbed_id == gids[i]:
+                        break
+
+        return merged_pairs
+
+    def _merge_into(self, survivor_gid: int, absorbed_gid: int) -> None:
+        """Absorb one object into another and delete the absorbed entry."""
+        surv = self.objects[survivor_gid]
+        abso = self.objects[absorbed_gid]
+
+        # Merge point clouds
+        pts_s = surv.get("points_accumulated")
+        pts_a = abso.get("points_accumulated")
+        if (pts_s is not None and pts_s.shape[0] > 0
+                and pts_a is not None and pts_a.shape[0] > 0):
+            merged = np.vstack([pts_s, pts_a])
+            if merged.shape[0] > self.max_points:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(merged.shape[0], self.max_points, replace=False)
+                merged = merged[idx]
+            surv["points_accumulated"] = merged
+        elif pts_a is not None and pts_a.shape[0] > 0:
+            surv["points_accumulated"] = pts_a
+
+        # Recompute bbox from merged points
+        pts = surv.get("points_accumulated")
+        if pts is not None and pts.shape[0] > 0:
+            surv["bbox_3d"] = compute_bbox(pts, fast=True)
+
+        # Merge metadata
+        surv["first_seen_frame"] = min(
+            surv.get("first_seen_frame", 0),
+            abso.get("first_seen_frame", 0),
+        )
+        surv["last_seen_frame"] = max(
+            surv.get("last_seen_frame", 0),
+            abso.get("last_seen_frame", 0),
+        )
+        surv["observation_count"] = (
+            surv.get("observation_count", 0) + abso.get("observation_count", 0)
+        )
+        if not surv.get("class_name") and abso.get("class_name"):
+            surv["class_name"] = abso["class_name"]
+
+        # Remap YOLO track-ID mappings: absorbed → survivor
+        for yid in list(self.yolo_to_global):
+            if self.yolo_to_global[yid] == absorbed_gid:
+                self.yolo_to_global[yid] = survivor_gid
+
+        # Update prev_frame
+        if absorbed_gid in self.prev_frame:
+            self.prev_frame[survivor_gid] = surv
+            del self.prev_frame[absorbed_gid]
+
+        # Transfer visibility
+        if absorbed_gid in self._visible_this_frame:
+            self._visible_this_frame.add(survivor_gid)
+            self._visible_this_frame.discard(absorbed_gid)
+
+        # Remove absorbed object
+        del self.objects[absorbed_gid]
 
     # ------------------------------------------------------------------
     # Internals

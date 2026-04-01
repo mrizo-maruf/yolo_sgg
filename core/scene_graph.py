@@ -55,10 +55,13 @@ class SceneGraph:
 
         if cfg.get("basic_edges", True):
             self._edge_predictors.append(BasicEdgePredictor())
+            print("[SceneGraph] BasicEdgePredictor enabled.")
         if cfg.get("baseline_edges", True):
             self._edge_predictors.append(BaselineEdgePredictor())
+            print("[SceneGraph] BaselineEdgePredictor enabled.")
         if cfg.get("vlsat_edges", False):
             self._edge_predictors.append(VLSATEdgePredictor(cfg))
+            print("[SceneGraph] VLSATEdgePredictor enabled.")
 
         self._save_dir = Path(cfg.get("save_graph_dir", "results/scene_graphs"))
         self._last_local: Optional[nx.MultiDiGraph] = None
@@ -167,44 +170,51 @@ class SceneGraph:
 
         current_nodes = set(node_map.values())
 
-        # Egocentric edges: replace for visible nodes
-        ego_classes = {"proximity", "middle_furniture"}
+        # Egocentric basic edges: replace for visible nodes each frame
+        ego_subclasses = {"proximity", "middle_furniture"}
         for u, v, key, data in list(self.global_graph.edges(keys=True, data=True)):
-            if data.get("label_class") in ego_classes:
+            if data.get("label_class") == "basic" and data.get("label_subclass") in ego_subclasses:
                 if u in current_nodes and v in current_nodes:
                     self.global_graph.remove_edge(u, v, key)
 
         # Remove stale aligned_furniture (recomputed each frame)
         for u, v, key, data in list(self.global_graph.edges(keys=True, data=True)):
-            if data.get("label_class") == "aligned_furniture":
+            if data.get("label_class") == "basic" and data.get("label_subclass") == "aligned_furniture":
                 self.global_graph.remove_edge(u, v, key)
 
-        # Allocentric edges: merge carefully
-        allo_classes = {"support", "embedded", "hanging",
-                        "oppo_support", "aligned_furniture"}
+        # Allocentric basic subclasses: merge carefully
+        allo_subclasses = {"support", "embedded", "hanging",
+                           "oppo_support", "aligned_furniture"}
 
         for u, v, key, data in local_graph.edges(keys=True, data=True):
             u_g = node_map[u]
             v_g = node_map[v]
             label_class = data.get("label_class", "")
+            label_subclass = data.get("label_subclass", "")
 
-            if label_class in ego_classes:
-                # Simply add egocentric edges from current frame
+            # Non-basic edges (baseline, vlsat) — always add fresh
+            if label_class != "basic":
                 self.global_graph.add_edge(u_g, v_g, **data)
                 continue
 
-            if label_class not in allo_classes:
-                # Baseline / vlsat edges — always add fresh
+            # Egocentric basic edges — simply add from current frame
+            if label_subclass in ego_subclasses:
                 self.global_graph.add_edge(u_g, v_g, **data)
                 continue
 
-            # Allocentric: check for conflicts
+            # Allocentric basic edges — check for conflicts
+            if label_subclass not in allo_subclasses:
+                self.global_graph.add_edge(u_g, v_g, **data)
+                continue
+
             edge_found = False
             if self.global_graph.has_edge(u_g, v_g):
                 for ek in list(self.global_graph[u_g][v_g].keys()):
                     ed = self.global_graph[u_g][v_g][ek]
-                    pc = ed.get("label_class")
-                    if pc == label_class:
+                    pc = ed.get("label_subclass", "")
+                    if ed.get("label_class") != "basic":
+                        continue
+                    if pc == label_subclass:
                         if ed.get("label") == data.get("label"):
                             self.global_graph[u_g][v_g][ek].update(data)
                         else:
@@ -212,11 +222,12 @@ class SceneGraph:
                             self.global_graph.add_edge(u_g, v_g, **data)
                         edge_found = True
                         break
-                    elif pc in allo_classes and _are_conflicting(pc, label_class):
+                    elif pc in allo_subclasses and _are_conflicting(pc, label_subclass):
                         self.global_graph.remove_edge(u_g, v_g, ek)
                         if pc == "support" and self.global_graph.has_edge(v_g, u_g):
                             for ek2 in list(self.global_graph[v_g][u_g].keys()):
-                                if self.global_graph[v_g][u_g][ek2].get("label_class") == "oppo_support":
+                                ed2 = self.global_graph[v_g][u_g][ek2]
+                                if ed2.get("label_class") == "basic" and ed2.get("label_subclass") == "oppo_support":
                                     self.global_graph.remove_edge(v_g, u_g, ek2)
                                     break
                         break
@@ -508,11 +519,14 @@ def _save_graph_json(graph: nx.MultiDiGraph, path: Path) -> None:
         d = ndata.get("data", {})
         edges_out = []
         for _, tgt, _, edata in graph.out_edges(nid, keys=True, data=True):
-            edges_out.append({
+            edge_entry = {
                 "target_id": int(tgt),
                 "label": edata.get("label", ""),
                 "label_class": edata.get("label_class", ""),
-            })
+            }
+            if edata.get("label_subclass"):
+                edge_entry["label_subclass"] = edata["label_subclass"]
+            edges_out.append(edge_entry)
         nodes[int(nid)] = {
             "track_id": int(nid),
             "class_name": d.get("class_name"),

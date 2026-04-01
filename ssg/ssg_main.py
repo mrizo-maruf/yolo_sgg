@@ -473,11 +473,11 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     support_relations, embedded_relations, hanging_objs_dict = cal_support_relations(ObjNode_dict, camera_angle)
     for rela in support_relations:
         target_obj_id, obj_id, rel_type = rela
-        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='support') # optimizer
+        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='basic', label_subclass='support') # optimizer
 
     for rela in embedded_relations:
         target_obj_id, obj_id, rel_type = rela
-        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='embedded')
+        current_graph.add_edge(target_obj_id, obj_id, label=rel_type, label_class='basic', label_subclass='embedded')
 
     # hanging relationships
     hanging_relationships = cal_hanging_relationships(ObjNode_dict, hanging_objs_dict, camera_angle,
@@ -485,7 +485,7 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     
     for rela in hanging_relationships:
         src_id, tgt_id, rel_type = rela
-        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='hanging')
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='basic', label_subclass='hanging')
         
         # tgt_id, src_id, rel_type = opporel
         # current_graph.add_edge(src_id, tgt_id, label=rel_type)
@@ -505,7 +505,7 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
 
     for rela in proximity_relations:
         src_id, tgt_id, rel_type = rela
-        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='proximity')
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='basic', label_subclass='proximity')
         
         # tgt_id, src_id, rel_type = opporel
         # current_graph.add_edge(src_id, tgt_id, label=rel_type)
@@ -530,7 +530,7 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
 
     for rela in oppo_support_relations:
         src_id, tgt_id, rel_type = rela
-        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='oppo_support')
+        current_graph.add_edge(src_id, tgt_id, label=rel_type, label_class='basic', label_subclass='oppo_support')
         
     # multi objects
     multi_objs_relationships = []
@@ -550,8 +550,8 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
         
         for group in combinations:
             idx1, idx2 = group
-            current_graph.add_edge(idx1, idx2, label=aligned_objs, label_class='aligned_furniture')
-            current_graph.add_edge(idx2, idx1, label=aligned_objs, label_class='aligned_furniture')
+            current_graph.add_edge(idx1, idx2, label=aligned_objs, label_class='basic', label_subclass='aligned_furniture')
+            current_graph.add_edge(idx2, idx1, label=aligned_objs, label_class='basic', label_subclass='aligned_furniture')
 
     # added in the middle of relationship
     middle_relationships = find_middle_furniture(proximity_relations, ObjNode_dict)
@@ -559,8 +559,8 @@ def edges(current_graph, frame_objs, T_w_c, depth_m):
     for objs, _ in middle_relationships:
         # print('objs ', objs)
         src, idx1, idx2 = objs
-        current_graph.add_edge(src, idx2, label=f'in mid of {idx1} {idx2}', label_class='middle_furniture')
-        current_graph.add_edge(src, idx1, label=f'in mid of {idx1} {idx2}', label_class='middle_furniture')
+        current_graph.add_edge(src, idx2, label=f'in mid of {idx1} {idx2}', label_class='basic', label_subclass='middle_furniture')
+        current_graph.add_edge(src, idx1, label=f'in mid of {idx1} {idx2}', label_class='basic', label_subclass='middle_furniture')
     
 
     # output json

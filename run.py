@@ -237,7 +237,7 @@ def main() -> int:
             edges(tf.scene_graph, tf.frame_objs, tf.T_w_c, tf.depth_m)
         elif edge_predictor == "bs" and tf.T_w_c is not None:
             objs_dict = {obj['global_id']: obj for obj in tf.frame_objs}
-            bs_result = edges_bs(objs_dict, tf.T_w_c)
+            bs_result = edges_bs(objs_dict)
             for src_id, edge_list in bs_result.items():
                 for e in edge_list:
                     tf.scene_graph.add_edge(

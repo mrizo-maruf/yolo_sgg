@@ -20,3 +20,13 @@ python kg_nav_run.py --edges vlsat --save-graph
 
 python kg_nav_run.py --edges bs,sv --save-graph
 ```
+
+
+### visualizing scene graph edges from json
+```
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type sv
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type bs
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type vlsat
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type edges_vlsat --only-with-edges
+
+```

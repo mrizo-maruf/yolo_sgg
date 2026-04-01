@@ -33,6 +33,7 @@ from ssg.ssg_main import edges
 import matplotlib.pyplot as plt
 import networkx as nx
 from itertools import combinations
+from pytorch3d.renderer import look_at_view_transform, FoVOrthographicCameras
 
 # VL-SAT edge predictor paths
 _VLSAT_DIR = Path(__file__).resolve().parent / "vl_sat_model"
@@ -126,48 +127,77 @@ def _get_obj_center(obj: dict) -> np.ndarray | None:
     return None
 
 
-def edges_bs(all_objs: dict, T_w_c: np.ndarray) -> dict:
-    """Baseline edge predictor: egocentric spatial relations.
+def edges_bbq(all_objs: dict) -> dict:
+    """Virtual-camera baseline edge predictor (BBQ).
 
-    For every ordered pair (anchor, target) computes which of
-    {left, right, front, back, above, below} hold in camera frame.
+    For each anchor object a virtual orthographic camera is placed at
+    the scene centre (mean of all bbox centres) looking at the anchor.
+    Both anchor and every other target are projected to screen space;
+    relations {left, right, front, back, above, below} are derived
+    from the screen-space output of transform_points_screen.
+
+    Screen-space layout (PyTorch3D FoVOrthographicCameras):
+      [0] = x  → left / right
+      [1] = y  → above / below
+      [2] = z  → front / back (depth)
 
     Returns:
         dict  node_id -> list of {"target_id": int, "relation_type": str}
     """
-    # Pre-compute camera-frame centres for every object
-    cam_centres: dict[int, np.ndarray] = {}
+    # Collect world-frame centres
+    world_centres: dict[int, np.ndarray] = {}
     for gid, obj in all_objs.items():
         c = _get_obj_center(obj)
         if c is not None:
-            cam_centres[gid] = _egoview_project(c, T_w_c)
+            world_centres[gid] = c
 
-    bs_edges: dict[int, list] = {gid: [] for gid in all_objs}
+    bbq_edges: dict[int, list] = {gid: [] for gid in all_objs}
 
-    for (gid_a, pos_a), (gid_b, pos_b) in combinations(cam_centres.items(), 2):
-        # a -> b direction ("b is ___ of a")
-        def _relations(src_pos, tgt_pos):
-            rels = []
-            if tgt_pos[0, 0] < src_pos[0, 0]:
-                rels.append("left")
-            if tgt_pos[0, 0] > src_pos[0, 0]:
-                rels.append("right")
-            if tgt_pos[0, 2] < src_pos[0, 2]:
-                rels.append("front")
-            if tgt_pos[0, 2] > src_pos[0, 2]:
-                rels.append("back")
-            if tgt_pos[0, 1] < src_pos[0, 1]:
-                rels.append("above")
-            if tgt_pos[0, 1] > src_pos[0, 1]:
-                rels.append("below")
-            return rels
+    if len(world_centres) < 2:
+        return bbq_edges
 
-        for rel in _relations(pos_a, pos_b):
-            bs_edges[gid_a].append({"target_id": int(gid_b), "relation_type": rel})
-        for rel in _relations(pos_b, pos_a):
-            bs_edges[gid_b].append({"target_id": int(gid_a), "relation_type": rel})
+    # Scene centre = mean of all object centres (virtual camera eye)
+    scene_center = np.mean(np.stack(list(world_centres.values())), axis=0)
 
-    return bs_edges
+    IMAGE_SIZE = (512, 2048)
+    cam_pos = torch.tensor(scene_center, dtype=torch.float32).unsqueeze(0)
+
+    for gid_anchor, anchor_center in world_centres.items():
+        anchor_t = torch.tensor(anchor_center, dtype=torch.float32).unsqueeze(0)
+
+        # Skip if anchor is at the scene centre (camera can't look at itself)
+        if torch.allclose(cam_pos, anchor_t, atol=1e-6):
+            continue
+
+        R, T = look_at_view_transform(eye=cam_pos, at=anchor_t, up=((0.0, 0.0, 1.0),))
+        camera = FoVOrthographicCameras(device='cpu', R=R, T=T)
+
+        anchor_scr = camera.transform_points_screen(anchor_t, image_size=IMAGE_SIZE)
+
+        for gid_target, target_center in world_centres.items():
+            if gid_target == gid_anchor:
+                continue
+
+            target_t = torch.tensor(target_center, dtype=torch.float32).unsqueeze(0)
+            target_scr = camera.transform_points_screen(target_t, image_size=IMAGE_SIZE)
+
+            # x → left / right
+            if target_scr[0, 0] < anchor_scr[0, 0]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "left"})
+            if target_scr[0, 0] > anchor_scr[0, 0]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "right"})
+            # z → front / back
+            if target_scr[0, 2] < anchor_scr[0, 2]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "front"})
+            if target_scr[0, 2] > anchor_scr[0, 2]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "back"})
+            # y → above / below
+            if target_scr[0, 1] < anchor_scr[0, 1]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "above"})
+            if target_scr[0, 1] > anchor_scr[0, 1]:
+                bbq_edges[gid_anchor].append({"target_id": int(gid_target), "relation_type": "below"})
+
+    return bbq_edges
 
 
 def edges_vlsat(
@@ -297,7 +327,7 @@ def edges_vlsat(
 
 
 def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
-                     bs_edges: dict | None = None,
+                     bbq_edges: dict | None = None,
                      vlsat_edges: dict | None = None):
     """Serialize the scene graph to JSON."""
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -335,9 +365,9 @@ def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
                 "relation_type": edge_data.get("label", edge_data.get("label_class", "")),
             })
 
-        node_bs = []
-        if bs_edges and node_id in bs_edges:
-            node_bs = bs_edges[node_id]
+        node_bbq = []
+        if bbq_edges and node_id in bbq_edges:
+            node_bbq = bbq_edges[node_id]
 
         node_vlsat = []
         if vlsat_edges and node_id in vlsat_edges:
@@ -348,7 +378,7 @@ def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
             "class_name": class_name,
             "bbox_3d": _bbox_to_serializable(bbox_3d),
             "edges_sv": edges_list,
-            "edges_bs": node_bs,
+            "edges_bbq": node_bbq,
             "edges_vlsat": node_vlsat,
         }
 
@@ -365,7 +395,7 @@ def _save_graph_json(graph, object_registry, save_dir: Path, dataset_name: str,
 
 
 def _parse_edges_cli(raw: str) -> set[str]:
-    """Parse CLI edge selection string into canonical keys: {sv, bs, vlsat}."""
+    """Parse CLI edge selection string into canonical keys: {sv, bbq, vlsat}."""
     tokens: list[str] = []
     for chunk in str(raw).split(","):
         for part in chunk.split():
@@ -384,8 +414,8 @@ def _parse_edges_cli(raw: str) -> set[str]:
         "scenverse": "sv",
         "scene-verse": "sv",
         "basic": "sv",
-        "bs": "bs",
-        "baseline": "bs",
+        "bbq": "bbq",
+        "baseline": "bbq",
         "vlsat": "vlsat",
         "vl-sat": "vlsat",
     }
@@ -393,11 +423,11 @@ def _parse_edges_cli(raw: str) -> set[str]:
     selected: set[str] = set()
     for t in tokens:
         if t not in alias:
-            allowed = "all, bs, sv, vlsat (comma-separated)"
+            allowed = "all, bbq, sv, vlsat (comma-separated)"
             raise ValueError(f"Unknown edge selector '{t}'. Allowed: {allowed}")
         canon = alias[t]
         if canon == "all":
-            return {"sv", "bs", "vlsat"}
+            return {"sv", "bbq", "vlsat"}
         selected.add(canon)
     return selected
 
@@ -434,7 +464,7 @@ def main() -> int:
         except ValueError as exc:
             raise SystemExit(f"--edges: {exc}") from exc
         cfg.ssg.basic_edges = "sv" in selected_edges
-        cfg.ssg.baseline_edges = "bs" in selected_edges
+        cfg.ssg.baseline_edges = "bbq" in selected_edges
         cfg.ssg.vlsat_edges = "vlsat" in selected_edges
         # Backward-compat key used in this script:
         cfg.ssg.use_vlsat = cfg.ssg.vlsat_edges
@@ -490,7 +520,7 @@ def main() -> int:
     depth_paths = loader.get_depth_paths()
     depth_cache = loader.build_depth_cache()
     poses = loader.get_all_poses()
-    class_names_to_track = list(cfg.get("scene_0_class_names", [])) or None
+    class_names_to_track = list(cfg.get("fixed_nice_room_nikita_class_names", [])) or None
 
     object_registry = GlobalObjectRegistry(
         overlap_threshold=float(cfg.tracking_overlap_threshold),
@@ -572,14 +602,14 @@ def main() -> int:
     else:
         print("SceneVerse edges disabled.")
 
-    bs_edge_map: dict | None = None
-    bs_time = 0.0
+    bbq_edge_map: dict | None = None
+    bbq_time = 0.0
     if ssg_cfg.get("baseline_edges", True):
         t0 = time.perf_counter()
-        bs_edge_map = edges_bs(all_objs, last_T_w_c)
-        bs_time = (time.perf_counter() - t0) * 1000
+        bbq_edge_map = edges_bbq(all_objs)
+        bbq_time = (time.perf_counter() - t0) * 1000
     else:
-        print("Baseline edges disabled.")
+        print("BBQ edges disabled.")
 
     # --- VL-SAT neural edges (optional) -------------------------------------
     vlsat_edge_map: dict | None = None
@@ -607,15 +637,15 @@ def main() -> int:
     if ssg_cfg.get("basic_edges", True):
         timing_parts_parts.append(f"SV={sv_time:.2f}ms")
     if ssg_cfg.get("baseline_edges", True):
-        timing_parts_parts.append(f"BS={bs_time:.2f}ms")
+        timing_parts_parts.append(f"BBQ={bbq_time:.2f}ms")
     if vlsat_edge_map is not None:
         timing_parts_parts.append(f"VLSAT={vlsat_time:.2f}ms")
 
     edge_count_parts = []
     if ssg_cfg.get("basic_edges", True):
         edge_count_parts.append(f"SV edges: {graph.number_of_edges()}")
-    if bs_edge_map is not None:
-        edge_count_parts.append(f"BS edges: {sum(len(v) for v in bs_edge_map.values())}")
+    if bbq_edge_map is not None:
+        edge_count_parts.append(f"BBQ edges: {sum(len(v) for v in bbq_edge_map.values())}")
     if vlsat_edge_map is not None:
         edge_count_parts.append(f"VLSAT edges: {sum(len(v) for v in vlsat_edge_map.values())}")
 
@@ -658,7 +688,7 @@ def main() -> int:
     if ssg_cfg.get("save_graph", False):
         save_dir = Path(ssg_cfg.get("save_graph_dir", "results/scene_graphs"))
         _save_graph_json(graph, object_registry, save_dir, dataset_name,
-                         bs_edges=bs_edge_map,
+                         bbq_edges=bbq_edge_map,
                          vlsat_edges=vlsat_edge_map)
 
     return 0
@@ -669,7 +699,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="KG-Nav: Track objects, build scene graph once at the end.",
     )
     
-    p.add_argument("--path", default=f"/home/yehia/Downloads/kg_nav_2_IsaacSimData/{scene_name}",
+    p.add_argument("--path", default=f"/home/yehia/Downloads/fixed_nice_room_nikita-20260328T031859Z-1-001/{scene_name}",
                    help="Path to the scene directory.")
     p.add_argument("--dataset", type=str, default=None,
                    choices=["isaacsim", "thud_synthetic", "thud_real", "code", "any_scene"],
@@ -680,8 +710,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-tracking", action="store_true", help="Print per-frame tracking info.")
     p.add_argument("--save-graph", action="store_true", help="Save final scene graph as JSON.")
     p.add_argument("--edges", type=str, default=None,
-                   help="Edge predictors to run: all | bs | sv | vlsat, or comma-separated combos "
-                        "(e.g. bs,sv).")
+                   help="Edge predictors to run: all | bbq | sv | vlsat, or comma-separated combos "
+                        "(e.g. bbq,sv).")
     p.add_argument("--vlsat-rel-thr", type=float, default=None,
                    help="VL-SAT relation threshold for multi-label decoding (default from config).")
     p.add_argument("--vlsat-max-rels", type=int, default=None,
@@ -692,6 +722,6 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Print VL-SAT relation histogram summary.")
     return p
 
-scene_name = "scene_8"
+scene_name = "fixed_nice_room_nikita"
 if __name__ == "__main__":
     sys.exit(main())

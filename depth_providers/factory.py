@@ -17,6 +17,7 @@ Supported provider types:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -87,12 +88,19 @@ def _build_gt(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
 
         depth_dir = scene_p / "depth"
         pose_path = scene_p / "traj.txt"
+        pose_lookup_cfg = str(cfg.get("pose_lookup_mode", "auto")).lower()
+        pose_lookup = (
+            _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
+            if pose_lookup_cfg == "auto"
+            else pose_lookup_cfg
+        )
         return IsaacSimDepthProvider(
             depth_dir=str(depth_dir),
             png_max_value=int(cfg.get("png_max_value", 65535)),
             max_depth=float(cfg.get("max_depth", 10.0)),
             min_depth=float(cfg.get("min_depth", 0.01)),
             pose_path=str(pose_path) if pose_path.exists() else None,
+            pose_lookup=pose_lookup,
         )
 
     if dataset_name == "thud_synthetic":
@@ -150,6 +158,8 @@ _DEFAULT_MAX_DEPTH: dict[str, float] = {
     "scanetpp": 10.0,
 }
 
+_TRAILING_INT_RE = re.compile(r"(\d+)$")
+
 
 def _resolve_scene_path(scene_p: Path, value, default_rel: str) -> Path:
     raw = str(value) if value is not None else default_rel
@@ -159,6 +169,29 @@ def _resolve_scene_path(scene_p: Path, value, default_rel: str) -> Path:
 
 def _maybe_existing_path(path: Path) -> Optional[str]:
     return str(path) if path.exists() else None
+
+
+def _infer_pose_lookup_mode(
+    frame_dir: Path,
+    pattern: str,
+    default: str = "frame_number",
+) -> str:
+    """Infer 0-based ('index') vs 1-based ('frame_number') frame IDs."""
+    if not frame_dir.exists():
+        return default
+
+    ids: list[int] = []
+    for p in sorted(frame_dir.glob(pattern)):
+        m = _TRAILING_INT_RE.search(p.stem)
+        if not m:
+            continue
+        ids.append(int(m.group(1)))
+        if len(ids) >= 64:
+            break
+
+    if not ids:
+        return default
+    return "index" if min(ids) == 0 else "frame_number"
 
 
 def _build_metric_png_offline(
@@ -227,6 +260,15 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
         if png_scale is not None:
             png_scale = float(png_scale)
 
+        pose_lookup_cfg = str(
+            cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
+        ).lower()
+        pose_lookup = (
+            _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
+            if pose_lookup_cfg == "auto"
+            else pose_lookup_cfg
+        )
+
         return IsaacSimOfflinePi3DepthProvider(
             depth_dir=str(depth_dir),
             pose_path=_maybe_existing_path(pose_path),
@@ -234,6 +276,7 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             png_depth_scale=png_scale,
             min_depth=float(cfg.get("min_depth", 0.01)),
             max_depth=float(cfg.get("max_depth", 10.0)),
+            pose_lookup=pose_lookup,
             require_transform=bool(cfg.get("pi3_offline_require_transform", True)),
         )
 

@@ -60,18 +60,23 @@ def _compute_overlap_score(
     if dist > distance_threshold:
         return 0.0, dist, False
 
-    # Size-similarity check — reject if ≥2 extents wildly differ
-    ext_a = det_bbox.obb_extent
-    ext_b = reg_bbox.obb_extent
-    ratios = np.minimum(ext_a, ext_b) / (np.maximum(ext_a, ext_b) + 1e-6)
-    if np.sum(ratios < 0.15) >= 2:
-        return 0.0, dist, False
-
+    # Compute containment early — needed to handle partial re-observation
+    # (e.g. partial view of a sofa matching the full sofa in the registry).
     iou = aabb_iou(det_bbox, reg_bbox)
     containment = aabb_containment(det_bbox, reg_bbox)
 
+    # Size-similarity check — reject if ≥2 extents wildly differ.
+    # BUT skip when one bbox is largely contained in the other, because
+    # that indicates a partial re-observation of an existing object.
+    if containment < 0.3:
+        ext_a = det_bbox.obb_extent
+        ext_b = reg_bbox.obb_extent
+        ratios = np.minimum(ext_a, ext_b) / (np.maximum(ext_a, ext_b) + 1e-6)
+        if np.sum(ratios < 0.15) >= 2:
+            return 0.0, dist, False
+
     effective_score = max(iou, containment)
-    is_candidate = iou >= overlap_threshold or containment >= 0.5
+    is_candidate = iou >= overlap_threshold or containment >= 0.3
 
     return effective_score, dist, is_candidate
 
@@ -105,6 +110,8 @@ def run_tracking(
             inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
             volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
             visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
+            merge_iou_threshold=float(cfg.get("merge_iou_threshold", 0.5)),
+            merge_containment_threshold=float(cfg.get("merge_containment_threshold", 0.7)),
         )
 
     intrinsics = loader.get_intrinsics()
@@ -192,6 +199,8 @@ def run_tracking(
                 continue
             pts_world = clean_pcd(
                 pts_world, o3_nb_neighbors=o3_nb, o3_std_ratio=o3_std,
+                cluster_eps=0.2, cluster_min_samples=10,
+                cluster_min_fraction=0.6,
             )
             if pts_world.shape[0] == 0:
                 continue
@@ -231,13 +240,21 @@ def run_tracking(
                     gid = best_gid
 
             # LEVEL 3: Global registry (re-observation after occlusion)
+            # Use a relaxed distance threshold proportional to the existing
+            # object size so that partial views of large objects (sofa, table)
+            # whose centroid is offset can still match.
             if gid is None:
                 best_gid, best_score = None, 0.0
                 for cand_gid, obj in object_registry.objects.items():
                     if cand_gid in matched_gids:
                         continue
+                    existing_bbox = obj.get("bbox_3d")
+                    level3_dist = dist_th
+                    if existing_bbox is not None:
+                        max_extent = float(np.max(existing_bbox.obb_extent))
+                        level3_dist = max(dist_th, max_extent * 0.75)
                     score, cdist, is_cand = _compute_overlap_score(
-                        bbox, obj.get("bbox_3d"), dist_th, overlap_th,
+                        bbox, existing_bbox, level3_dist, overlap_th,
                     )
                     if is_cand and score > best_score:
                         best_score = score
@@ -280,6 +297,19 @@ def run_tracking(
             frame_objs.extend(extra)
             visible_gids.update(o.global_id for o in extra)
         object_registry.end_frame(visible_gids)
+
+        # Post-frame merge: collapse duplicate objects whose bboxes now
+        # significantly overlap (e.g. a partial re-observation that was
+        # initially registered as a new object and later grew to match
+        # the original).
+        # merged = object_registry.merge_overlapping_objects()
+        # if merged:
+        #     # Remap frame_objs so downstream consumers see the survivor IDs
+        #     survivor_map = {absorbed: survivor for absorbed, survivor in merged}
+        #     for obj in frame_objs:
+        #         if obj.global_id in survivor_map:
+        #             obj.global_id = survivor_map[obj.global_id]
+
         timings["tracking_3d_ms"] = (time.perf_counter() - t0) * 1000
 
         yield TrackedFrame(
