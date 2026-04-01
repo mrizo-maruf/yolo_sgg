@@ -30,17 +30,16 @@ class BaseModel(nn.Module):
     def loadConfig(self, path):
         if os.path.exists(path):
             if torch.cuda.is_available():
-                data = torch.load(path)
+                data = torch.load(path, weights_only=False)
             else:
-                data = torch.load(path, map_location=lambda storage, loc: storage)
-                
-            try:
-                eva_res = data['eva_res']
-            except:
-                print('Target saving config file does not contain eva_res!')
-                eva_res = 0
-                
-            return data['iteration'], eva_res
+                data = torch.load(
+                    path,
+                    map_location=lambda storage, loc: storage,
+                    weights_only=False
+                )
+
+            eva_res = data.get('eva_res', 0)
+            return data.get('iteration', 0), eva_res
         else:
             return 0, 0
         
