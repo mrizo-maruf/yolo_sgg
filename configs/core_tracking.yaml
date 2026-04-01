@@ -6,6 +6,19 @@
 # gt | pi3_online | pi3_offline | dav3_online | dav3_offline
 depth_provider: gt
 
+# --- Pi3 online streaming ---
+pi3_model: "yyfz233/Pi3X"
+pi3_window_size: 16
+pi3_overlap: 12
+pi3_use_intrinsics: true
+pi3_conf_threshold: 0.05
+pi3_online_max_cache: 48
+# Optional overrides:
+# pi3_device: "cuda:0"
+# pi3_target_height: 720
+# pi3_target_width: 1280
+# pi3_inject_condition: []  # e.g. ["pose", "depth"]
+
 # --- YOLO model ---
 is_open_vocabulary: true
 yolo_model: "yoloe-11l-seg.pt"

@@ -208,8 +208,8 @@ def process_depth_model(cfg):
     dtype = torch.bfloat16 if cuda_available and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     
     # Pi3XVO parameters
-    chunk_size = 30  # Number of frames per chunk
-    overlap = 10     # Overlap between chunks for alignment
+    chunk_size = 16  # Number of frames per chunk
+    overlap = 12     # Overlap between chunks for alignment
     
     print(f"Processing {imgs.shape[0]} frames with chunk_size={chunk_size}, overlap={overlap}")
     
