@@ -273,14 +273,14 @@ class SceneGraph:
             for _, v, k, d in self.global_graph.out_edges(u, keys=True, data=True):
                 if not self._is_dynamic_edge(d):
                     continue
-                # Baseline edges are camera-dependent per frame: refresh all
-                # incident baseline edges for visible nodes.
-                if d.get("label_class") == "baseline" or v in current_nodes:
+                # Refresh only edges where both endpoints are currently visible.
+                # This keeps last-known edges for invisible objects in global view.
+                if v in current_nodes:
                     to_remove.add((u, v, k))
             for v, _, k, d in self.global_graph.in_edges(u, keys=True, data=True):
                 if not self._is_dynamic_edge(d):
                     continue
-                if d.get("label_class") == "baseline" or v in current_nodes:
+                if v in current_nodes:
                     to_remove.add((v, u, k))
         for u, v, k in to_remove:
             self._remove_edge(u, v, k)
