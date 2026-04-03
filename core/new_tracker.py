@@ -169,9 +169,14 @@ def run_tracking(
         idx = yf.frame_idx
         rgb_path = yf.rgb_path
 
-        # YOLO inference time
+        # YOLO end-to-end time from synchronized wall clock (stable).
+        if getattr(yf, "yolo_wall_ms", 0.0) > 0.0:
+            timings["yolo_ms"] = float(yf.yolo_wall_ms)
+        # Keep Ultralytics-reported inference time as extra debug metric.
         if hasattr(res, "speed") and isinstance(res.speed, dict):
-            timings["yolo_ms"] = res.speed.get("inference", 0.0)
+            timings["yolo_inference_ms"] = float(res.speed.get("inference", 0.0))
+            if "yolo_ms" not in timings:
+                timings["yolo_ms"] = timings["yolo_inference_ms"]
         gpu_after_yolo = _gpu_mem_mb(cuda_available)
         if gpu_after_yolo is not None:
             timings["gpu_after_yolo_mb"] = gpu_after_yolo

@@ -183,6 +183,7 @@ def main() -> int:
     # --- Timings ---
     timings_agg = {
         "yolo": [],
+        "yolo_inference": [],
         "preprocess": [],
         "depth": [],
         "pcd_extract": [],
@@ -190,6 +191,11 @@ def main() -> int:
         "reprojection": [],
         "tracking_3d": [],
         "graph": [],
+        "graph_build_nodes": [],
+        "graph_merge": [],
+        "graph_predict_basic": [],
+        "graph_predict_baseline": [],
+        "graph_predict_vlsat": [],
     }
     gpu_usage = {
         "after_yolo": [],
@@ -223,11 +229,35 @@ def main() -> int:
         gpu_after_graph = _cuda_mem_mb(cuda_available)
         if gpu_after_graph is not None:
             tf.timings["gpu_after_graph_mb"] = gpu_after_graph
+
+        graph_profile = scene_graph.get_last_profile()
+        if graph_profile:
+            if "build_nodes_ms" in graph_profile:
+                tf.timings["graph_build_nodes_ms"] = float(graph_profile["build_nodes_ms"])
+            if "merge_ms" in graph_profile:
+                tf.timings["graph_merge_ms"] = float(graph_profile["merge_ms"])
+            if "predict_BasicEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_basic_ms"] = float(
+                    graph_profile["predict_BasicEdgePredictor_ms"]
+                )
+            if "predict_BaselineEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_baseline_ms"] = float(
+                    graph_profile["predict_BaselineEdgePredictor_ms"]
+                )
+            if "predict_VLSATEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_vlsat_ms"] = float(
+                    graph_profile["predict_VLSATEdgePredictor_ms"]
+                )
+            if "local_edges" in graph_profile:
+                tf.timings["graph_local_edges"] = float(graph_profile["local_edges"])
+            if "global_edges" in graph_profile:
+                tf.timings["graph_global_edges"] = float(graph_profile["global_edges"])
         tf.local_graph = local_graph
 
         # Collect timings
         key_map = {
             "yolo_ms": "yolo",
+            "yolo_inference_ms": "yolo_inference",
             "preprocess_ms": "preprocess",
             "depth_ms": "depth",
             "pcd_extract_ms": "pcd_extract",
@@ -235,6 +265,11 @@ def main() -> int:
             "reprojection_ms": "reprojection",
             "tracking_3d_ms": "tracking_3d",
             "graph_ms": "graph",
+            "graph_build_nodes_ms": "graph_build_nodes",
+            "graph_merge_ms": "graph_merge",
+            "graph_predict_basic_ms": "graph_predict_basic",
+            "graph_predict_baseline_ms": "graph_predict_baseline",
+            "graph_predict_vlsat_ms": "graph_predict_vlsat",
         }
         for src, dst in key_map.items():
             if src in tf.timings:
@@ -256,6 +291,7 @@ def main() -> int:
             print(
                 f"[new_run] Frame {tf.frame_idx}: Latency (ms) - "
                 f"yolo: {tf.timings.get('yolo_ms', 0.0):.2f}, "
+                f"yolo_infer: {tf.timings.get('yolo_inference_ms', 0.0):.2f}, "
                 f"preprocess: {tf.timings.get('preprocess_ms', 0.0):.2f}, "
                 f"depth: {tf.timings.get('depth_ms', 0.0):.2f}, "
                 f"pcd: {tf.timings.get('pcd_extract_ms', 0.0):.2f}, "
@@ -263,6 +299,16 @@ def main() -> int:
                 f"reproj: {tf.timings.get('reprojection_ms', 0.0):.2f}, "
                 f"tracking_3d: {tf.timings.get('tracking_3d_ms', 0.0):.2f}, "
                 f"graph: {tf.timings.get('graph_ms', 0.0):.2f}"
+            )
+            print(
+                f"[new_run] Frame {tf.frame_idx}: Graph breakdown (ms) - "
+                f"build_nodes: {tf.timings.get('graph_build_nodes_ms', 0.0):.2f}, "
+                f"basic: {tf.timings.get('graph_predict_basic_ms', 0.0):.2f}, "
+                f"baseline: {tf.timings.get('graph_predict_baseline_ms', 0.0):.2f}, "
+                f"vlsat: {tf.timings.get('graph_predict_vlsat_ms', 0.0):.2f}, "
+                f"merge: {tf.timings.get('graph_merge_ms', 0.0):.2f}, "
+                f"local_edges: {int(tf.timings.get('graph_local_edges', 0))}, "
+                f"global_edges: {int(tf.timings.get('graph_global_edges', 0))}"
             )
             if cuda_available and gpu_usage["after_yolo"]:
                 print(
@@ -366,9 +412,14 @@ def _print_summary(
     print("PERFORMANCE (ms)")
     print("-" * 60)
     main_stages = ("yolo", "preprocess", "tracking_3d", "graph")
+    extra_stage = ("yolo_inference",)
     breakdown_stages = ("depth", "pcd_extract", "track_update", "reprojection")
 
     for k in main_stages:
+        vals = timings.get(k, [])
+        if vals:
+            print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
+    for k in extra_stage:
         vals = timings.get(k, [])
         if vals:
             print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
@@ -379,6 +430,20 @@ def _print_summary(
             vals = timings.get(k, [])
             if vals:
                 print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
+
+    graph_breakdown = (
+        ("graph_build_nodes", "build_nodes"),
+        ("graph_predict_basic", "predict_basic"),
+        ("graph_predict_baseline", "predict_baseline"),
+        ("graph_predict_vlsat", "predict_vlsat"),
+        ("graph_merge", "merge"),
+    )
+    if any(timings.get(k) for k, _ in graph_breakdown):
+        print("\nGraph Breakdown (ms):")
+        for k, label in graph_breakdown:
+            vals = timings.get(k, [])
+            if vals:
+                print(f"  {label:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
 
     total_avg = sum(np.mean(timings[k]) for k in main_stages if timings.get(k))
     print(f"  {'Total per frame':20s} {total_avg:8.2f}")
