@@ -84,6 +84,26 @@ class DatasetLoader(ABC):
             max_points=max_points, sample_ratio=sample_ratio,
         )
 
+    def get_masked_pcds_from_depth(
+        self,
+        frame_idx: int,
+        depth_m: Optional[np.ndarray],
+        masks: List[np.ndarray],
+        max_points: int = 2000,
+        sample_ratio: float = 0.5,
+    ) -> List[np.ndarray]:
+        """Per-mask depth → raw world-frame point clouds from preloaded depth."""
+        T_w_c = self.get_pose(frame_idx)
+        intrinsics = self.get_intrinsics()
+        return self.depth_provider.get_masked_pcds_from_depth(
+            depth_m=depth_m,
+            masks=masks,
+            T_w_c=T_w_c,
+            intrinsics=intrinsics,
+            max_points=max_points,
+            sample_ratio=sample_ratio,
+        )
+
     # -- depth provider ----------------------------------------------------
 
     @property

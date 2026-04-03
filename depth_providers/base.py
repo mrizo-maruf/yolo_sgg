@@ -115,8 +115,30 @@ class DepthProvider(ABC):
         this method entirely.
         """
         depth_m = self.get_depth(frame_idx)
-        empty = np.zeros((0, 3), dtype=np.float32)
+        return self.get_masked_pcds_from_depth(
+            depth_m=depth_m,
+            masks=masks,
+            T_w_c=T_w_c,
+            intrinsics=intrinsics,
+            max_points=max_points,
+            sample_ratio=sample_ratio,
+        )
 
+    def get_masked_pcds_from_depth(
+        self,
+        depth_m: Optional[np.ndarray],
+        masks: List[np.ndarray],
+        T_w_c: Optional[np.ndarray],
+        intrinsics,
+        max_points: int = 2000,
+        sample_ratio: float = 0.5,
+    ) -> List[np.ndarray]:
+        """Per-mask depth → raw world-frame point clouds from preloaded depth.
+
+        This is useful when callers want to time / cache depth loading
+        separately from mask-to-PCD conversion.
+        """
+        empty = np.zeros((0, 3), dtype=np.float32)
         if depth_m is None:
             return [empty for _ in masks]
 

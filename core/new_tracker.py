@@ -23,6 +23,10 @@ from typing import Generator, List, Optional, Set, Tuple
 
 import numpy as np
 from omegaconf import DictConfig
+try:
+    import torch
+except Exception:
+    torch = None
 
 from core.mask_utils import extract_ids_and_classes, filter_by_class, preprocess_masks
 from core.geometry import aabb_containment, aabb_iou, clean_pcd, compute_bbox
@@ -79,6 +83,14 @@ def _compute_overlap_score(
     is_candidate = iou >= overlap_threshold or containment >= 0.3
 
     return effective_score, dist, is_candidate
+
+
+def _gpu_mem_mb(cuda_available: bool) -> Optional[float]:
+    """Return current allocated CUDA memory in MB."""
+    if not cuda_available:
+        return None
+    torch.cuda.synchronize()
+    return float(torch.cuda.memory_allocated() / (1024 ** 2))
 
 
 def run_tracking(
@@ -148,10 +160,11 @@ def run_tracking(
     sample_ratio = float(cfg.get("sample_ratio", 0.5))
     o3_nb = int(cfg.get("o3_nb_neighbors", 50))
     o3_std = float(cfg.get("o3std_ratio", 0.1))
+    cuda_available = bool(torch is not None and torch.cuda.is_available())
 
     # --- Per-frame loop ---
     for yf in yolo_stream:
-        timings: dict = {}
+        timings: dict[str, float] = {}
         res = yf.result
         idx = yf.frame_idx
         rgb_path = yf.rgb_path
@@ -159,6 +172,9 @@ def run_tracking(
         # YOLO inference time
         if hasattr(res, "speed") and isinstance(res.speed, dict):
             timings["yolo_ms"] = res.speed.get("inference", 0.0)
+        gpu_after_yolo = _gpu_mem_mb(cuda_available)
+        if gpu_after_yolo is not None:
+            timings["gpu_after_yolo_mb"] = gpu_after_yolo
 
         # --- Pose ---
         T_w_c = loader.get_pose(idx)
@@ -167,6 +183,9 @@ def run_tracking(
         t0 = time.perf_counter()
         masks = preprocess_masks(res, kernel_size=int(cfg.get("kernel_size", 9)))
         timings["preprocess_ms"] = (time.perf_counter() - t0) * 1000
+        gpu_after_preprocess = _gpu_mem_mb(cuda_available)
+        if gpu_after_preprocess is not None:
+            timings["gpu_after_preprocess_mb"] = gpu_after_preprocess
 
         # --- IDs & class names ---
         track_ids, class_names = extract_ids_and_classes(res, len(masks))
@@ -177,12 +196,26 @@ def run_tracking(
         )
 
         # --- 3-D point extraction + global tracking ---
-        t0 = time.perf_counter()
+        t_tracking_3d = time.perf_counter()
 
-        # Loader handles pose + intrinsics + depth provider internally
-        raw_pcds = loader.get_masked_pcds(
-            idx, masks, max_points=max_pts, sample_ratio=sample_ratio,
+        # Depth fetch and mask→PCD extraction are timed separately to
+        # better expose where 3-D latency is spent.
+        t0 = time.perf_counter()
+        depth_m = loader.get_depth(idx)
+        timings["depth_ms"] = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        raw_pcds = loader.get_masked_pcds_from_depth(
+            idx,
+            depth_m,
+            masks,
+            max_points=max_pts,
+            sample_ratio=sample_ratio,
         )
+        timings["pcd_extract_ms"] = (time.perf_counter() - t0) * 1000
+        gpu_after_pcd = _gpu_mem_mb(cuda_available)
+        if gpu_after_pcd is not None:
+            timings["gpu_after_pcd_mb"] = gpu_after_pcd
 
         # -- Per-frame state --
         object_registry.begin_frame(idx)
@@ -192,6 +225,7 @@ def run_tracking(
         overlap_th = object_registry.overlap_threshold
         dist_th = object_registry.distance_threshold
 
+        t0 = time.perf_counter()
         for i, (tid, mask, pts_world) in enumerate(
             zip(track_ids, masks, raw_pcds)
         ):
@@ -286,8 +320,10 @@ def run_tracking(
                 last_seen=idx,
                 observation_count=reg_obj.get("observation_count", 0),
             ))
+        timings["track_update_ms"] = (time.perf_counter() - t0) * 1000
 
         # Reprojection-visible objects
+        t0 = time.perf_counter()
         detected_gids = matched_gids
         extra = object_registry.get_reprojection_visible(
             T_w_c, intrinsics, detected_gids,
@@ -297,6 +333,7 @@ def run_tracking(
             frame_objs.extend(extra)
             visible_gids.update(o.global_id for o in extra)
         object_registry.end_frame(visible_gids)
+        timings["reprojection_ms"] = (time.perf_counter() - t0) * 1000
 
         # Post-frame merge: collapse duplicate objects whose bboxes now
         # significantly overlap (e.g. a partial re-observation that was
@@ -310,7 +347,10 @@ def run_tracking(
         #         if obj.global_id in survivor_map:
         #             obj.global_id = survivor_map[obj.global_id]
 
-        timings["tracking_3d_ms"] = (time.perf_counter() - t0) * 1000
+        timings["tracking_3d_ms"] = (time.perf_counter() - t_tracking_3d) * 1000
+        gpu_after_tracking_3d = _gpu_mem_mb(cuda_available)
+        if gpu_after_tracking_3d is not None:
+            timings["gpu_after_tracking_3d_mb"] = gpu_after_tracking_3d
 
         yield TrackedFrame(
             frame_idx=idx,
@@ -319,7 +359,7 @@ def run_tracking(
             masks=masks,
             track_ids=track_ids,
             class_names=class_names,
-            depth_m=loader.get_depth(idx),
+            depth_m=depth_m,
             T_w_c=T_w_c,
             timings=timings,
         )
