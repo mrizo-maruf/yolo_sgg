@@ -103,6 +103,10 @@ def main() -> int:
     dp_type = args.depth_provider or str(cfg.get("depth_provider", "gt"))
     depth_provider = build_depth_provider(dp_type, dataset_name, scene_path, cfg)
 
+    # --- Apply Sim(3) alignment for Pi3 online (Pi3 world → GT world) ---
+    if dp_type == "pi3_online":
+        _apply_pi3_online_transform(depth_provider, scene_path, cfg)
+
     loader_kwargs = _build_loader_kwargs(dataset_name, cfg)
     loader = LoaderCls(scene_path, depth_provider=depth_provider, **loader_kwargs)
 
@@ -226,6 +230,36 @@ def main() -> int:
         _save_objects_json(object_registry, save_dir, dataset_name)
 
     return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pi3 online Sim(3) transform
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _apply_pi3_online_transform(depth_provider, scene_path: str, cfg) -> None:
+    """Resolve and apply Sim(3) alignment (Pi3 world → GT world) from config."""
+    transform_raw = cfg.get(
+        "pi3_online_transform_path",
+        cfg.get("pi3_offline_transform_path"),
+    )
+    if transform_raw is None:
+        return
+
+    tp = Path(transform_raw)
+    if not tp.is_absolute():
+        tp = Path(scene_path) / tp
+
+    require = bool(cfg.get("pi3_online_require_transform", False))
+    if not tp.exists():
+        if require:
+            raise FileNotFoundError(f"Pi3 alignment transform not found: {tp}")
+        return
+
+    from depth_providers.pi3_online import _load_sim3_matrix
+
+    sim3 = _load_sim3_matrix(str(tp), require=True)
+    depth_provider.set_sim3_transform(sim3)
+    print(f"[Pi3] Sim(3) alignment loaded from {tp}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

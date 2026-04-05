@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import json
 import logging
 import math
 from pathlib import Path
@@ -21,6 +22,45 @@ try:  # Optional dependency for environments that do not use Pi3 online.
     import torch
 except Exception:  # pragma: no cover
     torch = None
+
+
+def _load_sim3_matrix(path_str: str, require: bool) -> np.ndarray:
+    """Load a Sim(3) 4x4 matrix from a JSON file.
+
+    The JSON may contain either ``sim3_matrix_4x4`` (flat or nested 4x4) or
+    separate ``scale``, ``rotation`` (3x3), ``translation`` (3,) keys.
+    """
+    path = Path(path_str)
+    if not path.exists():
+        if require:
+            raise FileNotFoundError(f"Pi3 alignment transform not found: {path}")
+        return np.eye(4, dtype=np.float32)
+
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if "sim3_matrix_4x4" in payload:
+        sim3 = np.asarray(payload["sim3_matrix_4x4"], dtype=np.float64)
+        if sim3.shape != (4, 4):
+            raise ValueError(f"sim3_matrix_4x4 must be 4x4, got shape {sim3.shape}")
+    else:
+        scale = float(payload["scale"])
+        rotation = np.asarray(payload["rotation"], dtype=np.float64)
+        translation = np.asarray(payload["translation"], dtype=np.float64)
+        if rotation.shape != (3, 3):
+            raise ValueError(f"rotation must be 3x3, got shape {rotation.shape}")
+        if translation.shape != (3,):
+            raise ValueError(
+                f"translation must be shape (3,), got shape {translation.shape}"
+            )
+        sim3 = np.eye(4, dtype=np.float64)
+        sim3[:3, :3] = scale * rotation
+        sim3[:3, 3] = translation
+
+    if not np.isfinite(sim3).all():
+        raise ValueError(f"Invalid values in Sim(3) transform: {path}")
+
+    return sim3.astype(np.float32)
 
 
 def _normalize_torch_device(device: Optional[str]) -> str:
@@ -74,6 +114,8 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         pixel_limit: int = 255000,
         patch_size: int = 14,
         async_inference: bool = True,
+        transform_path: Optional[str] = None,
+        require_transform: bool = False,
     ) -> None:
         self._model_name = str(model_name)
 
@@ -98,6 +140,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._base_intrinsics_size = self._validate_intrinsics_image_size(
             intrinsics_image_size
         )
+
+        # Sim(3) alignment: Pi3 world → GT world
+        self._sim3 = _load_sim3_matrix(transform_path, require_transform) if transform_path else np.eye(4, dtype=np.float32)
+        if not np.allclose(self._sim3, np.eye(4)):
+            log.info("[Pi3] Sim(3) alignment transform loaded from %s", transform_path)
 
         self._model = None
         self._pipe = None
@@ -175,6 +222,18 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._model = model
         self._pipe = Pi3XVO(model)
         log.info("[Pi3] model loaded successfully")
+
+    def get_sim3_matrix(self) -> np.ndarray:
+        """Return a copy of the Sim(3) alignment matrix (identity if none)."""
+        return self._sim3.copy()
+
+    def set_sim3_transform(self, sim3: np.ndarray) -> None:
+        """Set the Sim(3) Pi3-world → GT-world alignment matrix."""
+        sim3 = np.asarray(sim3, dtype=np.float32)
+        if sim3.shape != (4, 4):
+            raise ValueError(f"sim3 must be 4x4, got {sim3.shape}")
+        self._sim3 = sim3
+        log.info("[Pi3] Sim(3) transform set (externally)")
 
     @staticmethod
     def _import_pi3_modules():
@@ -486,7 +545,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                 dm[dm > self._max_depth] = 0.0
 
             self._depth_cache[idx] = dm
-            self._pose_cache[idx] = poses_np[i]
+            self._pose_cache[idx] = (self._sim3 @ poses_np[i]).astype(np.float32)
 
         # Signal per-frame waiters now that results are in cache.
         log.debug("[Pi3] signalling events for frames [%d..%d]", indices[0], indices[-1])

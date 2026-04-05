@@ -34,6 +34,11 @@ pi3_offline_png_depth_scale: null
 pi3_offline_require_transform: true
 pi3_offline_pose_lookup_mode: auto
 
+# --- Online Pi3 depth (for depth_provider: pi3_online) ---
+# Reuses pi3_offline_transform_path by default; override with:
+pi3_online_transform_path: "pi3_to_world_transform.json"
+pi3_online_require_transform: false
+
 # --- Offline DepthAnythingV3 (for depth_provider: dav3_offline) ---
 dav3_offline_depth_dir: "dav3_depth"
 dav3_offline_pose_path: "dav3_traj.txt"
