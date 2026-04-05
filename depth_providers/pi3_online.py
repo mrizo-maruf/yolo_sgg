@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import OrderedDict
 import math
 from pathlib import Path
+import queue
+import threading
 from typing import Optional, Sequence
 
 import cv2
@@ -44,6 +46,10 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     - Runs Pi3 inference on buffered frames with configurable
       ``window_size`` and ``overlap``.
     - Caches per-frame depth + pose for random access by frame index.
+    - When ``async_inference=True`` (default), Pi3 inference runs in a
+      background thread so YOLO + 3-D tracking can overlap with it.
+      ``get_depth`` blocks only if the result is not cached yet (ideally
+      it arrives before tracking needs it).
     """
 
     def __init__(
@@ -63,6 +69,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         use_original_size: bool = True,
         pixel_limit: int = 255000,
         patch_size: int = 14,
+        async_inference: bool = True,
     ) -> None:
         self._model_name = str(model_name)
 
@@ -95,6 +102,14 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._depth_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._pose_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
+        # Async inference — background worker thread
+        self._async_inference = bool(async_inference)
+        self._input_queue: queue.Queue = queue.Queue()
+        self._frame_events: dict[int, threading.Event] = {}
+        self._events_lock = threading.Lock()
+        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_stop = threading.Event()
+
     @staticmethod
     def _validate_intrinsics(intrinsics: Optional[np.ndarray]) -> Optional[np.ndarray]:
         if intrinsics is None:
@@ -120,6 +135,16 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         return (h, w)
 
     def warmup(self) -> None:
+        self._load_model()
+        if self._async_inference and self._worker_thread is None:
+            self._worker_stop.clear()
+            self._worker_thread = threading.Thread(
+                target=self._async_worker, daemon=True, name="pi3-worker"
+            )
+            self._worker_thread.start()
+
+    def _load_model(self) -> None:
+        """Load Pi3X model + VO pipe (idempotent)."""
         if self._pipe is not None:
             return
         if torch is None:
@@ -163,11 +188,19 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             return Pi3X, Pi3XVO
 
     def close(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_stop.set()
+            self._input_queue.put(None)  # unblock queue.get()
+            self._worker_thread.join(timeout=5.0)
+            self._worker_thread = None
+
         self._model = None
         self._pipe = None
         self._buffer.clear()
         self._depth_cache.clear()
         self._pose_cache.clear()
+        with self._events_lock:
+            self._frame_events.clear()
 
         if torch is not None and self._device.startswith("cuda"):
             torch.cuda.empty_cache()
@@ -176,23 +209,43 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         if rgb is None:
             return
 
-        # Keep latest copy for this index (OrderedDict insertion order matters).
+        # Pre-create the Event so get_depth() can wait on it even if called
+        # before the worker has had a chance to process this frame.
+        with self._events_lock:
+            self._frame_events.setdefault(frame_idx, threading.Event())
+
+        if self._async_inference:
+            # Non-blocking: hand off to the background worker.
+            self._input_queue.put((frame_idx, rgb))
+            return
+
+        # Synchronous path (original behaviour).
         if frame_idx in self._buffer:
             self._buffer.pop(frame_idx)
         self._buffer[frame_idx] = rgb
-
-        # Opportunistic batch inference once enough frames accumulate.
         if len(self._buffer) >= self._window_size:
             self._process_window(force=False)
 
     def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
         if frame_idx not in self._depth_cache:
-            self._ensure_frame_processed(frame_idx)
+            if self._async_inference:
+                with self._events_lock:
+                    ev = self._frame_events.get(frame_idx)
+                if ev is not None:
+                    ev.wait(timeout=120.0)
+            else:
+                self._ensure_frame_processed(frame_idx)
         return self._depth_cache.get(frame_idx)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
         if frame_idx not in self._pose_cache:
-            self._ensure_frame_processed(frame_idx)
+            if self._async_inference:
+                with self._events_lock:
+                    ev = self._frame_events.get(frame_idx)
+                if ev is not None:
+                    ev.wait(timeout=120.0)
+            else:
+                self._ensure_frame_processed(frame_idx)
         return self._pose_cache.get(frame_idx)
 
     def _ensure_frame_processed(self, _frame_idx: int) -> None:
@@ -394,6 +447,13 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             self._depth_cache[idx] = dm
             self._pose_cache[idx] = poses_np[i]
 
+        # Signal per-frame waiters now that results are in cache.
+        with self._events_lock:
+            for idx in indices:
+                ev = self._frame_events.get(idx)
+                if ev is not None:
+                    ev.set()
+
         self._evict_old(self._depth_cache)
         self._evict_old(self._pose_cache)
 
@@ -413,3 +473,44 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     def _evict_old(self, cache: OrderedDict[int, np.ndarray]) -> None:
         while len(cache) > self._max_cache:
             cache.popitem(last=False)
+
+    # ------------------------------------------------------------------
+    # Async worker
+    # ------------------------------------------------------------------
+
+    def _async_worker(self) -> None:
+        """Background thread: accumulates frames, runs Pi3 windows, sets Events.
+
+        The main thread feeds (frame_idx, rgb) tuples via ``_input_queue``.
+        The worker owns ``self._buffer`` exclusively in async mode — no
+        locking is needed for it because the main thread never touches it.
+        """
+        while not self._worker_stop.is_set():
+            try:
+                item = self._input_queue.get(timeout=0.5)
+            except queue.Empty:
+                # Flush any partial buffer that has been sitting idle
+                # (e.g. at the end of a sequence with < window_size frames).
+                if self._buffer:
+                    self._process_window(force=True)
+                continue
+
+            if item is None:  # shutdown sentinel
+                break
+
+            frame_idx, rgb = item
+
+            # Lazy model load: allows feed_frame() to be called before warmup().
+            if self._pipe is None:
+                self._load_model()
+
+            if frame_idx in self._buffer:
+                self._buffer.pop(frame_idx)
+            self._buffer[frame_idx] = rgb
+
+            if len(self._buffer) >= self._window_size:
+                self._process_window(force=False)
+
+        # Drain: process remaining buffered frames before the thread exits.
+        if self._buffer:
+            self._process_window(force=True)
