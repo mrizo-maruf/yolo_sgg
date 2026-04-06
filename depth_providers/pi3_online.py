@@ -153,6 +153,10 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._depth_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._pose_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
+        # Inter-window Sim3 stitching — overlap data from previous window
+        # Stored in "global Pi3 frame" (= first window's frame).
+        self._prev_overlap_points: Optional[np.ndarray] = None  # (overlap, H, W, 3)
+
         # Async inference — background worker thread
         self._async_inference = bool(async_inference)
         self._input_queue: queue.Queue = queue.Queue()
@@ -268,6 +272,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._buffer.clear()
         self._depth_cache.clear()
         self._pose_cache.clear()
+        self._prev_overlap_points = None
         with self._events_lock:
             self._frame_events.clear()
 
@@ -414,6 +419,67 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             m = max(1, m)
         return int(k * p), int(m * p)
 
+    @staticmethod
+    def _compute_window_sim3(
+        src_pts: "torch.Tensor",
+        tgt_pts: "torch.Tensor",
+    ) -> np.ndarray:
+        """Umeyama Sim(3) aligning *src_pts* → *tgt_pts* (overlap frames).
+
+        Parameters
+        ----------
+        src_pts, tgt_pts : Tensor (T, H, W, 3)
+            3-D point maps for the overlap frames in two different frames.
+
+        Returns
+        -------
+        np.ndarray (4, 4) float32  — similarity transform.
+        """
+        device = src_pts.device
+        src = src_pts.reshape(-1, 3)
+        tgt = tgt_pts.reshape(-1, 3)
+
+        # Valid mask: both finite and non-degenerate.
+        src_ok = torch.isfinite(src).all(-1) & (src.abs().sum(-1) > 1e-6)
+        tgt_ok = torch.isfinite(tgt).all(-1) & (tgt.abs().sum(-1) > 1e-6)
+        mask = src_ok & tgt_ok
+
+        src_m = src[mask]
+        tgt_m = tgt[mask]
+        n = src_m.shape[0]
+
+        if n < 10:
+            return np.eye(4, dtype=np.float32)
+
+        # Centroids.
+        src_mean = src_m.mean(0)
+        tgt_mean = tgt_m.mean(0)
+        src_c = src_m - src_mean
+        tgt_c = tgt_m - tgt_mean
+
+        # SVD of cross-covariance.
+        H = src_c.T @ tgt_c
+        U, S, Vh = torch.linalg.svd(H)
+
+        # Reflection correction.
+        d = torch.det(Vh.T @ U.T)
+        diag = torch.ones(3, device=device, dtype=src.dtype)
+        diag[2] = torch.sign(d)
+        R = Vh.T @ torch.diag(diag) @ U.T
+
+        # Umeyama scale.
+        corrected_S = S.clone()
+        corrected_S[2] *= diag[2]
+        src_total_var = (src_c ** 2).sum()
+        scale = corrected_S.sum() / (src_total_var + 1e-8)
+
+        t = tgt_mean - scale * (R @ src_mean)
+
+        sim3 = torch.eye(4, device=device, dtype=src.dtype)
+        sim3[:3, :3] = scale * R
+        sim3[:3, 3] = t
+        return sim3.detach().cpu().numpy().astype(np.float32)
+
     def _process_window(self, force: bool) -> None:
         if not self._buffer:
             return
@@ -518,8 +584,44 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         points = results["points"][0]
         cam_poses = results["camera_poses"][0]
 
+        # ---- Inter-window Sim3 alignment (Umeyama on overlap) ----
+        window_sim3_np = np.eye(4, dtype=np.float32)
+        n_overlap_used = min(self._overlap, n_frames)
+        if self._prev_overlap_points is not None and n_overlap_used > 0:
+            prev_pts = self._prev_overlap_points  # (overlap, H, W, 3)
+            n_match = min(prev_pts.shape[0], n_overlap_used)
+            src_pts = points[:n_match]  # current window's first overlap frames (local)
+            tgt_pts_np = prev_pts[-n_match:]  # previous window's last overlap frames (global)
+            tgt_pts = torch.from_numpy(tgt_pts_np).to(
+                device=points.device, dtype=points.dtype
+            )
+            window_sim3_np = self._compute_window_sim3(src_pts, tgt_pts)
+            if not np.allclose(window_sim3_np, np.eye(4), atol=1e-5):
+                log.info(
+                    "[Pi3] inter-window Sim3 applied (scale=%.4f)",
+                    np.linalg.det(window_sim3_np[:3, :3]) ** (1.0 / 3.0),
+                )
+
+        # Transform points to global Pi3 frame for overlap storage.
+        if not np.allclose(window_sim3_np, np.eye(4), atol=1e-6):
+            ws_t = torch.from_numpy(window_sim3_np).to(
+                device=points.device, dtype=points.dtype
+            )
+            pts_flat = points.reshape(-1, 3)
+            pts_global = (pts_flat @ ws_t[:3, :3].T + ws_t[:3, 3]).reshape(points.shape)
+        else:
+            pts_global = points
+
+        # Save last-overlap frames' global points for next window.
+        if self._overlap > 0:
+            n_save = min(self._overlap, n_frames)
+            self._prev_overlap_points = (
+                pts_global[-n_save:].detach().cpu().numpy().astype(np.float32)
+            )
+
         # Pi3 outputs global points and camera-to-world poses.
         # Convert points back to each camera frame and read local Z as depth.
+        # (Depth is invariant under Sim3 — it's local Z in the camera frame.)
         cam_inv = torch.inverse(cam_poses)
         pts_h = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
         local_pts = torch.einsum("tij,thwj->thwi", cam_inv, pts_h)[..., :3]
@@ -545,7 +647,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                 dm[dm > self._max_depth] = 0.0
 
             self._depth_cache[idx] = dm
-            self._pose_cache[idx] = (self._sim3 @ poses_np[i]).astype(np.float32)
+            # Apply inter-window Sim3 alignment, then external Pi3→GT transform.
+            aligned_pose = (window_sim3_np @ poses_np[i]).astype(np.float32)
+            self._pose_cache[idx] = (self._sim3 @ aligned_pose).astype(np.float32)
 
         # Signal per-frame waiters now that results are in cache.
         log.debug("[Pi3] signalling events for frames [%d..%d]", indices[0], indices[-1])
