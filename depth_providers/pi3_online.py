@@ -158,8 +158,16 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._prev_overlap_points: Optional[np.ndarray] = None   # (overlap, H, W, 3)
         self._prev_overlap_conf: Optional[np.ndarray] = None     # (overlap, H, W)
         self._prev_overlap_poses: Optional[np.ndarray] = None    # (overlap, 4, 4)
+        self._prev_overlap_mask: Optional[np.ndarray] = None     # (overlap, H, W) bool
+        # Data needed for prior injection (stored in local frame, NOT Sim3-aligned):
+        self._prev_local_depth: Optional[np.ndarray] = None      # (overlap, H, W)
+        self._prev_local_conf: Optional[np.ndarray] = None       # (overlap, H, W)
+        self._prev_rays: Optional[np.ndarray] = None             # (overlap, H, W, 3)
+        self._prev_aligned_poses: Optional[np.ndarray] = None    # (overlap, 4, 4) — Sim3-aligned
         # Cumulative Sim3 from first window's frame ("global Pi3 frame").
         self._cumulative_sim3 = np.eye(4, dtype=np.float32)
+        # Whether this is the first window (no priors available).
+        self._is_first_window = True
 
         # Async inference — background worker thread
         self._async_inference = bool(async_inference)
@@ -279,7 +287,13 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._prev_overlap_points = None
         self._prev_overlap_conf = None
         self._prev_overlap_poses = None
+        self._prev_overlap_mask = None
+        self._prev_local_depth = None
+        self._prev_local_conf = None
+        self._prev_rays = None
+        self._prev_aligned_poses = None
         self._cumulative_sim3 = np.eye(4, dtype=np.float32)
+        self._is_first_window = True
         with self._events_lock:
             self._frame_events.clear()
 
@@ -606,8 +620,6 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         imgs = imgs.to(self._device)
 
         n_frames = len(indices)
-        overlap_eff = min(self._overlap, max(0, n_frames - 1))
-        chunk_eff = min(self._window_size, n_frames)
         intrinsics_seq = self._build_intrinsics_seq(
             n_frames=n_frames,
             raw_h=ref_h,
@@ -619,22 +631,107 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         )
 
         log.info(
-            "[Pi3] inference start: %d frames, chunk=%d, overlap=%d, "
-            "img=%dx%d, model=%dx%d, preprocess=%s",
-            n_frames, chunk_eff, overlap_eff, ref_h, ref_w, model_h, model_w, preprocess_mode,
+            "[Pi3] inference start (direct model): %d frames, "
+            "img=%dx%d, model=%dx%d, preprocess=%s, priors=%s",
+            n_frames, ref_h, ref_w, model_h, model_w, preprocess_mode,
+            not self._is_first_window,
         )
         _t_inf = _time.perf_counter()
+
+        # ----------------------------------------------------------------
+        # Call the raw model DIRECTLY (bypass Pi3XVO.__call__) so we can
+        # inject priors from the previous window — exactly what Pi3XVO
+        # does between its internal chunks.
+        # ----------------------------------------------------------------
+        B = 1
+        raw_model = self._pipe.model  # the actual neural network
+        dtype = self._select_dtype()
+
+        model_kwargs: dict = {"with_prior": False}
+
+        # Intrinsics are always a prior when available.
+        if intrinsics_seq is not None:
+            model_kwargs["intrinsics"] = intrinsics_seq
+            model_kwargs["with_prior"] = True
+
+        # Inject priors from previous window's overlap (mirrors Pi3XVO logic).
+        n_overlap_for_prior = min(self._overlap, n_frames)
+        if not self._is_first_window and n_overlap_for_prior > 0:
+            device = self._device
+
+            if "pose" in self._inject_condition and self._prev_aligned_poses is not None:
+                n_avail = min(self._prev_aligned_poses.shape[0], n_overlap_for_prior)
+                prior_poses = torch.eye(4, device=device).repeat(B, n_frames, 1, 1)
+                prior_poses[0, :n_avail] = torch.from_numpy(
+                    self._prev_aligned_poses[-n_avail:]
+                ).to(device=device)
+                mask_pose = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
+                mask_pose[0, :n_avail] = True
+                model_kwargs["poses"] = prior_poses
+                model_kwargs["mask_add_pose"] = mask_pose
+                model_kwargs["with_prior"] = True
+                log.debug("[Pi3] injecting %d prior poses", n_avail)
+
+            if "depth" in self._inject_condition and self._prev_local_depth is not None:
+                n_avail = min(self._prev_local_depth.shape[0], n_overlap_for_prior)
+                _, _, mH, mW = imgs.shape  # model spatial dims
+                prior_depths = torch.zeros((B, n_frames, mH, mW), device=device)
+                prev_ld = torch.from_numpy(
+                    self._prev_local_depth[-n_avail:]
+                ).to(device=device)
+                # Resize if spatial dimensions changed.
+                if prev_ld.shape[-2:] != (mH, mW):
+                    prev_ld = torch.nn.functional.interpolate(
+                        prev_ld.unsqueeze(1), size=(mH, mW), mode="bilinear",
+                        align_corners=False,
+                    ).squeeze(1)
+                prior_depths[0, :n_avail] = prev_ld
+                mask_depth = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
+                mask_depth[0, :n_avail] = True
+                # Zero out low-confidence depth pixels.
+                if self._prev_local_conf is not None:
+                    prev_lc = torch.from_numpy(
+                        self._prev_local_conf[-n_avail:]
+                    ).to(device=device)
+                    if prev_lc.shape[-2:] != (mH, mW):
+                        prev_lc = torch.nn.functional.interpolate(
+                            prev_lc.unsqueeze(1), size=(mH, mW), mode="bilinear",
+                            align_corners=False,
+                        ).squeeze(1)
+                    prior_depths[0, :n_avail][prev_lc < self._conf_threshold] = 0
+                model_kwargs["depths"] = prior_depths
+                model_kwargs["mask_add_depth"] = mask_depth
+                model_kwargs["with_prior"] = True
+                log.debug("[Pi3] injecting %d prior depth maps", n_avail)
+
+            if (
+                ("ray" in self._inject_condition or "intrinsic" in self._inject_condition)
+                and self._prev_rays is not None
+            ):
+                n_avail = min(self._prev_rays.shape[0], n_overlap_for_prior)
+                _, _, mH, mW = imgs.shape
+                prior_rays = torch.zeros((B, n_frames, mH, mW, 3), device=device)
+                prev_r = torch.from_numpy(
+                    self._prev_rays[-n_avail:]
+                ).to(device=device)
+                if prev_r.shape[1:3] != (mH, mW):
+                    prev_r = prev_r.permute(0, 3, 1, 2)
+                    prev_r = torch.nn.functional.interpolate(
+                        prev_r, size=(mH, mW), mode="bilinear", align_corners=False,
+                    )
+                    prev_r = prev_r.permute(0, 2, 3, 1)
+                prior_rays[0, :n_avail] = prev_r
+                mask_ray = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
+                mask_ray[0, :n_avail] = True
+                model_kwargs["rays"] = prior_rays
+                model_kwargs["mask_add_ray"] = mask_ray
+                model_kwargs["with_prior"] = True
+                log.debug("[Pi3] injecting %d prior ray maps", n_avail)
+
         try:
             with torch.no_grad():
-                results = self._pipe(
-                    imgs=imgs[None],
-                    chunk_size=chunk_eff,
-                    overlap=overlap_eff,
-                    conf_thre=self._conf_threshold,
-                    inject_condition=self._inject_condition,
-                    intrinsics=intrinsics_seq,
-                    dtype=self._select_dtype(),
-                )
+                with torch.amp.autocast("cuda", dtype=dtype):
+                    pred = raw_model(imgs[None], **model_kwargs)
         except Exception as exc:
             if not self._device.startswith("cuda"):
                 raise RuntimeError(
@@ -647,51 +744,61 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         log.info("[Pi3] inference done: %.1f ms for %d frames (%.1f ms/frame)",
                  _inf_ms, n_frames, _inf_ms / max(1, n_frames))
 
-        points = results["points"][0]       # (T, H, W, 3)
-        cam_poses = results["camera_poses"][0]  # (T, 4, 4)
-        # Confidence map — Pi3XVO returns (B, T, H, W) or similar.
-        raw_conf = results.get("conf")
-        if raw_conf is not None:
-            conf = raw_conf[0]  # (T, H, W)
-            if conf.dim() == 4:
-                conf = conf[..., 0]
-        else:
-            conf = None
+        # ---- Extract raw predictions (same as Pi3XVO internal) ---- 
+        curr_local_depth = pred["local_points"][..., 2]        # (B, T, H, W)
+        curr_pts = pred["points"]                               # (B, T, H, W, 3)
+        curr_poses = pred["camera_poses"]                       # (B, T, 4, 4)
+        curr_conf = torch.sigmoid(pred["conf"])[..., 0]        # (B, T, H, W)
+        curr_rays = pred.get("rays")                            # (B, T, H, W, 3) or None
+        del pred  # free model output early
+        for k in list(model_kwargs.keys()):
+            del model_kwargs[k]
+        torch.cuda.empty_cache()
 
-        # ---- Depth edge filtering (mirrors Pi3XVO internal logic) ----
-        cam_inv = torch.inverse(cam_poses)
-        pts_h = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        local_pts = torch.einsum("tij,thwj->thwi", cam_inv, pts_h)[..., :3]
-        local_depth = local_pts[..., 2]  # (T, H, W)
+        # Depth edge filtering → zero conf at edges.
+        edge = self._depth_edge(curr_local_depth[0], rtol=0.03)  # (T, H, W)
+        curr_conf[0][edge] = 0
 
-        if conf is not None:
-            edge = self._depth_edge(local_depth, rtol=0.03)
-            conf = conf.clone()
-            conf[edge] = 0
+        # Confidence mask.
+        conf_mask = curr_conf > self._conf_threshold             # (B, T, H, W)
+        if conf_mask.sum() < 10:
+            flat_conf = curr_conf.view(B, n_frames, -1)
+            k = max(10, int(flat_conf.shape[-1] * 0.1))
+            topk_vals, _ = torch.topk(flat_conf, k, dim=-1)
+            min_vals = topk_vals[..., -1].unsqueeze(-1).unsqueeze(-1)
+            conf_mask = curr_conf >= min_vals
 
-        # ---- Inter-window Sim3 alignment (Umeyama on overlap) ----
+        # ---- Inter-window Sim3 (Umeyama on overlap) ----
+        points = curr_pts[0]        # (T, H, W, 3)
+        cam_poses = curr_poses[0]   # (T, 4, 4)
+        conf = curr_conf[0]         # (T, H, W)
+        mask = conf_mask[0]         # (T, H, W)
+
         window_sim3_np = np.eye(4, dtype=np.float32)
         n_overlap_used = min(self._overlap, n_frames)
         if self._prev_overlap_points is not None and n_overlap_used > 0:
-            prev_pts = self._prev_overlap_points  # (overlap, H, W, 3)
+            prev_pts = self._prev_overlap_points
             n_match = min(prev_pts.shape[0], n_overlap_used)
             src_pts = points[:n_match]
+            src_mask_t = mask[:n_match]
             tgt_pts_np = prev_pts[-n_match:]
             tgt_pts = torch.from_numpy(tgt_pts_np).to(
                 device=points.device, dtype=points.dtype
             )
-            # Confidence masks for overlap region
-            src_conf = conf[:n_match] if conf is not None else None
-            tgt_conf = None
-            if self._prev_overlap_conf is not None:
-                tgt_conf_np = self._prev_overlap_conf[-n_match:]
-                tgt_conf = torch.from_numpy(tgt_conf_np).to(
-                    device=points.device, dtype=points.dtype
+            tgt_mask_t = None
+            if self._prev_overlap_mask is not None:
+                tgt_mask_np = self._prev_overlap_mask[-n_match:]
+                tgt_mask_t = torch.from_numpy(tgt_mask_np).to(
+                    device=points.device, dtype=torch.bool
                 )
+            # Use boolean masks (matches Pi3XVO's _compute_sim3_umeyama_masked).
+            src_conf_for_sim3 = src_mask_t.float()
+            tgt_conf_for_sim3 = tgt_mask_t.float() if tgt_mask_t is not None else None
             window_sim3_np = self._compute_window_sim3(
                 src_pts, tgt_pts,
-                src_conf=src_conf, tgt_conf=tgt_conf,
-                conf_thre=self._conf_threshold,
+                src_conf=src_conf_for_sim3,
+                tgt_conf=tgt_conf_for_sim3,
+                conf_thre=0.5,  # masks are 0/1, so 0.5 separates them
             )
             if not np.allclose(window_sim3_np, np.eye(4), atol=1e-5):
                 log.info(
@@ -699,33 +806,55 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                     np.linalg.det(window_sim3_np[:3, :3]) ** (1.0 / 3.0),
                 )
 
-        # Transform points to global Pi3 frame for overlap storage.
+        # Apply Sim3 to points and poses (same helpers Pi3XVO uses).
         if not np.allclose(window_sim3_np, np.eye(4), atol=1e-6):
             ws_t = torch.from_numpy(window_sim3_np).to(
                 device=points.device, dtype=points.dtype
             )
             pts_flat = points.reshape(-1, 3)
             pts_global = (pts_flat @ ws_t[:3, :3].T + ws_t[:3, 3]).reshape(points.shape)
+            # Sim3 also applies to poses: T_aligned = Sim3 @ T_local
+            aligned_poses = ws_t.unsqueeze(0) @ cam_poses
         else:
             pts_global = points
+            aligned_poses = cam_poses
 
-        # Save last-overlap frames' global points + conf for next window.
+        # ---- Store overlap data for next window ----
         if self._overlap > 0:
             n_save = min(self._overlap, n_frames)
             self._prev_overlap_points = (
                 pts_global[-n_save:].detach().cpu().numpy().astype(np.float32)
             )
-            if conf is not None:
-                self._prev_overlap_conf = (
-                    conf[-n_save:].detach().cpu().numpy().astype(np.float32)
-                )
-            self._prev_overlap_poses = (
-                cam_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
+            self._prev_overlap_conf = (
+                conf[-n_save:].detach().cpu().numpy().astype(np.float32)
             )
+            self._prev_overlap_poses = (
+                aligned_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
+            )
+            self._prev_overlap_mask = (
+                mask[-n_save:].detach().cpu().numpy()
+            )
+            # For prior injection: store LOCAL-frame data (not Sim3-aligned)
+            self._prev_aligned_poses = (
+                aligned_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
+            )
+            self._prev_local_depth = (
+                curr_local_depth[0, -n_save:].detach().cpu().numpy().astype(np.float32)
+            )
+            self._prev_local_conf = (
+                conf[-n_save:].detach().cpu().numpy().astype(np.float32)
+            )
+            if curr_rays is not None:
+                self._prev_rays = (
+                    curr_rays[0, -n_save:].detach().cpu().numpy().astype(np.float32)
+                )
 
-        # Convert points back to each camera frame, read local Z as depth.
+        self._is_first_window = False
+
+        # ---- Depth and pose output ----
+        local_depth = curr_local_depth[0]  # (T, H, W)
         depth_maps = local_depth.detach().cpu().numpy()
-        poses_np = cam_poses.detach().cpu().numpy().astype(np.float32)
+        poses_np = aligned_poses.detach().cpu().numpy().astype(np.float32)
 
         for i, idx in enumerate(indices):
             dm = depth_maps[i].astype(np.float32)
@@ -746,9 +875,8 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                 dm[dm > self._max_depth] = 0.0
 
             self._depth_cache[idx] = dm
-            # Apply inter-window Sim3 alignment, then external Pi3→GT transform.
-            aligned_pose = (window_sim3_np @ poses_np[i]).astype(np.float32)
-            self._pose_cache[idx] = (self._sim3 @ aligned_pose).astype(np.float32)
+            # Poses are already Sim3-aligned; apply external Pi3→GT transform.
+            self._pose_cache[idx] = (self._sim3 @ poses_np[i]).astype(np.float32)
 
         # Signal per-frame waiters now that results are in cache.
         log.debug("[Pi3] signalling events for frames [%d..%d]", indices[0], indices[-1])
