@@ -100,7 +100,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self,
         model_name: str = "yyfz233/Pi3X",
         window_size: int = 13,
-        overlap: int = 5,
+        overlap: int = 10,
         target_size: Optional[tuple[int, int]] = None,  # (H, W)
         device: Optional[str] = None,
         max_cache: int = 128,
@@ -155,7 +155,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
 
         # Inter-window Sim3 stitching — overlap data from previous window
         # Stored in "global Pi3 frame" (= first window's frame).
-        self._prev_overlap_points: Optional[np.ndarray] = None  # (overlap, H, W, 3)
+        self._prev_overlap_points: Optional[np.ndarray] = None   # (overlap, H, W, 3)
+        self._prev_overlap_conf: Optional[np.ndarray] = None     # (overlap, H, W)
+        self._prev_overlap_poses: Optional[np.ndarray] = None    # (overlap, 4, 4)
+        # Cumulative Sim3 from first window's frame ("global Pi3 frame").
+        self._cumulative_sim3 = np.eye(4, dtype=np.float32)
 
         # Async inference — background worker thread
         self._async_inference = bool(async_inference)
@@ -273,6 +277,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._depth_cache.clear()
         self._pose_cache.clear()
         self._prev_overlap_points = None
+        self._prev_overlap_conf = None
+        self._prev_overlap_poses = None
+        self._cumulative_sim3 = np.eye(4, dtype=np.float32)
         with self._events_lock:
             self._frame_events.clear()
 
@@ -420,9 +427,40 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         return int(k * p), int(m * p)
 
     @staticmethod
+    def _depth_edge(
+        depth: "torch.Tensor",
+        rtol: float = 0.03,
+        kernel_size: int = 3,
+    ) -> "torch.Tensor":
+        """Detect depth discontinuity edges (mirrors Pi3's ``depth_edge``).
+
+        Parameters
+        ----------
+        depth : Tensor (..., H, W) — linear depth values.
+        rtol  : relative tolerance for neighbor depth differences.
+
+        Returns
+        -------
+        BoolTensor of the same shape — True at edge pixels.
+        """
+        import torch.nn.functional as F
+        shape = depth.shape
+        d = depth.reshape(-1, 1, *shape[-2:])
+        pad = kernel_size // 2
+        diff = (
+            F.max_pool2d(d, kernel_size, stride=1, padding=pad)
+            + F.max_pool2d(-d, kernel_size, stride=1, padding=pad)
+        )
+        edge = ((diff / d).nan_to_num_() > rtol)
+        return edge.reshape(shape)
+
+    @staticmethod
     def _compute_window_sim3(
         src_pts: "torch.Tensor",
         tgt_pts: "torch.Tensor",
+        src_conf: "torch.Tensor | None" = None,
+        tgt_conf: "torch.Tensor | None" = None,
+        conf_thre: float = 0.05,
     ) -> np.ndarray:
         """Umeyama Sim(3) aligning *src_pts* → *tgt_pts* (overlap frames).
 
@@ -430,6 +468,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         ----------
         src_pts, tgt_pts : Tensor (T, H, W, 3)
             3-D point maps for the overlap frames in two different frames.
+        src_conf, tgt_conf : Tensor (T, H, W) or None
+            Per-pixel confidence maps.  Pixels below *conf_thre* are excluded
+            from the Sim(3) estimation.
+        conf_thre : float
+            Confidence threshold (pixels with conf <= conf_thre are masked out).
 
         Returns
         -------
@@ -439,17 +482,40 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         src = src_pts.reshape(-1, 3)
         tgt = tgt_pts.reshape(-1, 3)
 
-        # Valid mask: both finite and non-degenerate.
+        # Valid mask: finite + non-degenerate.
         src_ok = torch.isfinite(src).all(-1) & (src.abs().sum(-1) > 1e-6)
         tgt_ok = torch.isfinite(tgt).all(-1) & (tgt.abs().sum(-1) > 1e-6)
         mask = src_ok & tgt_ok
+
+        # Confidence filtering (mirrors Pi3XVO's _compute_sim3_umeyama_masked).
+        if src_conf is not None:
+            mask = mask & (src_conf.reshape(-1) > conf_thre)
+        if tgt_conf is not None:
+            mask = mask & (tgt_conf.reshape(-1) > conf_thre)
 
         src_m = src[mask]
         tgt_m = tgt[mask]
         n = src_m.shape[0]
 
         if n < 10:
-            return np.eye(4, dtype=np.float32)
+            # Fallback: if confident points are too few, relax to top-10 %
+            # of whichever confidence map is available.
+            if src_conf is not None or tgt_conf is not None:
+                geom_mask = src_ok & tgt_ok
+                if geom_mask.sum() >= 10:
+                    combined_conf = torch.ones(geom_mask.shape[0], device=device)
+                    if src_conf is not None:
+                        combined_conf = combined_conf * src_conf.reshape(-1)
+                    if tgt_conf is not None:
+                        combined_conf = combined_conf * tgt_conf.reshape(-1)
+                    combined_conf[~geom_mask] = -1
+                    k = max(10, int(geom_mask.sum().item() * 0.1))
+                    topk_vals, topk_idx = torch.topk(combined_conf, k)
+                    src_m = src[topk_idx]
+                    tgt_m = tgt[topk_idx]
+                    n = src_m.shape[0]
+            if n < 10:
+                return np.eye(4, dtype=np.float32)
 
         # Centroids.
         src_mean = src_m.mean(0)
@@ -581,8 +647,27 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         log.info("[Pi3] inference done: %.1f ms for %d frames (%.1f ms/frame)",
                  _inf_ms, n_frames, _inf_ms / max(1, n_frames))
 
-        points = results["points"][0]
-        cam_poses = results["camera_poses"][0]
+        points = results["points"][0]       # (T, H, W, 3)
+        cam_poses = results["camera_poses"][0]  # (T, 4, 4)
+        # Confidence map — Pi3XVO returns (B, T, H, W) or similar.
+        raw_conf = results.get("conf")
+        if raw_conf is not None:
+            conf = raw_conf[0]  # (T, H, W)
+            if conf.dim() == 4:
+                conf = conf[..., 0]
+        else:
+            conf = None
+
+        # ---- Depth edge filtering (mirrors Pi3XVO internal logic) ----
+        cam_inv = torch.inverse(cam_poses)
+        pts_h = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        local_pts = torch.einsum("tij,thwj->thwi", cam_inv, pts_h)[..., :3]
+        local_depth = local_pts[..., 2]  # (T, H, W)
+
+        if conf is not None:
+            edge = self._depth_edge(local_depth, rtol=0.03)
+            conf = conf.clone()
+            conf[edge] = 0
 
         # ---- Inter-window Sim3 alignment (Umeyama on overlap) ----
         window_sim3_np = np.eye(4, dtype=np.float32)
@@ -590,12 +675,24 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         if self._prev_overlap_points is not None and n_overlap_used > 0:
             prev_pts = self._prev_overlap_points  # (overlap, H, W, 3)
             n_match = min(prev_pts.shape[0], n_overlap_used)
-            src_pts = points[:n_match]  # current window's first overlap frames (local)
-            tgt_pts_np = prev_pts[-n_match:]  # previous window's last overlap frames (global)
+            src_pts = points[:n_match]
+            tgt_pts_np = prev_pts[-n_match:]
             tgt_pts = torch.from_numpy(tgt_pts_np).to(
                 device=points.device, dtype=points.dtype
             )
-            window_sim3_np = self._compute_window_sim3(src_pts, tgt_pts)
+            # Confidence masks for overlap region
+            src_conf = conf[:n_match] if conf is not None else None
+            tgt_conf = None
+            if self._prev_overlap_conf is not None:
+                tgt_conf_np = self._prev_overlap_conf[-n_match:]
+                tgt_conf = torch.from_numpy(tgt_conf_np).to(
+                    device=points.device, dtype=points.dtype
+                )
+            window_sim3_np = self._compute_window_sim3(
+                src_pts, tgt_pts,
+                src_conf=src_conf, tgt_conf=tgt_conf,
+                conf_thre=self._conf_threshold,
+            )
             if not np.allclose(window_sim3_np, np.eye(4), atol=1e-5):
                 log.info(
                     "[Pi3] inter-window Sim3 applied (scale=%.4f)",
@@ -612,20 +709,22 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         else:
             pts_global = points
 
-        # Save last-overlap frames' global points for next window.
+        # Save last-overlap frames' global points + conf for next window.
         if self._overlap > 0:
             n_save = min(self._overlap, n_frames)
             self._prev_overlap_points = (
                 pts_global[-n_save:].detach().cpu().numpy().astype(np.float32)
             )
+            if conf is not None:
+                self._prev_overlap_conf = (
+                    conf[-n_save:].detach().cpu().numpy().astype(np.float32)
+                )
+            self._prev_overlap_poses = (
+                cam_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
+            )
 
-        # Pi3 outputs global points and camera-to-world poses.
-        # Convert points back to each camera frame and read local Z as depth.
-        # (Depth is invariant under Sim3 — it's local Z in the camera frame.)
-        cam_inv = torch.inverse(cam_poses)
-        pts_h = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        local_pts = torch.einsum("tij,thwj->thwi", cam_inv, pts_h)[..., :3]
-        depth_maps = local_pts[..., 2].detach().cpu().numpy()
+        # Convert points back to each camera frame, read local Z as depth.
+        depth_maps = local_depth.detach().cpu().numpy()
         poses_np = cam_poses.detach().cpu().numpy().astype(np.float32)
 
         for i, idx in enumerate(indices):
