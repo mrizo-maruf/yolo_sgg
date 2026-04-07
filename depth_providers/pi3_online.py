@@ -186,6 +186,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._depth_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._pose_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
+        # Dedup: track which frame indices have been fed
+        self._fed_frames: set[int] = set()
+
         # Async worker
         self._async_inference = bool(async_inference)
         self._input_queue: queue.Queue = queue.Queue()
@@ -207,6 +210,9 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     def feed_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
         if rgb is None:
             return
+        if frame_idx in self._fed_frames:
+            return
+        self._fed_frames.add(frame_idx)
         with self._events_lock:
             self._frame_events.setdefault(frame_idx, threading.Event())
         if self._async_inference:
@@ -216,6 +222,25 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             return
         # Synchronous path
         self._push_frame(frame_idx, rgb)
+
+    def drain(self, timeout: float = 300.0) -> None:
+        """Flush remaining buffered frames and wait for all results.
+
+        Call this after feeding all frames to ensure Pi3XVOStream processes
+        any partial chunk that hasn't reached ``chunk_size`` yet.
+        """
+        if not self._async_inference:
+            # Sync path: flush directly
+            if self._stream is not None and len(self._stream._buffer) > 0:
+                results = self._stream.flush()
+                if results is not None:
+                    self._handle_results(results)
+            return
+        # Async path: send drain sentinel and wait
+        done = threading.Event()
+        self._input_queue.put(("__drain__", done))
+        done.wait(timeout=timeout)
+        log.info("[Pi3] drain complete")
 
     def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
         if frame_idx not in self._depth_cache:
@@ -262,6 +287,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._index_buffer.clear()
         self._is_first_chunk = True
         self._raw_h = self._raw_w = None
+        self._fed_frames.clear()
         with self._events_lock:
             self._frame_events.clear()
         if torch is not None and self._device.startswith("cuda"):
@@ -518,33 +544,32 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         log.info("[Pi3] async worker running")
         while not self._worker_stop.is_set():
             try:
-                item = self._input_queue.get(timeout=0.5)
+                item = self._input_queue.get(timeout=1.0)
             except queue.Empty:
-                # Idle: flush buffered frames if enough for new output
-                if self._stream is not None:
-                    n_buf = len(self._stream._buffer)
-                    min_needed = (
-                        1 if self._is_first_chunk else self._overlap + 1
-                    )
-                    if n_buf >= min_needed:
-                        log.info("[Pi3] idle flush, %d buffered", n_buf)
-                        results = self._stream._process_chunk()
-                        if results is not None:
-                            self._handle_results(results)
                 continue
 
             if item is None:
                 break
 
+            # Drain sentinel: flush remaining frames
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == "__drain__":
+                done_event = item[1]
+                if self._stream is not None and len(self._stream._buffer) > 0:
+                    log.info("[Pi3] drain: flushing %d buffered frames",
+                             len(self._stream._buffer))
+                    results = self._stream.flush()
+                    if results is not None:
+                        self._handle_results(results)
+                done_event.set()
+                continue
+
             frame_idx, rgb = item
             self._push_frame(frame_idx, rgb)
 
-        # Final drain
+        # Final drain on shutdown
         if self._stream is not None and len(self._stream._buffer) > 0:
-            min_needed = 1 if self._is_first_chunk else self._overlap + 1
-            if len(self._stream._buffer) >= min_needed:
-                log.info("[Pi3] draining %d frames", len(self._stream._buffer))
-                results = self._stream._process_chunk()
-                if results is not None:
-                    self._handle_results(results)
+            log.info("[Pi3] shutdown drain: %d frames", len(self._stream._buffer))
+            results = self._stream.flush()
+            if results is not None:
+                self._handle_results(results)
         log.info("[Pi3] async worker exiting")

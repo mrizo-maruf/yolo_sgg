@@ -122,6 +122,20 @@ def main() -> int:
           f"cx={intrinsics.cx:.1f}  cy={intrinsics.cy:.1f}  "
           f"image={intrinsics.width}x{intrinsics.height}")
 
+    # --- Pre-feed all frames to Pi3 streaming depth provider ---
+    # Pi3XVOStream processes frames in chunks (e.g. 30).  The tracking loop
+    # feeds one frame at a time and blocks on get_depth / get_pose, which
+    # would deadlock if we waited for chunk_size frames.  Feeding all frames
+    # upfront lets Pi3 process full chunks and cache all results before the
+    # tracking loop needs them.
+    if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
+        print(f"[Pi3] Pre-feeding {n_frames} frames ...")
+        for idx in range(n_frames):
+            rgb, _ = loader.get_rgb(idx)        # also calls feed_frame internally
+        if hasattr(depth_provider, "drain"):
+            depth_provider.drain()
+        print("[Pi3] Pre-computation complete.")
+
     # --- Object registry ---
     object_registry = GlobalObjectRegistry(
         overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
