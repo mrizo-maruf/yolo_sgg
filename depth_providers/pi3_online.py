@@ -128,7 +128,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         inject_condition: Optional[Sequence[str]] = None,
         intrinsics: Optional[np.ndarray] = None,
         intrinsics_image_size: Optional[tuple[int, int]] = None,
-        use_original_size: bool = True,
+        use_original_size: bool = False,
         pixel_limit: int = 255_000,
         patch_size: int = 14,
         async_inference: bool = True,
@@ -272,7 +272,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     # ==============================================================
 
     def _load_model(self) -> None:
-        if self._stream is not None:
+        if self._model is not None:
             return
         if torch is None:
             raise RuntimeError("Pi3OnlineDepthProvider requires torch")
@@ -281,21 +281,11 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
                 f"Device {self._device!r} requested but CUDA unavailable"
             )
 
-        Pi3X, Pi3XVOStream = self._import_pi3_modules()
+        Pi3X, _ = self._import_pi3_modules()
         log.info("[Pi3] loading %s on %s ...", self._model_name, self._device)
 
-        model = Pi3X.from_pretrained(self._model_name).to(self._device).eval()
-        self._model = model
-
-        self._stream = Pi3XVOStream(
-            model=model,
-            chunk_size=self._chunk_size,
-            overlap=self._overlap,
-            conf_thre=self._conf_threshold,
-            inject_condition=self._inject_condition or [],
-            dtype=self._select_dtype(),
-        )
-        log.info("[Pi3] model + Pi3XVOStream ready")
+        self._model = Pi3X.from_pretrained(self._model_name).to(self._device).eval()
+        log.info("[Pi3] model loaded")
 
     @staticmethod
     def _import_pi3_modules():
@@ -347,10 +337,20 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
             w, h, mw, mh, self._preprocess_mode,
         )
 
-        # Set shared intrinsics on the stream
+        # Create the Pi3XVOStream with intrinsics known upfront
         K_tensor = self._build_intrinsics_tensor()
-        if K_tensor is not None and self._stream is not None:
-            self._stream.intrinsics = K_tensor
+        _, Pi3XVOStream = self._import_pi3_modules()
+        self._stream = Pi3XVOStream(
+            model=self._model,
+            chunk_size=self._chunk_size,
+            overlap=self._overlap,
+            conf_thre=self._conf_threshold,
+            inject_condition=self._inject_condition or [],
+            intrinsics=K_tensor,
+            dtype=self._select_dtype(),
+        )
+        log.info("[Pi3] Pi3XVOStream created (intrinsics=%s)",
+                 "set" if K_tensor is not None else "none")
 
     def _compute_model_size(self, raw_h: int, raw_w: int) -> tuple[int, int]:
         p = self._patch_size
@@ -416,7 +416,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     # ==============================================================
 
     def _push_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
-        if self._stream is None:
+        if self._model is None:
             self._load_model()
         if self._raw_h is None:
             self._setup_on_first_frame(rgb)
