@@ -434,8 +434,8 @@ def _build_pi3_online(dataset_name: str, cfg) -> DepthProvider:
 
     return Pi3OnlineDepthProvider(
         model_name=str(cfg.get("pi3_model", cfg.get("pi3_model_name", "yyfz233/Pi3X"))),
-        window_size=int(cfg.get("pi3_window_size", 13)),
-        overlap=int(cfg.get("pi3_overlap", 5)),
+        chunk_size=int(cfg.get("pi3_chunk_size", cfg.get("pi3_window_size", 30))),
+        overlap=int(cfg.get("pi3_overlap", 10)),
         target_size=target_size,
         device=(
             str(cfg.get("pi3_device"))

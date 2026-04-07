@@ -20,7 +20,7 @@ pi3_patch_size: 14
 # pi3_device: "cuda:0"
 # pi3_target_height: 720
 # pi3_target_width: 1280
-# pi3_inject_condition: []  # e.g. ["pose", "depth"]
+pi3_inject_condition: ["pose", "depth", "ray"]  # e.g. ["pose", "depth"]
 
 # --- YOLO model ---
 is_open_vocabulary: true

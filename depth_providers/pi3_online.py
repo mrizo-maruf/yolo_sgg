@@ -1,4 +1,14 @@
-"""Pi3 online / streaming depth provider."""
+"""Pi3 online / streaming depth provider backed by Pi3XVOStream.
+
+Delegates all inference, chunking, inter-chunk Sim3 stitching, confidence
+filtering, and depth-edge masking to ``Pi3XVOStream``.  This class handles:
+
+- RGB preprocessing (pad / resize + normalisation)
+- Async background inference via a worker thread
+- Per-frame depth / pose caching with ``Event``-based blocking
+- External Sim(3) transform (Pi3 world -> GT world)
+- Depth post-processing (un-pad / un-resize, min / max clamping)
+"""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -18,18 +28,17 @@ import numpy as np
 
 from .base import OnlineDepthProvider
 
-try:  # Optional dependency for environments that do not use Pi3 online.
+try:
     import torch
 except Exception:  # pragma: no cover
     torch = None
 
+# ------------------------------------------------------------------
+#  Helpers
+# ------------------------------------------------------------------
 
 def _load_sim3_matrix(path_str: str, require: bool) -> np.ndarray:
-    """Load a Sim(3) 4x4 matrix from a JSON file.
-
-    The JSON may contain either ``sim3_matrix_4x4`` (flat or nested 4x4) or
-    separate ``scale``, ``rotation`` (3x3), ``translation`` (3,) keys.
-    """
+    """Load a Sim(3) 4x4 matrix from a JSON file."""
     path = Path(path_str)
     if not path.exists():
         if require:
@@ -48,28 +57,23 @@ def _load_sim3_matrix(path_str: str, require: bool) -> np.ndarray:
         rotation = np.asarray(payload["rotation"], dtype=np.float64)
         translation = np.asarray(payload["translation"], dtype=np.float64)
         if rotation.shape != (3, 3):
-            raise ValueError(f"rotation must be 3x3, got shape {rotation.shape}")
+            raise ValueError(f"rotation must be 3x3, got {rotation.shape}")
         if translation.shape != (3,):
-            raise ValueError(
-                f"translation must be shape (3,), got shape {translation.shape}"
-            )
+            raise ValueError(f"translation must be (3,), got {translation.shape}")
         sim3 = np.eye(4, dtype=np.float64)
         sim3[:3, :3] = scale * rotation
         sim3[:3, 3] = translation
 
     if not np.isfinite(sim3).all():
         raise ValueError(f"Invalid values in Sim(3) transform: {path}")
-
     return sim3.astype(np.float32)
 
 
 def _normalize_torch_device(device: Optional[str]) -> str:
-    """Normalize user/device-config strings into a torch-friendly device."""
     if device is None:
         if torch is not None and torch.cuda.is_available():
             return "cuda"
         return "cpu"
-
     raw = str(device).strip()
     low = raw.lower()
     if low in {"cpu", "mps"}:
@@ -81,48 +85,61 @@ def _normalize_torch_device(device: Optional[str]) -> str:
     return raw
 
 
-class Pi3OnlineDepthProvider(OnlineDepthProvider):
-    """Streaming depth+pose provider using Pi3XVO.
+def _validate_intrinsics(K: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if K is None:
+        return None
+    K = np.asarray(K, dtype=np.float32)
+    if K.shape != (3, 3):
+        raise ValueError(f"intrinsics must be 3x3, got {K.shape}")
+    if not np.isfinite(K).all():
+        raise ValueError("intrinsics contains non-finite values")
+    return K
 
-    Notes
-    -----
-    - Maintains a temporal RGB buffer.
-    - Runs Pi3 inference on buffered frames with configurable
-      ``window_size`` and ``overlap``.
-    - Caches per-frame depth + pose for random access by frame index.
-    - When ``async_inference=True`` (default), Pi3 inference runs in a
-      background thread so YOLO + 3-D tracking can overlap with it.
-      ``get_depth`` blocks only if the result is not cached yet (ideally
-      it arrives before tracking needs it).
-    """
+
+def _validate_intrinsics_size(
+    size: Optional[tuple[int, int]],
+) -> Optional[tuple[int, int]]:
+    if size is None:
+        return None
+    h, w = int(size[0]), int(size[1])
+    if h <= 0 or w <= 0:
+        raise ValueError(f"intrinsics_image_size must be positive, got {(h, w)}")
+    return (h, w)
+
+
+# ------------------------------------------------------------------
+#  Provider
+# ------------------------------------------------------------------
+
+class Pi3OnlineDepthProvider(OnlineDepthProvider):
+    """Streaming depth+pose provider backed by ``Pi3XVOStream``."""
 
     def __init__(
         self,
         model_name: str = "yyfz233/Pi3X",
-        window_size: int = 13,
+        chunk_size: int = 30,
         overlap: int = 10,
-        target_size: Optional[tuple[int, int]] = None,  # (H, W)
+        target_size: Optional[tuple[int, int]] = None,
         device: Optional[str] = None,
         max_cache: int = 128,
         min_depth: float = 0.01,
         max_depth: float = 0.0,
         conf_threshold: float = 0.05,
         inject_condition: Optional[Sequence[str]] = None,
-        intrinsics: Optional[np.ndarray] = None,          # 3x3 (base resolution)
-        intrinsics_image_size: Optional[tuple[int, int]] = None,  # (H, W)
+        intrinsics: Optional[np.ndarray] = None,
+        intrinsics_image_size: Optional[tuple[int, int]] = None,
         use_original_size: bool = True,
-        pixel_limit: int = 255000,
+        pixel_limit: int = 255_000,
         patch_size: int = 14,
         async_inference: bool = True,
         transform_path: Optional[str] = None,
         require_transform: bool = False,
     ) -> None:
         self._model_name = str(model_name)
-
-        self._window_size = max(1, int(window_size))
+        self._chunk_size = max(1, int(chunk_size))
         self._overlap = max(0, int(overlap))
-        if self._overlap >= self._window_size:
-            self._overlap = self._window_size - 1
+        if self._overlap >= self._chunk_size:
+            self._overlap = self._chunk_size - 1
 
         self._target_size = target_size
         self._device = _normalize_torch_device(device)
@@ -131,45 +148,45 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._min_depth = float(min_depth)
         self._max_depth = float(max_depth)
         self._conf_threshold = float(conf_threshold)
-        self._inject_condition = [str(x) for x in (inject_condition or [])]
+        self._inject_condition: list[str] = [
+            str(x) for x in (inject_condition or [])
+        ]
         self._use_original_size = bool(use_original_size)
         self._pixel_limit = int(max(1, pixel_limit))
         self._patch_size = int(max(1, patch_size))
 
-        self._base_K = self._validate_intrinsics(intrinsics)
-        self._base_intrinsics_size = self._validate_intrinsics_image_size(
-            intrinsics_image_size
+        self._base_K = _validate_intrinsics(intrinsics)
+        self._base_intrinsics_size = _validate_intrinsics_size(intrinsics_image_size)
+
+        # External Sim(3): Pi3 world -> GT world
+        self._sim3: np.ndarray = (
+            _load_sim3_matrix(transform_path, require_transform)
+            if transform_path
+            else np.eye(4, dtype=np.float32)
         )
-
-        # Sim(3) alignment: Pi3 world → GT world
-        self._sim3 = _load_sim3_matrix(transform_path, require_transform) if transform_path else np.eye(4, dtype=np.float32)
         if not np.allclose(self._sim3, np.eye(4)):
-            log.info("[Pi3] Sim(3) alignment transform loaded from %s", transform_path)
+            log.info("[Pi3] Sim(3) loaded from %s", transform_path)
 
+        # Model / stream pipeline (lazy-loaded)
         self._model = None
-        self._pipe = None
+        self._stream = None  # Pi3XVOStream instance
 
-        self._buffer: OrderedDict[int, np.ndarray] = OrderedDict()
+        # Preprocessing state (computed from first frame)
+        self._raw_h: Optional[int] = None
+        self._raw_w: Optional[int] = None
+        self._model_h: int = 0
+        self._model_w: int = 0
+        self._preprocess_mode: str = "none"  # "none" | "pad" | "resize"
+
+        # Frame-index buffer (kept in sync with Pi3XVOStream's internal buffer)
+        self._index_buffer: list[int] = []
+        self._is_first_chunk: bool = True
+
+        # Result caches
         self._depth_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._pose_cache: OrderedDict[int, np.ndarray] = OrderedDict()
 
-        # Inter-window Sim3 stitching — overlap data from previous window
-        # Stored in "global Pi3 frame" (= first window's frame).
-        self._prev_overlap_points: Optional[np.ndarray] = None   # (overlap, H, W, 3)
-        self._prev_overlap_conf: Optional[np.ndarray] = None     # (overlap, H, W)
-        self._prev_overlap_poses: Optional[np.ndarray] = None    # (overlap, 4, 4)
-        self._prev_overlap_mask: Optional[np.ndarray] = None     # (overlap, H, W) bool
-        # Data needed for prior injection (stored in local frame, NOT Sim3-aligned):
-        self._prev_local_depth: Optional[np.ndarray] = None      # (overlap, H, W)
-        self._prev_local_conf: Optional[np.ndarray] = None       # (overlap, H, W)
-        self._prev_rays: Optional[np.ndarray] = None             # (overlap, H, W, 3)
-        self._prev_aligned_poses: Optional[np.ndarray] = None    # (overlap, 4, 4) — Sim3-aligned
-        # Cumulative Sim3 from first window's frame ("global Pi3 frame").
-        self._cumulative_sim3 = np.eye(4, dtype=np.float32)
-        # Whether this is the first window (no priors available).
-        self._is_first_window = True
-
-        # Async inference — background worker thread
+        # Async worker
         self._async_inference = bool(async_inference)
         self._input_queue: queue.Queue = queue.Queue()
         self._frame_events: dict[int, threading.Event] = {}
@@ -177,779 +194,357 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
 
-    @staticmethod
-    def _validate_intrinsics(intrinsics: Optional[np.ndarray]) -> Optional[np.ndarray]:
-        if intrinsics is None:
-            return None
-        K = np.asarray(intrinsics, dtype=np.float32)
-        if K.shape != (3, 3):
-            raise ValueError(f"intrinsics must be 3x3, got {K.shape}")
-        if not np.isfinite(K).all():
-            raise ValueError("intrinsics contains non-finite values")
-        return K
-
-    @staticmethod
-    def _validate_intrinsics_image_size(
-        size: Optional[tuple[int, int]],
-    ) -> Optional[tuple[int, int]]:
-        if size is None:
-            return None
-        h, w = int(size[0]), int(size[1])
-        if h <= 0 or w <= 0:
-            raise ValueError(
-                f"intrinsics_image_size must be positive, got {(h, w)}"
-            )
-        return (h, w)
+    # ==============================================================
+    #  Public API
+    # ==============================================================
 
     def warmup(self) -> None:
-        log.info("[Pi3] warmup() called, async=%s", self._async_inference)
+        log.info("[Pi3] warmup()")
         self._load_model()
         if self._async_inference and self._worker_thread is None:
-            self._worker_stop.clear()
-            self._worker_thread = threading.Thread(
-                target=self._async_worker, daemon=True, name="pi3-worker"
-            )
-            self._worker_thread.start()
-            log.info("[Pi3] worker thread started (warmup)")
+            self._start_worker()
 
-    def _load_model(self) -> None:
-        """Load Pi3X model + VO pipe (idempotent)."""
-        if self._pipe is not None:
+    def feed_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
+        if rgb is None:
             return
-        log.info("[Pi3] loading model %s on %s ...", self._model_name, self._device)
-        if torch is None:
-            raise RuntimeError(
-                "Pi3OnlineDepthProvider requires torch. Install torch to use pi3_online."
-            )
-        if self._device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError(
-                f"Pi3OnlineDepthProvider device is {self._device!r}, "
-                "but CUDA is not available."
-            )
+        with self._events_lock:
+            self._frame_events.setdefault(frame_idx, threading.Event())
+        if self._async_inference:
+            if self._worker_thread is None or not self._worker_thread.is_alive():
+                self._start_worker()
+            self._input_queue.put((frame_idx, rgb))
+            return
+        # Synchronous path
+        self._push_frame(frame_idx, rgb)
 
-        Pi3X, Pi3XVO = self._import_pi3_modules()
+    def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
+        if frame_idx not in self._depth_cache:
+            if self._async_inference:
+                ev = self._get_event(frame_idx)
+                if ev is not None:
+                    log.debug("[Pi3] get_depth(%d) waiting ...", frame_idx)
+                    ev.wait(timeout=120.0)
+            else:
+                self._force_process()
+        return self._depth_cache.get(frame_idx)
 
-        model = Pi3X.from_pretrained(self._model_name)
-        if hasattr(model, "to"):
-            model = model.to(self._device)
-        if hasattr(model, "eval"):
-            model = model.eval()
-
-        self._model = model
-        self._pipe = Pi3XVO(model)
-        log.info("[Pi3] model loaded successfully")
+    def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
+        if frame_idx not in self._pose_cache:
+            if self._async_inference:
+                ev = self._get_event(frame_idx)
+                if ev is not None:
+                    ev.wait(timeout=120.0)
+            else:
+                self._force_process()
+        return self._pose_cache.get(frame_idx)
 
     def get_sim3_matrix(self) -> np.ndarray:
-        """Return a copy of the Sim(3) alignment matrix (identity if none)."""
         return self._sim3.copy()
 
     def set_sim3_transform(self, sim3: np.ndarray) -> None:
-        """Set the Sim(3) Pi3-world → GT-world alignment matrix."""
         sim3 = np.asarray(sim3, dtype=np.float32)
         if sim3.shape != (4, 4):
             raise ValueError(f"sim3 must be 4x4, got {sim3.shape}")
         self._sim3 = sim3
         log.info("[Pi3] Sim(3) transform set (externally)")
 
+    def close(self) -> None:
+        log.info("[Pi3] close()")
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_stop.set()
+            self._input_queue.put(None)
+            self._worker_thread.join(timeout=5.0)
+            self._worker_thread = None
+        self._model = None
+        self._stream = None
+        self._depth_cache.clear()
+        self._pose_cache.clear()
+        self._index_buffer.clear()
+        self._is_first_chunk = True
+        self._raw_h = self._raw_w = None
+        with self._events_lock:
+            self._frame_events.clear()
+        if torch is not None and self._device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    # ==============================================================
+    #  Model loading
+    # ==============================================================
+
+    def _load_model(self) -> None:
+        if self._stream is not None:
+            return
+        if torch is None:
+            raise RuntimeError("Pi3OnlineDepthProvider requires torch")
+        if self._device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"Device {self._device!r} requested but CUDA unavailable"
+            )
+
+        Pi3X, Pi3XVOStream = self._import_pi3_modules()
+        log.info("[Pi3] loading %s on %s ...", self._model_name, self._device)
+
+        model = Pi3X.from_pretrained(self._model_name).to(self._device).eval()
+        self._model = model
+
+        self._stream = Pi3XVOStream(
+            model=model,
+            chunk_size=self._chunk_size,
+            overlap=self._overlap,
+            conf_thre=self._conf_threshold,
+            inject_condition=self._inject_condition or [],
+            dtype=self._select_dtype(),
+        )
+        log.info("[Pi3] model + Pi3XVOStream ready")
+
     @staticmethod
     def _import_pi3_modules():
         try:
             from pi3.models.pi3x import Pi3X
-            from pi3.pipe.pi3x_vo import Pi3XVO
-            return Pi3X, Pi3XVO
+            from pi3.pipe.pi3x_vo_stream import Pi3XVOStream
+            return Pi3X, Pi3XVOStream
         except Exception:
-            # Fallback: local bundled source tree.
             import sys
-
             root = Path(__file__).resolve().parent.parent / "Pi3_for_yolo_sgg"
             if root.exists():
-                root_s = str(root)
-                if root_s not in sys.path:
-                    sys.path.insert(0, root_s)
+                rstr = str(root)
+                if rstr not in sys.path:
+                    sys.path.insert(0, rstr)
             from pi3.models.pi3x import Pi3X
-            from pi3.pipe.pi3x_vo import Pi3XVO
-            return Pi3X, Pi3XVO
-
-    def close(self) -> None:
-        log.info("[Pi3] close() called")
-        if self._worker_thread is not None and self._worker_thread.is_alive():
-            self._worker_stop.set()
-            self._input_queue.put(None)  # unblock queue.get()
-            self._worker_thread.join(timeout=5.0)
-            self._worker_thread = None
-            log.info("[Pi3] worker thread joined")
-
-        self._model = None
-        self._pipe = None
-        self._buffer.clear()
-        self._depth_cache.clear()
-        self._pose_cache.clear()
-        self._prev_overlap_points = None
-        self._prev_overlap_conf = None
-        self._prev_overlap_poses = None
-        self._prev_overlap_mask = None
-        self._prev_local_depth = None
-        self._prev_local_conf = None
-        self._prev_rays = None
-        self._prev_aligned_poses = None
-        self._cumulative_sim3 = np.eye(4, dtype=np.float32)
-        self._is_first_window = True
-        with self._events_lock:
-            self._frame_events.clear()
-
-        if torch is not None and self._device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
-    def feed_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
-        if rgb is None:
-            return
-
-        # Pre-create the Event so get_depth() can wait on it even if called
-        # before the worker has had a chance to process this frame.
-        with self._events_lock:
-            self._frame_events.setdefault(frame_idx, threading.Event())
-
-        if self._async_inference:
-            # Lazy-start the worker thread on first feed_frame() call.
-            if self._worker_thread is None or not self._worker_thread.is_alive():
-                self._worker_stop.clear()
-                self._worker_thread = threading.Thread(
-                    target=self._async_worker, daemon=True, name="pi3-worker"
-                )
-                self._worker_thread.start()
-                log.info("[Pi3] worker thread started (lazy from feed_frame)")
-            # Non-blocking: hand off to the background worker.
-            self._input_queue.put((frame_idx, rgb))
-            log.debug("[Pi3] feed_frame(%d) queued, qsize=%d", frame_idx, self._input_queue.qsize())
-            return
-
-        # Synchronous path (original behaviour).
-        if frame_idx in self._buffer:
-            self._buffer.pop(frame_idx)
-        self._buffer[frame_idx] = rgb
-        if len(self._buffer) >= self._window_size:
-            self._process_window(force=False)
-
-    def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
-        if frame_idx not in self._depth_cache:
-            if self._async_inference:
-                with self._events_lock:
-                    ev = self._frame_events.get(frame_idx)
-                if ev is not None:
-                    log.debug("[Pi3] get_depth(%d) waiting for worker ...", frame_idx)
-                    t0 = _time.perf_counter()
-                    got = ev.wait(timeout=120.0)
-                    wait_ms = (_time.perf_counter() - t0) * 1000
-                    if got:
-                        log.debug("[Pi3] get_depth(%d) ready after %.1f ms", frame_idx, wait_ms)
-                    else:
-                        log.warning("[Pi3] get_depth(%d) TIMED OUT after %.1f ms", frame_idx, wait_ms)
-            else:
-                self._ensure_frame_processed(frame_idx)
-        return self._depth_cache.get(frame_idx)
-
-    def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        if frame_idx not in self._pose_cache:
-            if self._async_inference:
-                with self._events_lock:
-                    ev = self._frame_events.get(frame_idx)
-                if ev is not None:
-                    log.debug("[Pi3] get_pose(%d) waiting for worker ...", frame_idx)
-                    ev.wait(timeout=120.0)
-            else:
-                self._ensure_frame_processed(frame_idx)
-        return self._pose_cache.get(frame_idx)
-
-    def _ensure_frame_processed(self, _frame_idx: int) -> None:
-        if not self._buffer:
-            return
-        # Force a pass over current buffered frames (supports true streaming).
-        self._process_window(force=True)
+            from pi3.pipe.pi3x_vo_stream import Pi3XVOStream
+            return Pi3X, Pi3XVOStream
 
     def _select_dtype(self):
-        if torch is None:
-            raise RuntimeError("Pi3 online inference requires torch")
         if not self._device.startswith("cuda"):
             return torch.float32
-
-        cap_dev = None
+        dev_idx = None
         if self._device.startswith("cuda:"):
-            suffix = self._device.split(":", 1)[1]
-            if suffix.isdigit():
-                cap_dev = int(suffix)
-        cap = torch.cuda.get_device_capability(cap_dev)
+            s = self._device.split(":", 1)[1]
+            if s.isdigit():
+                dev_idx = int(s)
+        cap = torch.cuda.get_device_capability(dev_idx)
         return torch.bfloat16 if cap[0] >= 8 else torch.float16
 
-    def _build_intrinsics_seq(
-        self,
-        n_frames: int,
-        raw_h: int,
-        raw_w: int,
-        model_h: int,
-        model_w: int,
-        apply_resize_scaling: bool,
-        device: str,
-    ):
-        if torch is None:
-            return None
-        if self._base_K is None:
-            return None
+    # ==============================================================
+    #  Preprocessing (computed once from first frame)
+    # ==============================================================
 
-        if self._base_intrinsics_size is None:
-            base_h, base_w = raw_h, raw_w
+    def _setup_on_first_frame(self, rgb: np.ndarray) -> None:
+        h, w = rgb.shape[:2]
+        self._raw_h, self._raw_w = h, w
+        self._model_h, self._model_w = self._compute_model_size(h, w)
+
+        mh, mw = self._model_h, self._model_w
+        if self._use_original_size and (mh != h or mw != w):
+            self._preprocess_mode = "pad"
+        elif (not self._use_original_size) and (mh != h or mw != w):
+            self._preprocess_mode = "resize"
         else:
-            base_h, base_w = self._base_intrinsics_size
+            self._preprocess_mode = "none"
 
-        if apply_resize_scaling:
-            sx = float(model_w) / float(base_w)
-            sy = float(model_h) / float(base_h)
-        else:
-            sx = 1.0
-            sy = 1.0
+        log.info(
+            "[Pi3] first frame %dx%d -> model %dx%d (%s)",
+            w, h, mw, mh, self._preprocess_mode,
+        )
 
-        K = self._base_K.copy()
-        K[0, 0] *= sx
-        K[0, 2] *= sx
-        K[1, 1] *= sy
-        K[1, 2] *= sy
-
-        K_t = torch.as_tensor(K, dtype=torch.float32, device=device)
-        return K_t.view(1, 1, 3, 3).repeat(1, n_frames, 1, 1)
+        # Set shared intrinsics on the stream
+        K_tensor = self._build_intrinsics_tensor()
+        if K_tensor is not None and self._stream is not None:
+            self._stream.intrinsics = K_tensor
 
     def _compute_model_size(self, raw_h: int, raw_w: int) -> tuple[int, int]:
         p = self._patch_size
         if self._use_original_size:
-            h = int(math.ceil(raw_h / p) * p)
-            w = int(math.ceil(raw_w / p) * p)
-            return h, w
-
+            return int(math.ceil(raw_h / p) * p), int(math.ceil(raw_w / p) * p)
         if raw_h <= 0 or raw_w <= 0:
             return p, p
-
         scale = math.sqrt(self._pixel_limit / float(raw_h * raw_w))
-        h_t = raw_h * scale
-        w_t = raw_w * scale
-        k = max(1, round(h_t / p))
-        m = max(1, round(w_t / p))
+        k = max(1, round(raw_h * scale / p))
+        m = max(1, round(raw_w * scale / p))
         while (k * p) * (m * p) > self._pixel_limit and (k > 1 or m > 1):
-            if (k / max(1, m)) > (h_t / max(1e-9, w_t)):
+            if k / max(1, m) > (raw_h / max(1e-9, raw_w)):
                 k -= 1
             else:
                 m -= 1
-            k = max(1, k)
-            m = max(1, m)
+            k, m = max(1, k), max(1, m)
         return int(k * p), int(m * p)
 
-    @staticmethod
-    def _depth_edge(
-        depth: "torch.Tensor",
-        rtol: float = 0.03,
-        kernel_size: int = 3,
-    ) -> "torch.Tensor":
-        """Detect depth discontinuity edges (mirrors Pi3's ``depth_edge``).
-
-        Parameters
-        ----------
-        depth : Tensor (..., H, W) — linear depth values.
-        rtol  : relative tolerance for neighbor depth differences.
-
-        Returns
-        -------
-        BoolTensor of the same shape — True at edge pixels.
-        """
-        import torch.nn.functional as F
-        shape = depth.shape
-        d = depth.reshape(-1, 1, *shape[-2:])
-        pad = kernel_size // 2
-        diff = (
-            F.max_pool2d(d, kernel_size, stride=1, padding=pad)
-            + F.max_pool2d(-d, kernel_size, stride=1, padding=pad)
-        )
-        edge = ((diff / d).nan_to_num_() > rtol)
-        return edge.reshape(shape)
-
-    @staticmethod
-    def _compute_window_sim3(
-        src_pts: "torch.Tensor",
-        tgt_pts: "torch.Tensor",
-        src_conf: "torch.Tensor | None" = None,
-        tgt_conf: "torch.Tensor | None" = None,
-        conf_thre: float = 0.05,
-    ) -> np.ndarray:
-        """Umeyama Sim(3) aligning *src_pts* → *tgt_pts* (overlap frames).
-
-        Parameters
-        ----------
-        src_pts, tgt_pts : Tensor (T, H, W, 3)
-            3-D point maps for the overlap frames in two different frames.
-        src_conf, tgt_conf : Tensor (T, H, W) or None
-            Per-pixel confidence maps.  Pixels below *conf_thre* are excluded
-            from the Sim(3) estimation.
-        conf_thre : float
-            Confidence threshold (pixels with conf <= conf_thre are masked out).
-
-        Returns
-        -------
-        np.ndarray (4, 4) float32  — similarity transform.
-        """
-        device = src_pts.device
-        src = src_pts.reshape(-1, 3)
-        tgt = tgt_pts.reshape(-1, 3)
-
-        # Valid mask: finite + non-degenerate.
-        src_ok = torch.isfinite(src).all(-1) & (src.abs().sum(-1) > 1e-6)
-        tgt_ok = torch.isfinite(tgt).all(-1) & (tgt.abs().sum(-1) > 1e-6)
-        mask = src_ok & tgt_ok
-
-        # Confidence filtering (mirrors Pi3XVO's _compute_sim3_umeyama_masked).
-        if src_conf is not None:
-            mask = mask & (src_conf.reshape(-1) > conf_thre)
-        if tgt_conf is not None:
-            mask = mask & (tgt_conf.reshape(-1) > conf_thre)
-
-        src_m = src[mask]
-        tgt_m = tgt[mask]
-        n = src_m.shape[0]
-
-        if n < 10:
-            # Fallback: if confident points are too few, relax to top-10 %
-            # of whichever confidence map is available.
-            if src_conf is not None or tgt_conf is not None:
-                geom_mask = src_ok & tgt_ok
-                if geom_mask.sum() >= 10:
-                    combined_conf = torch.ones(geom_mask.shape[0], device=device)
-                    if src_conf is not None:
-                        combined_conf = combined_conf * src_conf.reshape(-1)
-                    if tgt_conf is not None:
-                        combined_conf = combined_conf * tgt_conf.reshape(-1)
-                    combined_conf[~geom_mask] = -1
-                    k = max(10, int(geom_mask.sum().item() * 0.1))
-                    topk_vals, topk_idx = torch.topk(combined_conf, k)
-                    src_m = src[topk_idx]
-                    tgt_m = tgt[topk_idx]
-                    n = src_m.shape[0]
-            if n < 10:
-                return np.eye(4, dtype=np.float32)
-
-        # Centroids.
-        src_mean = src_m.mean(0)
-        tgt_mean = tgt_m.mean(0)
-        src_c = src_m - src_mean
-        tgt_c = tgt_m - tgt_mean
-
-        # SVD of cross-covariance.
-        H = src_c.T @ tgt_c
-        U, S, Vh = torch.linalg.svd(H)
-
-        # Reflection correction.
-        d = torch.det(Vh.T @ U.T)
-        diag = torch.ones(3, device=device, dtype=src.dtype)
-        diag[2] = torch.sign(d)
-        R = Vh.T @ torch.diag(diag) @ U.T
-
-        # Umeyama scale.
-        corrected_S = S.clone()
-        corrected_S[2] *= diag[2]
-        src_total_var = (src_c ** 2).sum()
-        scale = corrected_S.sum() / (src_total_var + 1e-8)
-
-        t = tgt_mean - scale * (R @ src_mean)
-
-        sim3 = torch.eye(4, device=device, dtype=src.dtype)
-        sim3[:3, :3] = scale * R
-        sim3[:3, 3] = t
-        return sim3.detach().cpu().numpy().astype(np.float32)
-
-    def _process_window(self, force: bool) -> None:
-        if not self._buffer:
-            return
-        if not force and len(self._buffer) < self._window_size:
-            return
-        if torch is None:
-            raise RuntimeError("Pi3 online inference requires torch")
-        if self._pipe is None:
-            self.warmup()
-        if self._pipe is None:
-            return
-
-        indices = list(self._buffer.keys())
-        rgbs = list(self._buffer.values())
-        if not rgbs:
-            return
-        log.info(
-            "[Pi3] _process_window: %d frames [%d..%d], force=%s",
-            len(indices), indices[0], indices[-1], force,
-        )
-
-        # Ensure consistent frame shape/channels for model input.
-        ref_h, ref_w = rgbs[0].shape[:2]
-        rgbs_norm = []
-        for rgb in rgbs:
-            if rgb.ndim == 2:
-                rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2RGB)
-            if rgb.shape[:2] != (ref_h, ref_w):
-                rgb = cv2.resize(
-                    rgb, (ref_w, ref_h), interpolation=cv2.INTER_LINEAR
-                )
-            rgbs_norm.append(np.ascontiguousarray(rgb))
-
-        model_h, model_w = self._compute_model_size(ref_h, ref_w)
-
-        preprocess_mode = "none"
-        if self._use_original_size and (model_h != ref_h or model_w != ref_w):
-            preprocess_mode = "pad"
-        elif (not self._use_original_size) and (model_h != ref_h or model_w != ref_w):
-            preprocess_mode = "resize"
-
-        if preprocess_mode == "pad":
-            prepped = []
-            for rgb in rgbs_norm:
-                canvas = np.zeros((model_h, model_w, 3), dtype=rgb.dtype)
-                canvas[:ref_h, :ref_w] = rgb
-                prepped.append(canvas)
-        elif preprocess_mode == "resize":
-            prepped = [
-                cv2.resize(rgb, (model_w, model_h), interpolation=cv2.INTER_LINEAR)
-                for rgb in rgbs_norm
-            ]
+    def _build_intrinsics_tensor(self):
+        """Build (1, 1, 3, 3) intrinsics scaled to model resolution."""
+        if self._base_K is None or torch is None:
+            return None
+        K = self._base_K.copy()
+        if self._base_intrinsics_size is not None:
+            base_h, base_w = self._base_intrinsics_size
         else:
-            prepped = rgbs_norm
+            base_h, base_w = self._raw_h, self._raw_w
+        if self._preprocess_mode == "resize":
+            sx = float(self._model_w) / float(base_w)
+            sy = float(self._model_h) / float(base_h)
+            K[0, 0] *= sx; K[0, 2] *= sx
+            K[1, 1] *= sy; K[1, 2] *= sy
+        return torch.as_tensor(
+            K, dtype=torch.float32, device=self._device
+        ).view(1, 1, 3, 3)
 
-        imgs_np = np.stack(prepped, axis=0)  # (T, H, W, 3)
-        imgs = torch.from_numpy(imgs_np).permute(0, 3, 1, 2).float() / 255.0
-        imgs = imgs.to(self._device)
-
-        n_frames = len(indices)
-        intrinsics_seq = self._build_intrinsics_seq(
-            n_frames=n_frames,
-            raw_h=ref_h,
-            raw_w=ref_w,
-            model_h=model_h,
-            model_w=model_w,
-            apply_resize_scaling=(preprocess_mode == "resize"),
-            device=self._device,
+    def _preprocess_frame(self, rgb: np.ndarray):
+        """RGB uint8 (H,W,3) -> float32 tensor (3, model_h, model_w) on device."""
+        if rgb.ndim == 2:
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2RGB)
+        if self._preprocess_mode == "pad":
+            canvas = np.zeros(
+                (self._model_h, self._model_w, 3), dtype=np.uint8
+            )
+            h = min(self._raw_h, rgb.shape[0])
+            w = min(self._raw_w, rgb.shape[1])
+            canvas[:h, :w] = rgb[:h, :w]
+            rgb = canvas
+        elif self._preprocess_mode == "resize":
+            rgb = cv2.resize(
+                rgb, (self._model_w, self._model_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        t = torch.from_numpy(np.ascontiguousarray(rgb))
+        return (
+            t.permute(2, 0, 1)
+             .to(device=self._device, dtype=torch.float32)
+             .div_(255.0)
         )
 
-        log.info(
-            "[Pi3] inference start (direct model): %d frames, "
-            "img=%dx%d, model=%dx%d, preprocess=%s, priors=%s",
-            n_frames, ref_h, ref_w, model_h, model_w, preprocess_mode,
-            not self._is_first_window,
-        )
-        _t_inf = _time.perf_counter()
+    # ==============================================================
+    #  Core: push frames / handle results
+    # ==============================================================
 
-        # ----------------------------------------------------------------
-        # Call the raw model DIRECTLY (bypass Pi3XVO.__call__) so we can
-        # inject priors from the previous window — exactly what Pi3XVO
-        # does between its internal chunks.
-        # ----------------------------------------------------------------
-        B = 1
-        raw_model = self._pipe.model  # the actual neural network
-        dtype = self._select_dtype()
+    def _push_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
+        if self._stream is None:
+            self._load_model()
+        if self._raw_h is None:
+            self._setup_on_first_frame(rgb)
 
-        model_kwargs: dict = {"with_prior": False}
+        tensor = self._preprocess_frame(rgb)
+        self._index_buffer.append(frame_idx)
 
-        # Intrinsics are always a prior when available.
-        if intrinsics_seq is not None:
-            model_kwargs["intrinsics"] = intrinsics_seq
-            model_kwargs["with_prior"] = True
+        results = self._stream.push_frame(tensor)
+        if results is not None:
+            self._handle_results(results)
 
-        # Inject priors from previous window's overlap (mirrors Pi3XVO logic).
-        n_overlap_for_prior = min(self._overlap, n_frames)
-        if not self._is_first_window and n_overlap_for_prior > 0:
-            device = self._device
+    def _handle_results(self, results: dict) -> None:
+        n_new = results["depth"].shape[0]
+        if n_new == 0:
+            self._index_buffer = self._index_buffer[-self._overlap:]
+            self._is_first_chunk = False
+            return
 
-            if "pose" in self._inject_condition and self._prev_aligned_poses is not None:
-                n_avail = min(self._prev_aligned_poses.shape[0], n_overlap_for_prior)
-                prior_poses = torch.eye(4, device=device).repeat(B, n_frames, 1, 1)
-                prior_poses[0, :n_avail] = torch.from_numpy(
-                    self._prev_aligned_poses[-n_avail:]
-                ).to(device=device)
-                mask_pose = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
-                mask_pose[0, :n_avail] = True
-                model_kwargs["poses"] = prior_poses
-                model_kwargs["mask_add_pose"] = mask_pose
-                model_kwargs["with_prior"] = True
-                log.debug("[Pi3] injecting %d prior poses", n_avail)
+        n_start = 0 if self._is_first_chunk else self._overlap
+        result_indices = self._index_buffer[n_start : n_start + n_new]
 
-            if "depth" in self._inject_condition and self._prev_local_depth is not None:
-                n_avail = min(self._prev_local_depth.shape[0], n_overlap_for_prior)
-                _, _, mH, mW = imgs.shape  # model spatial dims
-                prior_depths = torch.zeros((B, n_frames, mH, mW), device=device)
-                prev_ld = torch.from_numpy(
-                    self._prev_local_depth[-n_avail:]
-                ).to(device=device)
-                # Resize if spatial dimensions changed.
-                if prev_ld.shape[-2:] != (mH, mW):
-                    prev_ld = torch.nn.functional.interpolate(
-                        prev_ld.unsqueeze(1), size=(mH, mW), mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(1)
-                prior_depths[0, :n_avail] = prev_ld
-                mask_depth = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
-                mask_depth[0, :n_avail] = True
-                # Zero out low-confidence depth pixels.
-                if self._prev_local_conf is not None:
-                    prev_lc = torch.from_numpy(
-                        self._prev_local_conf[-n_avail:]
-                    ).to(device=device)
-                    if prev_lc.shape[-2:] != (mH, mW):
-                        prev_lc = torch.nn.functional.interpolate(
-                            prev_lc.unsqueeze(1), size=(mH, mW), mode="bilinear",
-                            align_corners=False,
-                        ).squeeze(1)
-                    prior_depths[0, :n_avail][prev_lc < self._conf_threshold] = 0
-                model_kwargs["depths"] = prior_depths
-                model_kwargs["mask_add_depth"] = mask_depth
-                model_kwargs["with_prior"] = True
-                log.debug("[Pi3] injecting %d prior depth maps", n_avail)
+        depth_np = results["depth"].cpu().numpy()
+        poses_np = results["poses"].cpu().numpy()
 
-            if (
-                ("ray" in self._inject_condition or "intrinsic" in self._inject_condition)
-                and self._prev_rays is not None
-            ):
-                n_avail = min(self._prev_rays.shape[0], n_overlap_for_prior)
-                _, _, mH, mW = imgs.shape
-                prior_rays = torch.zeros((B, n_frames, mH, mW, 3), device=device)
-                prev_r = torch.from_numpy(
-                    self._prev_rays[-n_avail:]
-                ).to(device=device)
-                if prev_r.shape[1:3] != (mH, mW):
-                    prev_r = prev_r.permute(0, 3, 1, 2)
-                    prev_r = torch.nn.functional.interpolate(
-                        prev_r, size=(mH, mW), mode="bilinear", align_corners=False,
-                    )
-                    prev_r = prev_r.permute(0, 2, 3, 1)
-                prior_rays[0, :n_avail] = prev_r
-                mask_ray = torch.zeros((B, n_frames), dtype=torch.bool, device=device)
-                mask_ray[0, :n_avail] = True
-                model_kwargs["rays"] = prior_rays
-                model_kwargs["mask_add_ray"] = mask_ray
-                model_kwargs["with_prior"] = True
-                log.debug("[Pi3] injecting %d prior ray maps", n_avail)
-
-        try:
-            with torch.no_grad():
-                with torch.amp.autocast("cuda", dtype=dtype):
-                    pred = raw_model(imgs[None], **model_kwargs)
-        except Exception as exc:
-            if not self._device.startswith("cuda"):
-                raise RuntimeError(
-                    "Pi3 online inference failed on a non-CUDA device. "
-                    "Use a CUDA device (e.g. device='0' or 'cuda:0')."
-                ) from exc
-            raise
-
-        _inf_ms = (_time.perf_counter() - _t_inf) * 1000
-        log.info("[Pi3] inference done: %.1f ms for %d frames (%.1f ms/frame)",
-                 _inf_ms, n_frames, _inf_ms / max(1, n_frames))
-
-        # ---- Extract raw predictions (same as Pi3XVO internal) ---- 
-        curr_local_depth = pred["local_points"][..., 2]        # (B, T, H, W)
-        curr_pts = pred["points"]                               # (B, T, H, W, 3)
-        curr_poses = pred["camera_poses"]                       # (B, T, 4, 4)
-        curr_conf = torch.sigmoid(pred["conf"])[..., 0]        # (B, T, H, W)
-        curr_rays = pred.get("rays")                            # (B, T, H, W, 3) or None
-        del pred  # free model output early
-        for k in list(model_kwargs.keys()):
-            del model_kwargs[k]
-        torch.cuda.empty_cache()
-
-        # Depth edge filtering → zero conf at edges.
-        edge = self._depth_edge(curr_local_depth[0], rtol=0.03)  # (T, H, W)
-        curr_conf[0][edge] = 0
-
-        # Confidence mask.
-        conf_mask = curr_conf > self._conf_threshold             # (B, T, H, W)
-        if conf_mask.sum() < 10:
-            flat_conf = curr_conf.view(B, n_frames, -1)
-            k = max(10, int(flat_conf.shape[-1] * 0.1))
-            topk_vals, _ = torch.topk(flat_conf, k, dim=-1)
-            min_vals = topk_vals[..., -1].unsqueeze(-1).unsqueeze(-1)
-            conf_mask = curr_conf >= min_vals
-
-        # ---- Inter-window Sim3 (Umeyama on overlap) ----
-        points = curr_pts[0]        # (T, H, W, 3)
-        cam_poses = curr_poses[0]   # (T, 4, 4)
-        conf = curr_conf[0]         # (T, H, W)
-        mask = conf_mask[0]         # (T, H, W)
-
-        window_sim3_np = np.eye(4, dtype=np.float32)
-        n_overlap_used = min(self._overlap, n_frames)
-        if self._prev_overlap_points is not None and n_overlap_used > 0:
-            prev_pts = self._prev_overlap_points
-            n_match = min(prev_pts.shape[0], n_overlap_used)
-            src_pts = points[:n_match]
-            src_mask_t = mask[:n_match]
-            tgt_pts_np = prev_pts[-n_match:]
-            tgt_pts = torch.from_numpy(tgt_pts_np).to(
-                device=points.device, dtype=points.dtype
-            )
-            tgt_mask_t = None
-            if self._prev_overlap_mask is not None:
-                tgt_mask_np = self._prev_overlap_mask[-n_match:]
-                tgt_mask_t = torch.from_numpy(tgt_mask_np).to(
-                    device=points.device, dtype=torch.bool
-                )
-            # Use boolean masks (matches Pi3XVO's _compute_sim3_umeyama_masked).
-            src_conf_for_sim3 = src_mask_t.float()
-            tgt_conf_for_sim3 = tgt_mask_t.float() if tgt_mask_t is not None else None
-            window_sim3_np = self._compute_window_sim3(
-                src_pts, tgt_pts,
-                src_conf=src_conf_for_sim3,
-                tgt_conf=tgt_conf_for_sim3,
-                conf_thre=0.5,  # masks are 0/1, so 0.5 separates them
-            )
-            if not np.allclose(window_sim3_np, np.eye(4), atol=1e-5):
-                log.info(
-                    "[Pi3] inter-window Sim3 applied (scale=%.4f)",
-                    np.linalg.det(window_sim3_np[:3, :3]) ** (1.0 / 3.0),
-                )
-
-        # Apply Sim3 to points and poses (same helpers Pi3XVO uses).
-        if not np.allclose(window_sim3_np, np.eye(4), atol=1e-6):
-            ws_t = torch.from_numpy(window_sim3_np).to(
-                device=points.device, dtype=points.dtype
-            )
-            pts_flat = points.reshape(-1, 3)
-            pts_global = (pts_flat @ ws_t[:3, :3].T + ws_t[:3, 3]).reshape(points.shape)
-            # Sim3 also applies to poses: T_aligned = Sim3 @ T_local
-            aligned_poses = ws_t.unsqueeze(0) @ cam_poses
-        else:
-            pts_global = points
-            aligned_poses = cam_poses
-
-        # ---- Store overlap data for next window ----
-        if self._overlap > 0:
-            n_save = min(self._overlap, n_frames)
-            self._prev_overlap_points = (
-                pts_global[-n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            self._prev_overlap_conf = (
-                conf[-n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            self._prev_overlap_poses = (
-                aligned_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            self._prev_overlap_mask = (
-                mask[-n_save:].detach().cpu().numpy()
-            )
-            # For prior injection: store LOCAL-frame data (not Sim3-aligned)
-            self._prev_aligned_poses = (
-                aligned_poses[-n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            self._prev_local_depth = (
-                curr_local_depth[0, -n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            self._prev_local_conf = (
-                conf[-n_save:].detach().cpu().numpy().astype(np.float32)
-            )
-            if curr_rays is not None:
-                self._prev_rays = (
-                    curr_rays[0, -n_save:].detach().cpu().numpy().astype(np.float32)
-                )
-
-        self._is_first_window = False
-
-        # ---- Depth and pose output ----
-        local_depth = curr_local_depth[0]  # (T, H, W)
-        depth_maps = local_depth.detach().cpu().numpy()
-        poses_np = aligned_poses.detach().cpu().numpy().astype(np.float32)
-
-        for i, idx in enumerate(indices):
-            dm = depth_maps[i].astype(np.float32)
-            if preprocess_mode == "pad":
-                dm = dm[:ref_h, :ref_w]
-            elif preprocess_mode == "resize":
-                dm = cv2.resize(dm, (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
-
-            if self._target_size is not None:
-                dm = cv2.resize(
-                    dm,
-                    (self._target_size[1], self._target_size[0]),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-            dm[~np.isfinite(dm)] = 0.0
-            dm[dm < self._min_depth] = 0.0
-            if self._max_depth > 0.0:
-                dm[dm > self._max_depth] = 0.0
-
-            self._depth_cache[idx] = dm
-            # Poses are already Sim3-aligned; apply external Pi3→GT transform.
+        for i, idx in enumerate(result_indices):
+            self._depth_cache[idx] = self._postprocess_depth(depth_np[i])
             self._pose_cache[idx] = (self._sim3 @ poses_np[i]).astype(np.float32)
 
-        # Signal per-frame waiters now that results are in cache.
-        log.debug("[Pi3] signalling events for frames [%d..%d]", indices[0], indices[-1])
         with self._events_lock:
-            for idx in indices:
+            for idx in result_indices:
                 ev = self._frame_events.get(idx)
                 if ev is not None:
                     ev.set()
 
+        log.debug("[Pi3] emitted %d frames [%s..%s]",
+                  len(result_indices),
+                  result_indices[0] if result_indices else "?",
+                  result_indices[-1] if result_indices else "?")
+
+        self._index_buffer = self._index_buffer[-self._overlap:]
+        self._is_first_chunk = False
+
         self._evict_old(self._depth_cache)
         self._evict_old(self._pose_cache)
 
-        # While warming up (< window_size), keep full causal history so overlap
-        # logic can kick in once the first full window is available.
-        if force and len(indices) < self._window_size:
+    def _postprocess_depth(self, dm: np.ndarray) -> np.ndarray:
+        dm = dm.astype(np.float32)
+        if self._preprocess_mode == "pad":
+            dm = dm[: self._raw_h, : self._raw_w]
+        elif self._preprocess_mode == "resize":
+            dm = cv2.resize(
+                dm, (self._raw_w, self._raw_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        if self._target_size is not None:
+            dm = cv2.resize(
+                dm, (self._target_size[1], self._target_size[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        dm[~np.isfinite(dm)] = 0.0
+        dm[dm < self._min_depth] = 0.0
+        if self._max_depth > 0.0:
+            dm[dm > self._max_depth] = 0.0
+        return dm
+
+    def _force_process(self) -> None:
+        """Sync path: force stream to process its current buffer."""
+        if self._stream is None:
             return
+        n_buf = len(self._stream._buffer)
+        min_needed = 1 if self._is_first_chunk else self._overlap + 1
+        if n_buf < min_needed:
+            return
+        results = self._stream._process_chunk()
+        if results is not None:
+            self._handle_results(results)
 
-        # Slide temporal window: keep only overlap tail for next chunk.
-        keep_n = min(self._overlap, max(0, len(indices) - 1))
-        new_buf: OrderedDict[int, np.ndarray] = OrderedDict()
-        if keep_n > 0:
-            for ki in indices[-keep_n:]:
-                new_buf[ki] = self._buffer[ki]
-        self._buffer = new_buf
+    def _get_event(self, frame_idx: int) -> Optional[threading.Event]:
+        with self._events_lock:
+            return self._frame_events.get(frame_idx)
 
-    def _evict_old(self, cache: OrderedDict[int, np.ndarray]) -> None:
+    def _evict_old(self, cache: OrderedDict) -> None:
         while len(cache) > self._max_cache:
             cache.popitem(last=False)
 
-    # ------------------------------------------------------------------
-    # Async worker
-    # ------------------------------------------------------------------
+    # ==============================================================
+    #  Async worker
+    # ==============================================================
+
+    def _start_worker(self) -> None:
+        self._worker_stop.clear()
+        self._worker_thread = threading.Thread(
+            target=self._async_worker, daemon=True, name="pi3-worker",
+        )
+        self._worker_thread.start()
+        log.info("[Pi3] worker thread started")
 
     def _async_worker(self) -> None:
-        """Background thread: accumulates frames, runs Pi3 windows, sets Events.
-
-        The main thread feeds (frame_idx, rgb) tuples via ``_input_queue``.
-        The worker owns ``self._buffer`` exclusively in async mode — no
-        locking is needed for it because the main thread never touches it.
-        """
-        log.info("[Pi3] async worker started (thread=%s)", threading.current_thread().name)
+        log.info("[Pi3] async worker running")
         while not self._worker_stop.is_set():
             try:
                 item = self._input_queue.get(timeout=0.5)
             except queue.Empty:
-                # Flush any partial buffer that has been sitting idle
-                # (e.g. at the end of a sequence with < window_size frames).
-                if self._buffer:
-                    log.info("[Pi3] worker idle timeout, flushing %d buffered frames", len(self._buffer))
-                    self._process_window(force=True)
+                # Idle: flush buffered frames if enough for new output
+                if self._stream is not None:
+                    n_buf = len(self._stream._buffer)
+                    min_needed = (
+                        1 if self._is_first_chunk else self._overlap + 1
+                    )
+                    if n_buf >= min_needed:
+                        log.info("[Pi3] idle flush, %d buffered", n_buf)
+                        results = self._stream._process_chunk()
+                        if results is not None:
+                            self._handle_results(results)
                 continue
 
-            if item is None:  # shutdown sentinel
-                log.info("[Pi3] worker received shutdown sentinel")
+            if item is None:
                 break
 
             frame_idx, rgb = item
-            log.debug("[Pi3] worker got frame %d, buffer=%d, qsize=%d",
-                      frame_idx, len(self._buffer) + 1, self._input_queue.qsize())
+            self._push_frame(frame_idx, rgb)
 
-            # Lazy model load: allows feed_frame() to be called before warmup().
-            if self._pipe is None:
-                self._load_model()
-
-            if frame_idx in self._buffer:
-                self._buffer.pop(frame_idx)
-            self._buffer[frame_idx] = rgb
-
-            if len(self._buffer) >= self._window_size:
-                self._process_window(force=False)
-
-        # Drain: process remaining buffered frames before the thread exits.
-        if self._buffer:
-            log.info("[Pi3] worker draining %d remaining frames", len(self._buffer))
-            self._process_window(force=True)
+        # Final drain
+        if self._stream is not None and len(self._stream._buffer) > 0:
+            min_needed = 1 if self._is_first_chunk else self._overlap + 1
+            if len(self._stream._buffer) >= min_needed:
+                log.info("[Pi3] draining %d frames", len(self._stream._buffer))
+                results = self._stream._process_chunk()
+                if results is not None:
+                    self._handle_results(results)
         log.info("[Pi3] async worker exiting")
