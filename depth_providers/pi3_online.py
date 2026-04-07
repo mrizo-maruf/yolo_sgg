@@ -383,6 +383,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         results = self._stream.push_frame(tensor)
         if results is not None:
             self._store_results(results)
+        del tensor, results
 
     def _flush_stream(self) -> None:
         """Flush any remaining frames in the Pi3XVOStream buffer."""
@@ -391,6 +392,7 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         results = self._stream.flush()
         if results is not None:
             self._store_results(results)
+        del results
 
     def _store_results(self, results: dict) -> None:
         """Unpack a Pi3XVOStream result dict into the per-frame caches."""
@@ -403,8 +405,14 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         start = 0 if self._is_first_chunk else self._overlap
         indices = self._index_buffer[start : start + n_new]
 
+        # Move only what we need to CPU; discard GPU tensors immediately
         depth_np = results["depth"].cpu().numpy()
         poses_np = results["poses"].cpu().numpy()
+        # Release all GPU tensors (points, conf, depth, poses) now
+        results.clear()
+        if torch is not None and self._device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
         sim3 = self._sim3
 
         for i, idx in enumerate(indices):
