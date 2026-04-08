@@ -40,7 +40,7 @@ fast_mask: true
 
 # --- Point cloud ---
 max_points_per_obj: 250
-max_accumulated_points: 1000
+max_accumulated_points: 750
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 

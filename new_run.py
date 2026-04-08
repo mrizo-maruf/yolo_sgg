@@ -34,6 +34,10 @@ from pathlib import Path
 
 import numpy as np
 from omegaconf import OmegaConf
+try:
+    import torch
+except Exception:
+    torch = None
 
 # Ensure project root is on sys.path
 _PROJECT_ROOT = str(Path(__file__).resolve().parent)
@@ -45,6 +49,13 @@ from core.object_registry import GlobalObjectRegistry
 from core.scene_graph import SceneGraph
 from data_loaders import get_loader
 from depth_providers.factory import PROVIDER_CHOICES, build_depth_provider
+
+
+def _cuda_mem_mb(cuda_available: bool) -> float | None:
+    if not cuda_available:
+        return None
+    torch.cuda.synchronize()
+    return float(torch.cuda.memory_allocated() / (1024 ** 2))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -84,6 +95,9 @@ def main() -> int:
     if args.vis_edge:
         cfg.ssg = cfg.get("ssg", {})
         cfg.ssg.vis_edge = True
+    if args.print_resources:
+        cfg.ssg = cfg.get("ssg", {})
+        cfg.ssg.print_resource_usage = True
     if args.edges is not None:
         try:
             selected_edges = _parse_edges_cli(args.edges)
@@ -160,6 +174,7 @@ def main() -> int:
 
     # --- Rerun visualizer (optional) ---
     ssg_cfg = OmegaConf.to_container(cfg.get("ssg", {}), resolve=True)
+    print_resource_usage = bool(ssg_cfg.get("print_resource_usage", False))
     rerun_vis = None
     if ssg_cfg.get("rerun", False):
         from rerun_utils import RerunVisualizer, _build_axis_remap_matrix
@@ -191,7 +206,30 @@ def main() -> int:
         )
 
     # --- Timings ---
-    timings_agg = {"yolo": [], "preprocess": [], "tracking_3d": []}
+    timings_agg = {
+        "yolo": [],
+        "yolo_inference": [],
+        "preprocess": [],
+        "depth": [],
+        "pcd_extract": [],
+        "track_update": [],
+        "reprojection": [],
+        "tracking_3d": [],
+        "graph": [],
+        "graph_build_nodes": [],
+        "graph_merge": [],
+        "graph_predict_basic": [],
+        "graph_predict_baseline": [],
+        "graph_predict_vlsat": [],
+    }
+    gpu_usage = {
+        "after_yolo": [],
+        "after_preprocess": [],
+        "after_pcd": [],
+        "after_tracking_3d": [],
+        "after_graph": [],
+    }
+    cuda_available = bool(torch is not None and torch.cuda.is_available())
 
     # --- Core tracking loop ---
     for tf in run_tracking(
@@ -199,18 +237,12 @@ def main() -> int:
         cfg=cfg,
         object_registry=object_registry,
     ):
-        # Collect timings
-        if "yolo_ms" in tf.timings:
-            timings_agg["yolo"].append(tf.timings["yolo_ms"])
-        if "preprocess_ms" in tf.timings:
-            timings_agg["preprocess"].append(tf.timings["preprocess_ms"])
-        if "tracking_3d_ms" in tf.timings:
-            timings_agg["tracking_3d"].append(tf.timings["tracking_3d_ms"])
-
         n_objs = len(tf.objects)
-        print(f"  Frame {tf.frame_idx}: {n_objs} objects tracked", end="\r")
+        if not print_resource_usage:
+            print(f"  Frame {tf.frame_idx}: {n_objs} objects tracked", end="\r")
 
         # Scene graph
+        t0 = time.perf_counter()
         local_graph = scene_graph.generate_graph(
             frame_objects=tf.objects,
             object_registry=object_registry,
@@ -218,7 +250,99 @@ def main() -> int:
             depth_m=tf.depth_m,
             intrinsics=intrinsics,
         )
+        tf.timings["graph_ms"] = (time.perf_counter() - t0) * 1000
+        gpu_after_graph = _cuda_mem_mb(cuda_available)
+        if gpu_after_graph is not None:
+            tf.timings["gpu_after_graph_mb"] = gpu_after_graph
+
+        graph_profile = scene_graph.get_last_profile()
+        if graph_profile:
+            if "build_nodes_ms" in graph_profile:
+                tf.timings["graph_build_nodes_ms"] = float(graph_profile["build_nodes_ms"])
+            if "merge_ms" in graph_profile:
+                tf.timings["graph_merge_ms"] = float(graph_profile["merge_ms"])
+            if "predict_BasicEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_basic_ms"] = float(
+                    graph_profile["predict_BasicEdgePredictor_ms"]
+                )
+            if "predict_BaselineEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_baseline_ms"] = float(
+                    graph_profile["predict_BaselineEdgePredictor_ms"]
+                )
+            if "predict_VLSATEdgePredictor_ms" in graph_profile:
+                tf.timings["graph_predict_vlsat_ms"] = float(
+                    graph_profile["predict_VLSATEdgePredictor_ms"]
+                )
+            if "local_edges" in graph_profile:
+                tf.timings["graph_local_edges"] = float(graph_profile["local_edges"])
+            if "global_edges" in graph_profile:
+                tf.timings["graph_global_edges"] = float(graph_profile["global_edges"])
         tf.local_graph = local_graph
+
+        # Collect timings
+        key_map = {
+            "yolo_ms": "yolo",
+            "yolo_inference_ms": "yolo_inference",
+            "preprocess_ms": "preprocess",
+            "depth_ms": "depth",
+            "pcd_extract_ms": "pcd_extract",
+            "track_update_ms": "track_update",
+            "reprojection_ms": "reprojection",
+            "tracking_3d_ms": "tracking_3d",
+            "graph_ms": "graph",
+            "graph_build_nodes_ms": "graph_build_nodes",
+            "graph_merge_ms": "graph_merge",
+            "graph_predict_basic_ms": "graph_predict_basic",
+            "graph_predict_baseline_ms": "graph_predict_baseline",
+            "graph_predict_vlsat_ms": "graph_predict_vlsat",
+        }
+        for src, dst in key_map.items():
+            if src in tf.timings:
+                timings_agg[dst].append(tf.timings[src])
+
+        gpu_map = {
+            "gpu_after_yolo_mb": "after_yolo",
+            "gpu_after_preprocess_mb": "after_preprocess",
+            "gpu_after_pcd_mb": "after_pcd",
+            "gpu_after_tracking_3d_mb": "after_tracking_3d",
+            "gpu_after_graph_mb": "after_graph",
+        }
+        for src, dst in gpu_map.items():
+            if src in tf.timings:
+                gpu_usage[dst].append(tf.timings[src])
+
+        if print_resource_usage:
+            print("=" * 50)
+            print(
+                f"[new_run] Frame {tf.frame_idx}: Latency (ms) - "
+                f"yolo: {tf.timings.get('yolo_ms', 0.0):.2f}, "
+                f"yolo_infer: {tf.timings.get('yolo_inference_ms', 0.0):.2f}, "
+                f"preprocess: {tf.timings.get('preprocess_ms', 0.0):.2f}, "
+                f"depth: {tf.timings.get('depth_ms', 0.0):.2f}, "
+                f"pcd: {tf.timings.get('pcd_extract_ms', 0.0):.2f}, "
+                f"track_update: {tf.timings.get('track_update_ms', 0.0):.2f}, "
+                f"reproj: {tf.timings.get('reprojection_ms', 0.0):.2f}, "
+                f"tracking_3d: {tf.timings.get('tracking_3d_ms', 0.0):.2f}, "
+                f"graph: {tf.timings.get('graph_ms', 0.0):.2f}"
+            )
+            print(
+                f"[new_run] Frame {tf.frame_idx}: Graph breakdown (ms) - "
+                f"build_nodes: {tf.timings.get('graph_build_nodes_ms', 0.0):.2f}, "
+                f"basic: {tf.timings.get('graph_predict_basic_ms', 0.0):.2f}, "
+                f"baseline: {tf.timings.get('graph_predict_baseline_ms', 0.0):.2f}, "
+                f"vlsat: {tf.timings.get('graph_predict_vlsat_ms', 0.0):.2f}, "
+                f"merge: {tf.timings.get('graph_merge_ms', 0.0):.2f}, "
+                f"local_edges: {int(tf.timings.get('graph_local_edges', 0))}, "
+                f"global_edges: {int(tf.timings.get('graph_global_edges', 0))}"
+            )
+            if cuda_available and gpu_usage["after_yolo"]:
+                print(
+                    f"[new_run] Frame {tf.frame_idx}: GPU mem (MB) - "
+                    f"after_yolo: {tf.timings.get('gpu_after_yolo_mb', 0.0):.1f}, "
+                    f"after_tracking_3d: {tf.timings.get('gpu_after_tracking_3d_mb', 0.0):.1f}, "
+                    f"after_graph: {tf.timings.get('gpu_after_graph_mb', 0.0):.1f}"
+                )
+            print("=" * 50)
 
         if cfg.ssg.save_local_graph:
             scene_graph.save_local_graph(scene_name=loader.scene_label)
@@ -247,7 +371,7 @@ def main() -> int:
     print()  # newline after \r
 
     # --- Summary ---
-    _print_summary(object_registry, timings_agg)
+    _print_summary(object_registry, timings_agg, gpu_usage, cuda_available)
 
     # --- Save global graph ---
     if ssg_cfg.get("save_graph", False) or ssg_cfg.get("save_global_graph", False):
@@ -322,7 +446,12 @@ def _build_loader_kwargs(dataset_name: str, cfg) -> dict:
 # Summary
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _print_summary(object_registry: GlobalObjectRegistry, timings: dict):
+def _print_summary(
+    object_registry: GlobalObjectRegistry,
+    timings: dict,
+    gpu_usage: dict,
+    cuda_available: bool,
+):
     print("\n" + "=" * 60)
     print("TRACKING SUMMARY")
     print("=" * 60)
@@ -341,11 +470,54 @@ def _print_summary(object_registry: GlobalObjectRegistry, timings: dict):
     print("\n" + "-" * 60)
     print("PERFORMANCE (ms)")
     print("-" * 60)
-    for k, vals in timings.items():
+    main_stages = ("yolo", "preprocess", "tracking_3d", "graph")
+    extra_stage = ("yolo_inference",)
+    breakdown_stages = ("depth", "pcd_extract", "track_update", "reprojection")
+
+    for k in main_stages:
+        vals = timings.get(k, [])
         if vals:
             print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
-    total_avg = sum(np.mean(v) for v in timings.values() if v)
+    for k in extra_stage:
+        vals = timings.get(k, [])
+        if vals:
+            print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
+
+    if any(timings.get(k) for k in breakdown_stages):
+        print("\nTracking 3D Breakdown (ms):")
+        for k in breakdown_stages:
+            vals = timings.get(k, [])
+            if vals:
+                print(f"  {k:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
+
+    graph_breakdown = (
+        ("graph_build_nodes", "build_nodes"),
+        ("graph_predict_basic", "predict_basic"),
+        ("graph_predict_baseline", "predict_baseline"),
+        ("graph_predict_vlsat", "predict_vlsat"),
+        ("graph_merge", "merge"),
+    )
+    if any(timings.get(k) for k, _ in graph_breakdown):
+        print("\nGraph Breakdown (ms):")
+        for k, label in graph_breakdown:
+            vals = timings.get(k, [])
+            if vals:
+                print(f"  {label:20s} {np.mean(vals):8.2f} ± {np.std(vals):.2f}")
+
+    total_avg = sum(np.mean(timings[k]) for k in main_stages if timings.get(k))
     print(f"  {'Total per frame':20s} {total_avg:8.2f}")
+
+    if cuda_available and gpu_usage.get("after_yolo"):
+        print("\nGPU Memory Usage Averages (MB):")
+        for key in ("after_yolo", "after_tracking_3d", "after_graph"):
+            vals = gpu_usage.get(key, [])
+            if vals:
+                print(f"  {key:20s} {np.mean(vals):8.1f} ± {np.std(vals):.1f}")
+    elif cuda_available:
+        print("\nGPU Memory: CUDA available but no measurements recorded")
+    else:
+        print("\nGPU Memory: CUDA not available")
+
     n_frames = max(len(v) for v in timings.values()) if timings else 0
     print(f"\nTotal frames processed: {n_frames}")
     print("=" * 60)
@@ -450,6 +622,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Show scene-graph edges in the Rerun 3D view.")
     p.add_argument("--vis_graph", action="store_true",
                    help="Visualize scene graph per frame.")
+    p.add_argument("--print_resources", action="store_true",
+                   help="Print per-frame latency and GPU resource usage.")
     p.add_argument("--save_graph", action="store_true",
                    help="Save scene graph as JSON.")
     p.add_argument("--save_global_graph", action="store_true",

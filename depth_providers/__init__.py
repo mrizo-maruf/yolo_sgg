@@ -8,6 +8,7 @@ from .gt_depth import (
     THUDSyntheticDepthProvider,
     CODaDepthProvider,
 )
+from .dav3_offline import DAv3OfflineDepthProvider
 from .pi3_offline import IsaacSimOfflinePi3DepthProvider
 from .pi3_online import Pi3OnlineDepthProvider
 
@@ -16,6 +17,7 @@ __all__ = [
     "OnlineDepthProvider",
     "MetricPngDepthProvider",
     "IsaacSimDepthProvider",
+    "DAv3OfflineDepthProvider",
     "IsaacSimOfflinePi3DepthProvider",
     "Pi3OnlineDepthProvider",
     "THUDSyntheticDepthProvider",

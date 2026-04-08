@@ -6,9 +6,14 @@ Yields YoloFrameResult per frame. No 3-D, no masks, no depth.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Generator, List, Optional
 
 from data_loaders.base import DatasetLoader
+try:
+    import torch
+except Exception:
+    torch = None
 
 
 @dataclass(slots=True)
@@ -17,6 +22,14 @@ class YoloFrameResult:
     frame_idx: int
     result: object          # ultralytics result
     rgb_path: str
+    yolo_wall_ms: float = 0.0
+
+
+def _sync_cuda_if_available() -> None:
+    if torch is None:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def run_yolo_tracking_stream(
@@ -48,6 +61,10 @@ def run_yolo_tracking_stream(
         if rgb is None:
             continue
 
+        # Stable end-to-end YOLO tracking latency:
+        # synchronize around model.track to avoid async timing artifacts.
+        _sync_cuda_if_available()
+        t0 = time.perf_counter()
         out = model.track(
             source=[rgb],
             tracker=tracker_cfg,
@@ -57,5 +74,13 @@ def run_yolo_tracking_stream(
             persist=persistent,
             agnostic_nms=agnostic_nms,
         )
+        _sync_cuda_if_available()
+        yolo_wall_ms = (time.perf_counter() - t0) * 1000.0
+
         res = out[0] if isinstance(out, (list, tuple)) and len(out) > 0 else out
-        yield YoloFrameResult(frame_idx=idx, result=res, rgb_path=rgb_path)
+        yield YoloFrameResult(
+            frame_idx=idx,
+            result=res,
+            rgb_path=rgb_path,
+            yolo_wall_ms=float(yolo_wall_ms),
+        )
