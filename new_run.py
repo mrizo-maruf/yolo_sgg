@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -122,19 +123,25 @@ def main() -> int:
           f"cx={intrinsics.cx:.1f}  cy={intrinsics.cy:.1f}  "
           f"image={intrinsics.width}x{intrinsics.height}")
 
-    # --- Pre-feed all frames to Pi3 streaming depth provider ---
-    # Pi3XVOStream processes frames in chunks (e.g. 30).  The tracking loop
-    # feeds one frame at a time and blocks on get_depth / get_pose, which
-    # would deadlock if we waited for chunk_size frames.  Feeding all frames
-    # upfront lets Pi3 process full chunks and cache all results before the
-    # tracking loop needs them.
+    # --- Stream frames to Pi3 depth provider in background ---
+    # A background thread reads RGB frames and feeds them to Pi3.  Pi3
+    # processes chunks as they fill up.  The tracking loop starts immediately;
+    # get_depth() blocks (via per-frame Events) until the needed chunk is
+    # ready.  This gives pipeline parallelism: Pi3 computes depth on the GPU
+    # while YOLO + tracking run concurrently.
+    _pi3_feeder = None
     if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
-        print(f"[Pi3] Pre-feeding {n_frames} frames ...")
-        for idx in range(n_frames):
-            rgb, _ = loader.get_rgb(idx)        # also calls feed_frame internally
-        if hasattr(depth_provider, "drain"):
-            depth_provider.drain()
-        print("[Pi3] Pre-computation complete.")
+        def _pi3_feed_worker():
+            for idx in range(n_frames):
+                loader.get_rgb(idx)              # calls feed_frame internally
+            if hasattr(depth_provider, "drain"):
+                depth_provider.drain()
+
+        _pi3_feeder = threading.Thread(
+            target=_pi3_feed_worker, daemon=True, name="pi3-feeder",
+        )
+        _pi3_feeder.start()
+        print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
 
     # --- Object registry ---
     object_registry = GlobalObjectRegistry(
@@ -232,6 +239,10 @@ def main() -> int:
 
     if cfg.ssg.save_global_graph:
         scene_graph.save_global_graph(scene_name=loader.scene_label)
+
+    # Ensure Pi3 background feeder is done before printing summary
+    if _pi3_feeder is not None:
+        _pi3_feeder.join(timeout=300)
 
     print()  # newline after \r
 

@@ -203,14 +203,15 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
     def feed_frame(self, frame_idx: int, rgb: np.ndarray) -> None:
         """Push an RGB frame for background inference.
 
-        Duplicate frame indices are silently ignored.
+        Duplicate frame indices are silently ignored.  Thread-safe.
         """
-        if rgb is None or frame_idx in self._fed:
+        if rgb is None:
             return
-        self._fed.add(frame_idx)
-
-        # Pre-create the event so get_depth/get_pose can wait immediately
+        # Atomic check-and-add under lock (feeder thread + YOLO can race)
         with self._events_lock:
+            if frame_idx in self._fed:
+                return
+            self._fed.add(frame_idx)
             self._events.setdefault(frame_idx, threading.Event())
 
         self._ensure_worker()
@@ -408,10 +409,18 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         # Move only what we need to CPU; discard GPU tensors immediately
         depth_np = results["depth"].cpu().numpy()
         poses_np = results["poses"].cpu().numpy()
+        conf_np = results["conf"].cpu().numpy() if "conf" in results else None
         # Release all GPU tensors (points, conf, depth, poses) now
         results.clear()
         if torch is not None and self._device.startswith("cuda"):
             torch.cuda.empty_cache()
+
+        # Zero out low-confidence depth pixels (edge artifacts, unreliable
+        # regions).  run_stream.py does this via conf_thre in build_frame_pcd;
+        # we mirror it here so the tracker only sees reliable depth.
+        if conf_np is not None and self._conf_threshold > 0:
+            for i in range(depth_np.shape[0]):
+                depth_np[i][conf_np[i] < self._conf_threshold] = 0.0
 
         sim3 = self._sim3
 
@@ -445,13 +454,13 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         if self._preprocess_mode == "pad":
             dm = dm[: self._raw_h, : self._raw_w]
         elif self._preprocess_mode == "resize":
-            dm = cv2.resize(dm, (self._raw_w, self._raw_h), interpolation=cv2.INTER_LINEAR)
+            dm = cv2.resize(dm, (self._raw_w, self._raw_h), interpolation=cv2.INTER_NEAREST)
 
         # Optional explicit target size
         if self._target_size is not None:
             th, tw = self._target_size
             if dm.shape[0] != th or dm.shape[1] != tw:
-                dm = cv2.resize(dm, (tw, th), interpolation=cv2.INTER_LINEAR)
+                dm = cv2.resize(dm, (tw, th), interpolation=cv2.INTER_NEAREST)
 
         # Clamp
         dm[~np.isfinite(dm)] = 0.0
