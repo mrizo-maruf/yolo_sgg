@@ -36,7 +36,7 @@ pi3_offline_pose_lookup_mode: auto
 
 # --- Offline DepthAnythingV3 (for depth_provider: dav3_offline) ---
 dav3_offline_depth_dir: "dav3_depth"
-dav3_offline_pose_path: "dav3_traj.txt"
+dav3_offline_pose_path: "dav3_camera_poses.txt"
 
 # IsaacSim-specific labels to skip in GT loading
 loader_skip_labels:

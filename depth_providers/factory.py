@@ -308,14 +308,43 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
 
 
 def _build_dav3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
-    return _build_metric_png_offline(
-        dataset_name,
+    from .dav3_offline import DAv3OfflineDepthProvider
+
+    depth_dir = _resolve_scene_path(
         scene_p,
-        cfg,
-        depth_subdir_key="dav3_offline_depth_dir",
-        depth_default="dav3_depth",
-        pose_path_key="dav3_offline_pose_path",
-        pose_default="dav3_traj.txt",
+        cfg.get("dav3_offline_depth_dir", cfg.get("predicted_depth_dir")),
+        "dav3_depth",
+    )
+    pose_path = _resolve_scene_path(
+        scene_p,
+        cfg.get("dav3_offline_pose_path", cfg.get("predicted_pose_path")),
+        "dav3_camera_poses.txt",
+    )
+    pose_path = _maybe_existing_path(pose_path)
+
+    png_scale = cfg.get("dav3_offline_png_depth_scale")
+    if png_scale is not None:
+        png_scale = float(png_scale)
+
+    pose_lookup_cfg = str(cfg.get("dav3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))).lower()
+    pose_lookup = (
+        _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
+        if pose_lookup_cfg == "auto"
+        else pose_lookup_cfg
+    )
+
+    filename_pattern = _FILENAME_PATTERNS.get(
+        dataset_name, "depth{frame_idx:06d}.png"
+    )
+
+    return DAv3OfflineDepthProvider(
+        depth_dir=str(depth_dir),
+        filename_pattern=filename_pattern,
+        pose_path=pose_path,
+        png_depth_scale=png_scale,
+        min_depth=float(cfg.get("min_depth", 0.01)),
+        max_depth=float(cfg.get("max_depth", _DEFAULT_MAX_DEPTH.get(dataset_name, 10.0))),
+        pose_lookup=pose_lookup,
     )
 
 
