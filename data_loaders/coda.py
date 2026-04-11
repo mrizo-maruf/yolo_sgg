@@ -11,7 +11,7 @@ import numpy as np
 
 from core.types import CameraIntrinsics
 from depth_providers.base import DepthProvider
-from depth_providers.gt_depth import _load_poses_txt
+from depth_providers.pose_utils import load_poses_txt
 
 from .base import DatasetLoader
 
@@ -56,7 +56,7 @@ class CODaLoader(DatasetLoader):
         self._depth_provider = depth_provider
 
         traj_path = self._scene_dir / "traj.txt"
-        self._poses = _load_poses_txt(str(traj_path)) if traj_path.exists() else None
+        self._poses = load_poses_txt(str(traj_path)) if traj_path.exists() else None
 
     @property
     def scene_label(self) -> str:

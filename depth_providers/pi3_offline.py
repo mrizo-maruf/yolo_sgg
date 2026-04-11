@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from .base import DepthProvider
-from .gt_depth import _load_poses_txt, _lookup_pose
+from .pose_utils import load_poses_txt, lookup_pose
 
 
 _DEPTH_SCALE_RE = re.compile(r"png_depth_scale:\s*([0-9eE+.\-]+)")
@@ -41,7 +41,7 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         self._pose_lookup = pose_lookup
         self._min_depth = float(min_depth)
         self._max_depth = float(max_depth)
-        self._poses = _load_poses_txt(pose_path)
+        self._poses = load_poses_txt(pose_path)
         self._depth_files = sorted(self._depth_dir.glob("depth*.png"))
 
         if png_depth_scale is None:
@@ -157,7 +157,7 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         return dm.astype(np.float32)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        pose = _lookup_pose(self._poses, frame_idx, self._pose_lookup)
+        pose = lookup_pose(self._poses, frame_idx, self._pose_lookup)
         if pose is None:
             return None
         pose = pose.astype(np.float32)

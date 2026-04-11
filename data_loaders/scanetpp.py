@@ -36,7 +36,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from core.types import CameraIntrinsics
 from depth_providers.base import DepthProvider
-from depth_providers.gt_depth import _load_poses_txt
+from depth_providers.pose_utils import load_poses_txt
 from metrics.tracking_metrics import GTInstance
 
 try:
@@ -84,7 +84,7 @@ class ScanNetPPLoader(DatasetLoader):
 
         # Poses from traj.txt (indexed by sequential position)
         traj_path = self._scene_dir / "traj.txt"
-        self._poses = _load_poses_txt(str(traj_path)) if traj_path.exists() else None
+        self._poses = load_poses_txt(str(traj_path)) if traj_path.exists() else None
 
         self._has_gt = self._bbox_dir.exists() and self._mask_dir.exists()
 

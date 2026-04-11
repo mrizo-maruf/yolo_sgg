@@ -46,7 +46,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from core.new_tracker import run_tracking
 from core.object_registry import GlobalObjectRegistry
-from core.scene_graph import SceneGraph
+from scene_graph import SceneGraph
 from data_loaders import get_loader
 from depth_providers.factory import PROVIDER_CHOICES, build_depth_provider
 

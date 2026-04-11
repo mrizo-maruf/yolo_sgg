@@ -28,7 +28,7 @@ import YOLOE.utils as yutils
 from YOLOE.utils import GlobalObjectRegistry, compute_3d_bboxes
 from core.tracker import run_tracking
 from loaders import get_loader
-from ssg.ssg_main import edges
+from scene_graph.ssg.ssg_main import edges
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -36,7 +36,7 @@ from itertools import combinations
 from pytorch3d.renderer import look_at_view_transform, FoVOrthographicCameras
 
 # VL-SAT edge predictor paths
-_VLSAT_DIR = Path(__file__).resolve().parent / "vl_sat_model"
+_VLSAT_DIR = Path(__file__).resolve().parent / "scene_graph" / "vl_sat_model"
 _VLSAT_CONFIG = _VLSAT_DIR / "config" / "mmgnet.json"
 _VLSAT_CKPT = _VLSAT_DIR / "3dssg_best_ckpt"
 _VLSAT_RELS = _VLSAT_DIR / "config" / "relationships.txt"
