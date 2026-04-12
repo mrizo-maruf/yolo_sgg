@@ -58,6 +58,30 @@ def _cuda_mem_mb(cuda_available: bool) -> float | None:
     return float(torch.cuda.memory_allocated() / (1024 ** 2))
 
 
+def _pose_index_from_provider(depth_provider, frame_key: int) -> int | None:
+    dbg_fn = getattr(depth_provider, "get_sync_debug", None)
+    if callable(dbg_fn):
+        try:
+            dbg = dbg_fn(frame_key) or {}
+        except Exception:
+            return None
+        pose_index = dbg.get("pose_index")
+        return int(pose_index) if pose_index is not None else None
+    return None
+
+
+def _depth_path_from_provider(depth_provider, frame_key: int) -> str | None:
+    dbg_fn = getattr(depth_provider, "get_sync_debug", None)
+    if callable(dbg_fn):
+        try:
+            dbg = dbg_fn(frame_key) or {}
+        except Exception:
+            return None
+        depth_path = dbg.get("depth_path")
+        return str(depth_path) if depth_path else None
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
@@ -124,6 +148,7 @@ def main() -> int:
 
     loader_kwargs = _build_loader_kwargs(dataset_name, cfg)
     loader = LoaderCls(scene_path, depth_provider=depth_provider, **loader_kwargs)
+    frame_numbers = getattr(loader, "_frame_numbers", None)
 
     print(f"\n{'=' * 60}")
     print(f"  RUN — {loader.scene_label}  (dataset: {dataset_name})")
@@ -237,6 +262,21 @@ def main() -> int:
         cfg=cfg,
         object_registry=object_registry,
     ):
+        if args.debug_sync:
+            fnum = None
+            if isinstance(frame_numbers, list) and 0 <= tf.frame_idx < len(frame_numbers):
+                fnum = int(frame_numbers[tf.frame_idx])
+            frame_key = fnum if fnum is not None else int(tf.frame_idx)
+            rgb_name = Path(tf.rgb_path).name if tf.rgb_path else "<none>"
+            depth_path = _depth_path_from_provider(depth_provider, frame_key)
+            depth_name = Path(depth_path).name if depth_path else "<unknown>"
+            pose_index = _pose_index_from_provider(depth_provider, frame_key)
+            pose_txt = str(pose_index) if pose_index is not None else "unknown"
+            print(
+                f"[sync] idx={tf.frame_idx:04d} frame_key={frame_key} "
+                f"rgb={rgb_name} depth={depth_name} pose_idx={pose_txt}"
+            )
+
         n_objs = len(tf.objects)
         if not print_resource_usage:
             print(f"  Frame {tf.frame_idx}: {n_objs} objects tracked", end="\r")
@@ -631,6 +671,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--edges", type=str, default=None,
                    help="Edge predictors to run: all | bs | sv | vlsat, or comma-separated combos "
                         "(e.g. bs,sv).")
+    p.add_argument("--debug_sync", action="store_true",
+                   help="Print per-frame sync info: rgb filename, depth filename, and pose index.")
     return p
 
 

@@ -48,6 +48,16 @@ class DepthProvider(ABC):
         """
         return None
 
+    def get_sync_debug(self, frame_idx: int) -> dict:
+        """Optional frame-sync debug metadata for logging.
+
+        Returns keys when available:
+            - ``depth_path``: resolved depth file path
+            - ``pose_index``: resolved pose-list index
+            - ``frame_key``: frame key received by provider
+        """
+        return {}
+
     # ------------------------------------------------------------------
     # Unprojection (override for non-standard depth→3D, e.g. THUD)
     # ------------------------------------------------------------------

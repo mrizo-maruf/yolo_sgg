@@ -155,6 +155,16 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         pose = pose.astype(np.float32)
         return (self._sim3 @ pose).astype(np.float32)
 
+    def get_sync_debug(self, frame_idx: int) -> dict:
+        ord_idx = self._sync.resolve_index(int(frame_idx))
+        depth_path = str(self._depth_path(frame_idx))
+        pose_index = int(ord_idx) if (ord_idx is not None and self._poses is not None and 0 <= ord_idx < len(self._poses)) else None
+        return {
+            "frame_key": int(frame_idx),
+            "depth_path": depth_path,
+            "pose_index": pose_index,
+        }
+
     def get_sim3_matrix(self) -> np.ndarray:
         return self._sim3.copy()
 
