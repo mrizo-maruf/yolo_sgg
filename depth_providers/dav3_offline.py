@@ -10,6 +10,7 @@ from PIL import Image
 
 from .base import DepthProvider
 from .pose_utils import load_poses_txt, lookup_pose
+from .sequence_sync import OrderedIndexMap, sorted_files_with_ids
 
 _DEPTH_SCALE_RE = re.compile(r"png_depth_scale:\s*([0-9eE+.\-]+)")
 
@@ -34,7 +35,8 @@ class DAv3OfflineDepthProvider(DepthProvider):
         self._min_depth = float(min_depth)
         self._max_depth = float(max_depth)
         self._poses = load_poses_txt(pose_path)
-        self._depth_files = sorted(self._depth_dir.glob("depth*.png"))
+        self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, "depth*.png")
+        self._sync = OrderedIndexMap(self._depth_ids)
 
         if png_depth_scale is None:
             self._png_depth_scale = self._read_png_depth_scale_from_meta()
@@ -72,24 +74,9 @@ class DAv3OfflineDepthProvider(DepthProvider):
         if direct.exists():
             return direct
 
-        candidates: list[int] = []
-        if frame_idx > 0:
-            candidates.append(frame_idx - 1)
-        candidates.append(frame_idx)
-        for idx in candidates:
-            if idx < 0:
-                continue
-            alt = self._depth_dir / self._filename_pattern.format(
-                frame_idx=idx,
-                frame_number=idx,
-            )
-            if alt.exists():
-                return alt
-
-        if self._depth_files:
-            ord_idx = frame_idx - 1 if self._pose_lookup == "frame_number" else frame_idx
-            if 0 <= ord_idx < len(self._depth_files):
-                return self._depth_files[ord_idx]
+        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if ord_idx is not None and 0 <= ord_idx < len(self._depth_files):
+            return self._depth_files[ord_idx]
 
         return direct
 
@@ -110,6 +97,9 @@ class DAv3OfflineDepthProvider(DepthProvider):
         return dm.astype(np.float32)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
+        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._poses is not None and ord_idx is not None and 0 <= ord_idx < len(self._poses):
+            return self._poses[ord_idx]
         return lookup_pose(self._poses, frame_idx, self._pose_lookup)
 
     @property

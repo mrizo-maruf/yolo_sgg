@@ -11,6 +11,7 @@ from PIL import Image
 
 from .base import DepthProvider
 from .pose_utils import load_poses_txt, lookup_pose
+from .sequence_sync import OrderedIndexMap, sorted_files_with_ids
 
 
 _DEPTH_SCALE_RE = re.compile(r"png_depth_scale:\s*([0-9eE+.\-]+)")
@@ -42,7 +43,8 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         self._min_depth = float(min_depth)
         self._max_depth = float(max_depth)
         self._poses = load_poses_txt(pose_path)
-        self._depth_files = sorted(self._depth_dir.glob("depth*.png"))
+        self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, "depth*.png")
+        self._sync = OrderedIndexMap(self._depth_ids)
 
         if png_depth_scale is None:
             self._png_depth_scale = self._read_png_depth_scale_from_meta()
@@ -118,25 +120,10 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         return sim3.astype(np.float32)
 
     def _depth_path(self, frame_idx: int) -> Path:
-        # Pi3 offline export uses depth000000.png for the first RGB frame,
-        # while IsaacSim frame numbers usually start from 1.
-        candidates: list[int] = []
-        if frame_idx > 0:
-            candidates.append(frame_idx - 1)
-        candidates.append(frame_idx)
-
-        for idx in candidates:
-            if idx < 0:
-                continue
-            p = self._depth_dir / f"depth{idx:06d}.png"
-            if p.exists():
-                return p
-
-        # Fallback: index by sorted file order.
-        if self._depth_files:
-            ord_idx = frame_idx - 1 if self._pose_lookup == "frame_number" else frame_idx
-            if 0 <= ord_idx < len(self._depth_files):
-                return self._depth_files[ord_idx]
+        # Resolve by exact numeric id when possible, otherwise by sorted rank.
+        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if ord_idx is not None and 0 <= ord_idx < len(self._depth_files):
+            return self._depth_files[ord_idx]
 
         return self._depth_dir / f"depth{frame_idx:06d}.png"
 
@@ -157,7 +144,12 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         return dm.astype(np.float32)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        pose = lookup_pose(self._poses, frame_idx, self._pose_lookup)
+        pose = None
+        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._poses is not None and ord_idx is not None and 0 <= ord_idx < len(self._poses):
+            pose = self._poses[ord_idx]
+        if pose is None:
+            pose = lookup_pose(self._poses, frame_idx, self._pose_lookup)
         if pose is None:
             return None
         pose = pose.astype(np.float32)
