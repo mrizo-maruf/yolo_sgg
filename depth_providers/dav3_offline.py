@@ -74,7 +74,10 @@ class DAv3OfflineDepthProvider(DepthProvider):
         if direct.exists():
             return direct
 
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         if ord_idx is not None and 0 <= ord_idx < len(self._depth_files):
             return self._depth_files[ord_idx]
 
@@ -97,13 +100,19 @@ class DAv3OfflineDepthProvider(DepthProvider):
         return dm.astype(np.float32)
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         if self._poses is not None and ord_idx is not None and 0 <= ord_idx < len(self._poses):
             return self._poses[ord_idx]
         return lookup_pose(self._poses, frame_idx, self._pose_lookup)
 
     def get_sync_debug(self, frame_idx: int) -> dict:
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         depth_path = str(self._depth_path(frame_idx))
         pose_index = int(ord_idx) if (ord_idx is not None and self._poses is not None and 0 <= ord_idx < len(self._poses)) else None
         return {

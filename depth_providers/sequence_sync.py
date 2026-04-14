@@ -65,3 +65,13 @@ class OrderedIndexMap:
         if pos >= n:
             return n - 1
         return pos
+
+    def resolve_frame_number_index(self, frame_number: int) -> Optional[int]:
+        """Resolve 1-based frame numbers to ordered index robustly."""
+        if not self.ids:
+            return None
+
+        idx = int(frame_number) - 1
+        if 0 <= idx < len(self.ids):
+            return idx
+        return self.resolve_index(int(frame_number))

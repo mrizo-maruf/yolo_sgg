@@ -120,8 +120,12 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         return sim3.astype(np.float32)
 
     def _depth_path(self, frame_idx: int) -> Path:
-        # Resolve by exact numeric id when possible, otherwise by sorted rank.
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        # In frame-number mode, loader passes 1-based frame keys while
+        # depth/pose lists are naturally ordered 0..N-1. Align by rank first.
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         if ord_idx is not None and 0 <= ord_idx < len(self._depth_files):
             return self._depth_files[ord_idx]
 
@@ -145,7 +149,10 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
         pose = None
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         if self._poses is not None and ord_idx is not None and 0 <= ord_idx < len(self._poses):
             pose = self._poses[ord_idx]
         if pose is None:
@@ -156,7 +163,10 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         return (self._sim3 @ pose).astype(np.float32)
 
     def get_sync_debug(self, frame_idx: int) -> dict:
-        ord_idx = self._sync.resolve_index(int(frame_idx))
+        if self._pose_lookup == "frame_number":
+            ord_idx = self._sync.resolve_frame_number_index(int(frame_idx))
+        else:
+            ord_idx = self._sync.resolve_index(int(frame_idx))
         depth_path = str(self._depth_path(frame_idx))
         pose_index = int(ord_idx) if (ord_idx is not None and self._poses is not None and 0 <= ord_idx < len(self._poses)) else None
         return {
