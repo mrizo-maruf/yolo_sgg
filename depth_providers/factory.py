@@ -280,11 +280,10 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
         pose_lookup_cfg = str(
             cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
         ).lower()
-        pose_lookup = (
-            _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
-            if pose_lookup_cfg == "auto"
-            else pose_lookup_cfg
-        )
+        # IsaacSim loader always passes 1-based frame numbers regardless of
+        # depth-file naming (Pi3 exports 0-based files). Always use
+        # "frame_number" so resolve_frame_number_index converts fnum→rank.
+        pose_lookup = "frame_number" if pose_lookup_cfg == "auto" else pose_lookup_cfg
 
         return IsaacSimOfflinePi3DepthProvider(
             depth_dir=str(depth_dir),
@@ -329,11 +328,13 @@ def _build_dav3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
         png_scale = float(png_scale)
 
     pose_lookup_cfg = str(cfg.get("dav3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))).lower()
-    pose_lookup = (
-        _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
-        if pose_lookup_cfg == "auto"
-        else pose_lookup_cfg
-    )
+    if pose_lookup_cfg == "auto" and dataset_name == "isaacsim":
+        # IsaacSim loader always passes 1-based frame numbers.
+        pose_lookup = "frame_number"
+    elif pose_lookup_cfg == "auto":
+        pose_lookup = _infer_pose_lookup_mode(depth_dir, "depth*.png", default="frame_number")
+    else:
+        pose_lookup = pose_lookup_cfg
 
     filename_pattern = _FILENAME_PATTERNS.get(
         dataset_name, "depth{frame_idx:06d}.png"
