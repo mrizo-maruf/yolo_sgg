@@ -109,6 +109,9 @@ class CODaLoader(DatasetLoader):
             return self._frame_numbers[frame_idx]
         return frame_idx
 
+    def provider_frame_key(self, frame_idx: int) -> int:
+        return self._frame_number(frame_idx)
+
 
 def _discover_frame_numbers(rgb_dir: Path) -> List[int]:
     if not rgb_dir.exists():

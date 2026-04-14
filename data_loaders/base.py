@@ -106,6 +106,15 @@ class DatasetLoader(ABC):
 
     # -- depth provider ----------------------------------------------------
 
+    def provider_frame_key(self, frame_idx: int) -> int:
+        """Return the key that the loader passes to the depth provider.
+
+        IsaacSim overrides this to return the 1-based frame number;
+        loaders that pass the sequential index (ScanNet++, etc.) inherit
+        the default which returns *frame_idx* unchanged.
+        """
+        return frame_idx
+
     @property
     def depth_provider(self) -> DepthProvider:
         """The depth provider for this loader (always set)."""

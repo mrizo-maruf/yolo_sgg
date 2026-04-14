@@ -110,6 +110,11 @@ class THUDSyntheticLoader(DatasetLoader):
     def get_intrinsics(self) -> CameraIntrinsics:
         return self._intrinsics
 
+    def provider_frame_key(self, frame_idx: int) -> int:
+        if 0 <= frame_idx < len(self._frame_numbers):
+            return self._frame_numbers[frame_idx]
+        return frame_idx
+
     # -- ground truth (benchmarking) ----------------------------------------
 
     def get_gt_instances(self, frame_idx: int) -> Optional[List[GTInstance]]:

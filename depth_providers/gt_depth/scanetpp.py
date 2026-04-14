@@ -51,3 +51,20 @@ class ScanNetPPDepthProvider(DepthProvider):
 
     def get_pose(self, frame_idx: int) -> Optional[np.ndarray]:
         return lookup_pose(self._poses, frame_idx, self._pose_lookup)
+
+    def get_sync_debug(self, frame_idx: int) -> dict:
+        depth_path = (
+            str(self._depth_files[frame_idx])
+            if 0 <= frame_idx < len(self._depth_files)
+            else None
+        )
+        pose_index = (
+            frame_idx
+            if (self._poses is not None and 0 <= frame_idx < len(self._poses))
+            else None
+        )
+        return {
+            "frame_key": int(frame_idx),
+            "depth_path": depth_path,
+            "pose_index": pose_index,
+        }

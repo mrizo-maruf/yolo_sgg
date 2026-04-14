@@ -267,10 +267,12 @@ def main() -> int:
             if isinstance(frame_numbers, list) and 0 <= tf.frame_idx < len(frame_numbers):
                 fnum = int(frame_numbers[tf.frame_idx])
             frame_key = fnum if fnum is not None else int(tf.frame_idx)
+            # Pass whatever the loader actually sends to the provider.
+            provider_key = loader.provider_frame_key(tf.frame_idx)
             rgb_name = Path(tf.rgb_path).name if tf.rgb_path else "<none>"
-            depth_path = _depth_path_from_provider(depth_provider, frame_key)
+            depth_path = _depth_path_from_provider(depth_provider, provider_key)
             depth_name = Path(depth_path).name if depth_path else "<unknown>"
-            pose_index = _pose_index_from_provider(depth_provider, frame_key)
+            pose_index = _pose_index_from_provider(depth_provider, provider_key)
             pose_txt = str(pose_index) if pose_index is not None else "unknown"
             print(
                 f"[sync] idx={tf.frame_idx:04d} frame_key={frame_key} "
