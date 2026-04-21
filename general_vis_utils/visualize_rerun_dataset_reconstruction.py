@@ -17,7 +17,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -122,6 +122,13 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.01,
         help="Rerun point radius in world units.",
+    )
+    parser.add_argument(
+        "--voxel_size",
+        type=float,
+        default=0.05,
+        help="Voxel grid size in metres for downsampling the accumulated cloud. "
+             "0 disables voxelization.",
     )
     parser.add_argument(
         "--spawn",
@@ -421,11 +428,22 @@ def _log_camera_intrinsics(intrinsics: CameraIntrinsics) -> None:
     )
 
 
-def _concat_chunks(chunks: Iterable[np.ndarray], dtype: np.dtype) -> np.ndarray:
-    arrays = [chunk for chunk in chunks if chunk.size > 0]
-    if not arrays:
-        return np.zeros((0, 3), dtype=dtype)
-    return np.concatenate(arrays, axis=0).astype(dtype, copy=False)
+def _voxel_downsample(
+    pts: np.ndarray,
+    colors: np.ndarray,
+    voxel_size: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep one point per voxel cell using pure numpy.
+
+    Uses the first point encountered in each voxel (stable w.r.t. insertion
+    order) so older frames are never evicted — only redundant overlapping
+    points from re-observed regions are removed.
+    """
+    if voxel_size <= 0 or len(pts) == 0:
+        return pts, colors
+    coords = np.floor(pts / voxel_size).astype(np.int32)
+    _, first_idx = np.unique(coords, axis=0, return_index=True)
+    return pts[first_idx], colors[first_idx]
 
 
 def main() -> int:
@@ -461,7 +479,8 @@ def main() -> int:
     print(f"[rerun] rgb_dir={rgb_dir}")
     print(f"[rerun] depth_dir={depth_dir}")
     print(f"[rerun] traj={traj_path}")
-    print(f"[rerun] frames={len(frames)} max_frame_points={args.max_frame_points}")
+    voxel_info = f"{args.voxel_size}m" if args.voxel_size > 0 else "disabled"
+    print(f"[rerun] frames={len(frames)} max_frame_points={args.max_frame_points} voxel_size={voxel_info}")
 
     for vis_idx, frame in enumerate(frames):
         pose = _resolve_pose(
@@ -501,6 +520,8 @@ def main() -> int:
         if pts_world.size > 0:
             all_pts = np.concatenate([all_pts, pts_world], axis=0)
             all_colors = np.concatenate([all_colors, colors], axis=0)
+            if args.voxel_size > 0:
+                all_pts, all_colors = _voxel_downsample(all_pts, all_colors, args.voxel_size)
 
         pose_vis = _rigidize_camera_pose(pose)
         if pose_vis is not None:
