@@ -25,7 +25,7 @@ python general_vis_utils/visualize_rerun_dataset_reconstruction.py \
     --scene_path /path/to/scannetpp_scene \
     --traj_file traj.txt \
     --depth_folder gt_depth \
-    --max_live_points 50000 \
+
     --spawn
 ```
 
