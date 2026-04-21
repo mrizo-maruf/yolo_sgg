@@ -15,10 +15,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -435,6 +434,19 @@ def _concat_chunks(chunks: Iterable[np.ndarray], dtype: np.dtype) -> np.ndarray:
     return np.concatenate(arrays, axis=0).astype(dtype, copy=False)
 
 
+def _subsample(
+    pts: np.ndarray,
+    colors: np.ndarray,
+    max_points: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Randomly subsample accumulated point cloud to stay within the budget."""
+    if max_points <= 0 or len(pts) <= max_points:
+        return pts, colors
+    idx = rng.choice(len(pts), size=max_points, replace=False)
+    return pts[idx], colors[idx]
+
+
 def main() -> int:
     args = _parse_args()
     scene_dir = Path(args.scene_path).resolve()
@@ -460,9 +472,8 @@ def main() -> int:
     _log_world_frame()
     _log_camera_intrinsics(intrinsics)
 
-    live_points: Deque[np.ndarray] = deque()
-    live_colors: Deque[np.ndarray] = deque()
-    live_count = 0
+    all_pts: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+    all_colors: np.ndarray = np.zeros((0, 3), dtype=np.uint8)
     camera_positions: List[np.ndarray] = []
 
     print(f"[rerun] scene={scene_dir}")
@@ -507,14 +518,15 @@ def main() -> int:
         rr.log("rgb_view/current", rr.Image(rgb, color_model=rr.ColorModel.RGB))
 
         if pts_world.size > 0:
-            live_points.append(pts_world)
-            live_colors.append(colors)
-            live_count += len(pts_world)
-
-        while live_count > args.max_live_points and live_points:
-            removed_pts = live_points.popleft()
-            live_colors.popleft()
-            live_count -= len(removed_pts)
+            all_pts = np.concatenate([all_pts, pts_world], axis=0)
+            all_colors = np.concatenate([all_colors, colors], axis=0)
+            # Subsample the full accumulated cloud to stay within the budget.
+            # Random subsampling keeps uniform coverage of the whole scene rather
+            # than evicting old regions.
+            if args.max_live_points > 0 and len(all_pts) > args.max_live_points:
+                all_pts, all_colors = _subsample(
+                    all_pts, all_colors, args.max_live_points, rng
+                )
 
         pose_vis = _rigidize_camera_pose(pose)
         if pose_vis is not None:
@@ -549,21 +561,19 @@ def main() -> int:
                     ),
                 )
 
-        pts_live = _concat_chunks(live_points, np.float32)
-        cols_live = _concat_chunks(live_colors, np.uint8)
-        if pts_live.size > 0:
+        if all_pts.size > 0:
             rr.log(
                 "world3d/reconstruction/points",
                 rr.Points3D(
-                    _apply_axis_remap_points(pts_live, axis_remap),
-                    colors=cols_live,
-                    radii=np.full(len(pts_live), args.point_radius, dtype=np.float32),
+                    _apply_axis_remap_points(all_pts, axis_remap),
+                    colors=all_colors,
+                    radii=np.full(len(all_pts), args.point_radius, dtype=np.float32),
                 ),
             )
 
         print(
             f"[frame {vis_idx + 1:04d}/{len(frames):04d}] "
-            f"rgb={frame.rgb_path.name} depth={frame.depth_path.name} live_points={live_count}",
+            f"rgb={frame.rgb_path.name} depth={frame.depth_path.name} total_points={len(all_pts)}",
             end="\r",
         )
 
