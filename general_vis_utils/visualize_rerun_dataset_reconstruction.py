@@ -100,15 +100,9 @@ def _parse_args() -> argparse.Namespace:
         help="How to match poses to frames.",
     )
     parser.add_argument(
-        "--max_live_points",
-        type=int,
-        default=50000,
-        help="Maximum total number of points kept in the live Rerun reconstruction.",
-    )
-    parser.add_argument(
         "--max_frame_points",
         type=int,
-        default=12000,
+        default=10000,
         help="Maximum number of points sampled from any single frame.",
     )
     parser.add_argument(
@@ -434,19 +428,6 @@ def _concat_chunks(chunks: Iterable[np.ndarray], dtype: np.dtype) -> np.ndarray:
     return np.concatenate(arrays, axis=0).astype(dtype, copy=False)
 
 
-def _subsample(
-    pts: np.ndarray,
-    colors: np.ndarray,
-    max_points: int,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Randomly subsample accumulated point cloud to stay within the budget."""
-    if max_points <= 0 or len(pts) <= max_points:
-        return pts, colors
-    idx = rng.choice(len(pts), size=max_points, replace=False)
-    return pts[idx], colors[idx]
-
-
 def main() -> int:
     args = _parse_args()
     scene_dir = Path(args.scene_path).resolve()
@@ -480,7 +461,7 @@ def main() -> int:
     print(f"[rerun] rgb_dir={rgb_dir}")
     print(f"[rerun] depth_dir={depth_dir}")
     print(f"[rerun] traj={traj_path}")
-    print(f"[rerun] frames={len(frames)} max_live_points={args.max_live_points}")
+    print(f"[rerun] frames={len(frames)} max_frame_points={args.max_frame_points}")
 
     for vis_idx, frame in enumerate(frames):
         pose = _resolve_pose(
@@ -520,13 +501,6 @@ def main() -> int:
         if pts_world.size > 0:
             all_pts = np.concatenate([all_pts, pts_world], axis=0)
             all_colors = np.concatenate([all_colors, colors], axis=0)
-            # Subsample the full accumulated cloud to stay within the budget.
-            # Random subsampling keeps uniform coverage of the whole scene rather
-            # than evicting old regions.
-            if args.max_live_points > 0 and len(all_pts) > args.max_live_points:
-                all_pts, all_colors = _subsample(
-                    all_pts, all_colors, args.max_live_points, rng
-                )
 
         pose_vis = _rigidize_camera_pose(pose)
         if pose_vis is not None:
