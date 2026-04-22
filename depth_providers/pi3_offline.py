@@ -37,13 +37,14 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         max_depth: float = 100.0,
         pose_lookup: str = "frame_number",
         require_transform: bool = True,
+        depth_glob: str = "depth*.png",
     ) -> None:
         self._depth_dir = Path(depth_dir)
         self._pose_lookup = pose_lookup
         self._min_depth = float(min_depth)
         self._max_depth = float(max_depth)
         self._poses = load_poses_txt(pose_path)
-        self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, "depth*.png")
+        self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, depth_glob)
         self._sync = OrderedIndexMap(self._depth_ids)
 
         if png_depth_scale is None:
