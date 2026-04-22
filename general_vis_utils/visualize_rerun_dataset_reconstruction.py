@@ -120,7 +120,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--point_radius",
         type=float,
-        default=0.01,
+        default=0.06,
         help="Rerun point radius in world units.",
     )
     parser.add_argument(
