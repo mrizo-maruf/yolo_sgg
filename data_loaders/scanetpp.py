@@ -102,7 +102,9 @@ class ScanNetPPLoader(DatasetLoader):
         if img is not None:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if img is not None and hasattr(self._depth_provider, "feed_frame"):
-            self._depth_provider.feed_frame(fnum, img)
+            # Feed with frame_idx (sequential rank 0,1,2,...) not fnum (0,10,20,...).
+            # get_depth/get_pose are also called with frame_idx, so the cache keys must match.
+            self._depth_provider.feed_frame(frame_idx, img)
         return img, str(path)
 
     def get_depth(self, frame_idx: int) -> Optional[np.ndarray]:
