@@ -304,6 +304,7 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             pose_lookup=pose_lookup,
             require_transform=bool(cfg.get("pi3_offline_require_transform", True)),
             depth_glob=depth_glob,
+            use_rank=(dataset_name == "scanetpp"),
         )
 
     # Other datasets: keep generic metric-PNG behavior.
