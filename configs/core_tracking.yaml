@@ -8,8 +8,8 @@ depth_provider: gt
 
 # --- Pi3 online streaming ---
 pi3_model: "yyfz233/Pi3X"
-pi3_window_size: 16
-pi3_overlap: 12
+pi3_window_size: 5
+pi3_overlap: 3
 pi3_use_intrinsics: true
 pi3_conf_threshold: 0.05
 pi3_online_max_cache: 48
