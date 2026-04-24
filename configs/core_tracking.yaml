@@ -12,15 +12,15 @@ pi3_window_size: 5
 pi3_overlap: 3
 pi3_use_intrinsics: true
 pi3_conf_threshold: 0.05
-pi3_online_max_cache: 48
-pi3_use_original_size: true
+pi3_online_max_cache: 512
+pi3_use_original_size: false
 pi3_pixel_limit: 255000
 pi3_patch_size: 14
 # Optional overrides:
 # pi3_device: "cuda:0"
 # pi3_target_height: 720
 # pi3_target_width: 1280
-pi3_inject_condition: ["pose", "depth", "ray"]  # e.g. ["pose", "depth"]
+pi3_inject_condition: []
 
 # --- YOLO model ---
 is_open_vocabulary: true

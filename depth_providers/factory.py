@@ -254,7 +254,7 @@ def _build_metric_png_offline(
 
 
 def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
-    if dataset_name in ("isaacsim", "scanetpp"):
+    if dataset_name == "isaacsim":
         from .pi3_offline import IsaacSimOfflinePi3DepthProvider
 
         depth_dir = _resolve_scene_path(
@@ -277,22 +277,13 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
         if png_scale is not None:
             png_scale = float(png_scale)
 
-        if dataset_name == "isaacsim":
-            pose_lookup_cfg = str(
-                cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
-            ).lower()
-            # IsaacSim loader always passes 1-based frame numbers regardless of
-            # depth-file naming (Pi3 exports 0-based files). Always use
-            # "frame_number" so resolve_frame_number_index converts fnum→rank.
-            pose_lookup = "frame_number" if pose_lookup_cfg == "auto" else pose_lookup_cfg
-            depth_glob = "depth*.png"
-        else:
-            # ScanNet++: Pi3 exports sequential 0-based files named frame_0000.png
-            pose_lookup_cfg = str(
-                cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
-            ).lower()
-            pose_lookup = "index" if pose_lookup_cfg == "auto" else pose_lookup_cfg
-            depth_glob = "frame*.png"
+        pose_lookup_cfg = str(
+            cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
+        ).lower()
+        # IsaacSim loader always passes 1-based frame numbers regardless of
+        # depth-file naming (Pi3 exports 0-based files). Always use
+        # "frame_number" so resolve_frame_number_index converts fnum→rank.
+        pose_lookup = "frame_number" if pose_lookup_cfg == "auto" else pose_lookup_cfg
 
         return IsaacSimOfflinePi3DepthProvider(
             depth_dir=str(depth_dir),
@@ -303,8 +294,6 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             max_depth=float(cfg.get("max_depth", 10.0)),
             pose_lookup=pose_lookup,
             require_transform=bool(cfg.get("pi3_offline_require_transform", True)),
-            depth_glob=depth_glob,
-            use_rank=(dataset_name == "scanetpp"),
         )
 
     # Other datasets: keep generic metric-PNG behavior.
