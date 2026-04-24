@@ -31,9 +31,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import time
+
 import numpy as np
 from omegaconf import OmegaConf
 from tqdm import tqdm
+
+try:
+    import torch as _torch
+except ImportError:
+    _torch = None
 
 # Ensure project root is on sys.path
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -62,6 +69,43 @@ from benchmark.visualization import (
     visualize_matching,
     visualize_matching_boxes,
 )
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Performance helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _cuda_mem_mb() -> Optional[float]:
+    if _torch is None or not _torch.cuda.is_available():
+        return None
+    _torch.cuda.synchronize()
+    return float(_torch.cuda.memory_allocated() / (1024 ** 2))
+
+
+_TIMING_KEY_MAP = {
+    "yolo_ms": "yolo",
+    "yolo_inference_ms": "yolo_inference",
+    "preprocess_ms": "preprocess",
+    "depth_ms": "depth",
+    "pcd_extract_ms": "pcd_extract",
+    "track_update_ms": "track_update",
+    "reprojection_ms": "reprojection",
+    "tracking_3d_ms": "tracking_3d",
+    "graph_ms": "graph",
+    "graph_build_nodes_ms": "graph_build_nodes",
+    "graph_merge_ms": "graph_merge",
+    "graph_predict_basic_ms": "graph_predict_basic",
+    "graph_predict_baseline_ms": "graph_predict_baseline",
+    "graph_predict_vlsat_ms": "graph_predict_vlsat",
+}
+_GPU_KEY_MAP = {
+    "gpu_after_yolo_mb": "after_yolo",
+    "gpu_after_preprocess_mb": "after_preprocess",
+    "gpu_after_pcd_mb": "after_pcd",
+    "gpu_after_tracking_3d_mb": "after_tracking_3d",
+    "gpu_after_graph_mb": "after_graph",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -129,6 +173,11 @@ def benchmark_scene(
     # --- Metrics accumulator -------------------------------------------------
     acc = MetricsAccumulator()
 
+    # --- Perf tracking -------------------------------------------------------
+    cuda_available = _torch is not None and _torch.cuda.is_available()
+    timings_agg: Dict[str, List[float]] = {k: [] for k in _TIMING_KEY_MAP.values()}
+    gpu_usage: Dict[str, List[float]] = {k: [] for k in _GPU_KEY_MAP.values()}
+
     # --- Core tracking loop --------------------------------------------------
     for tf in tqdm(
         run_tracking(loader=loader, cfg=cfg, object_registry=object_registry),
@@ -169,6 +218,14 @@ def benchmark_scene(
         )
         acc.add_frame(rec)
 
+        # Collect per-frame timings and GPU usage
+        for src, dst in _TIMING_KEY_MAP.items():
+            if src in tf.timings:
+                timings_agg[dst].append(float(tf.timings[src]))
+        for src, dst in _GPU_KEY_MAP.items():
+            if src in tf.timings:
+                gpu_usage[dst].append(float(tf.timings[src]))
+
         # --- optional visualisation ------------------------------------------
         if vis_on and (tf.frame_idx % vis_interval == 0 or tf.frame_idx == 0):
             _visualize_frame(
@@ -187,6 +244,12 @@ def benchmark_scene(
     metrics = acc.compute()
     metrics["match_mode"] = match_mode
     metrics["similarity"] = _similarity_label(match_mode)
+
+    # --- Per-scene perf summary ---------------------------------------------
+    _print_perf_summary(timings_agg, gpu_usage, cuda_available,
+                        title=f"PERFORMANCE – {loader.scene_label}")
+    metrics["perf"] = _build_perf_dict(timings_agg, gpu_usage)
+
     print_summary(metrics, title=f"BENCHMARK – {loader.scene_label} [{match_mode}]")
     return metrics
 
@@ -241,6 +304,14 @@ def benchmark_dataset(
 
     _print_aggregate(overall, agg_keys)
 
+    # --- Perf aggregate ------------------------------------------------------
+    perf_per_scene = {
+        name: res["perf"]
+        for name, res in all_results.items()
+        if "perf" in res
+    }
+    _print_perf_aggregate(perf_per_scene)
+
     # --- Save results --------------------------------------------------------
     if output_dir is None:
         output_dir = cfg.get("benchmark_metrics_path", "results/benchmark_metrics")
@@ -253,6 +324,7 @@ def benchmark_dataset(
         "per_scene": all_results,
         "overall": overall,
         "num_scenes": len(all_results),
+        "perf_per_scene": perf_per_scene,
     }
     save_metrics(combined, out, scene_name="all_scenes_aggregate")
 
@@ -634,6 +706,150 @@ def _save_3d_frame_artifacts(
     out_path = art_dir / f"frame_{frame_idx:06d}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def _build_perf_dict(
+    timings_agg: Dict[str, List[float]],
+    gpu_usage: Dict[str, List[float]],
+) -> Dict:
+    perf: Dict = {}
+    timing_stages = {
+        stage: vals for stage, vals in timings_agg.items() if vals
+    }
+    perf["timing_mean_ms"] = {s: float(np.mean(v)) for s, v in timing_stages.items()}
+    perf["timing_std_ms"] = {s: float(np.std(v)) for s, v in timing_stages.items()}
+    gpu_stages = {k: v for k, v in gpu_usage.items() if v}
+    perf["gpu_mean_mb"] = {k: float(np.mean(v)) for k, v in gpu_stages.items()}
+    perf["gpu_max_mb"] = {k: float(np.max(v)) for k, v in gpu_stages.items()}
+
+    total_keys = ["yolo", "preprocess", "depth", "pcd_extract",
+                  "track_update", "reprojection", "tracking_3d", "graph"]
+    total_vals = []
+    for key in total_keys:
+        if key in timing_stages:
+            arr = np.array(timings_agg[key])
+            if len(total_vals) == 0:
+                total_vals = arr
+            else:
+                n = min(len(total_vals), len(arr))
+                total_vals = total_vals[:n] + arr[:n]
+    if len(total_vals) > 0:
+        perf["total_avg_ms"] = float(np.mean(total_vals))
+        perf["fps"] = round(1000.0 / perf["total_avg_ms"], 2) if perf["total_avg_ms"] > 0 else 0.0
+    return perf
+
+
+def _print_perf_summary(
+    timings_agg: Dict[str, List[float]],
+    gpu_usage: Dict[str, List[float]],
+    cuda_available: bool,
+    title: str = "PERFORMANCE",
+) -> None:
+    sep = "─" * 70
+    print(f"\n{sep}")
+    print(f"  {title}")
+    print(sep)
+    stage_order = [
+        "yolo", "yolo_inference", "preprocess", "depth", "pcd_extract",
+        "track_update", "reprojection", "tracking_3d", "graph",
+        "graph_build_nodes", "graph_merge", "graph_predict_basic",
+        "graph_predict_baseline", "graph_predict_vlsat",
+    ]
+    print(f"  {'Stage':<30} {'mean (ms)':>10} {'std (ms)':>10} {'frames':>8}")
+    print(sep)
+    total_per_frame = np.zeros(0)
+    core_keys = {"yolo", "preprocess", "depth", "pcd_extract",
+                 "track_update", "reprojection", "tracking_3d", "graph"}
+    for stage in stage_order:
+        vals = timings_agg.get(stage, [])
+        if not vals:
+            continue
+        arr = np.array(vals)
+        print(f"  {stage:<30} {np.mean(arr):>10.1f} {np.std(arr):>10.1f} {len(arr):>8}")
+        if stage in core_keys:
+            if len(total_per_frame) == 0:
+                total_per_frame = arr.copy()
+            else:
+                n = min(len(total_per_frame), len(arr))
+                total_per_frame = total_per_frame[:n] + arr[:n]
+    if total_per_frame.size > 0:
+        avg_total = float(np.mean(total_per_frame))
+        print(sep)
+        print(f"  {'TOTAL (core stages)':<30} {avg_total:>10.1f} {'':>10} {'':>8}")
+        fps = 1000.0 / avg_total if avg_total > 0 else 0.0
+        print(f"  {'FPS':<30} {fps:>10.2f}")
+    if cuda_available:
+        gpu_stages = {k: v for k, v in gpu_usage.items() if v}
+        if gpu_stages:
+            print(sep)
+            print(f"  {'GPU Memory Stage':<30} {'mean (MB)':>10} {'max (MB)':>10}")
+            print(sep)
+            for k, v in gpu_stages.items():
+                arr = np.array(v)
+                print(f"  {k:<30} {np.mean(arr):>10.1f} {np.max(arr):>10.1f}")
+    print(sep)
+
+
+def _print_perf_aggregate(perf_per_scene: Dict[str, Dict]) -> None:
+    if not perf_per_scene:
+        return
+    sep = "═" * 70
+    print(f"\n{sep}")
+    print("  PERFORMANCE AGGREGATE  (all scenes)")
+    print(sep)
+
+    # Gather all stage names present
+    all_stages: List[str] = []
+    for pd in perf_per_scene.values():
+        for s in pd.get("timing_mean_ms", {}):
+            if s not in all_stages:
+                all_stages.append(s)
+
+    stage_order = [
+        "yolo", "yolo_inference", "preprocess", "depth", "pcd_extract",
+        "track_update", "reprojection", "tracking_3d", "graph",
+        "graph_build_nodes", "graph_merge", "graph_predict_basic",
+        "graph_predict_baseline", "graph_predict_vlsat",
+    ]
+    ordered = [s for s in stage_order if s in all_stages]
+    ordered += [s for s in all_stages if s not in ordered]
+
+    print(f"  {'Stage':<30} {'mean (ms)':>10} {'std (ms)':>10} {'#scenes':>8}")
+    print("─" * 70)
+    for stage in ordered:
+        vals = [
+            pd["timing_mean_ms"][stage]
+            for pd in perf_per_scene.values()
+            if stage in pd.get("timing_mean_ms", {})
+        ]
+        if not vals:
+            continue
+        arr = np.array(vals)
+        print(f"  {stage:<30} {np.mean(arr):>10.1f} {np.std(arr):>10.1f} {len(arr):>8}")
+
+    fps_vals = [
+        pd["fps"] for pd in perf_per_scene.values() if "fps" in pd and pd["fps"] > 0
+    ]
+    if fps_vals:
+        print("─" * 70)
+        print(f"  {'FPS (avg across scenes)':<30} {np.mean(fps_vals):>10.2f} {np.std(fps_vals):>10.2f} {len(fps_vals):>8}")
+
+    # GPU aggregate
+    all_gpu: List[str] = []
+    for pd in perf_per_scene.values():
+        for k in pd.get("gpu_mean_mb", {}):
+            if k not in all_gpu:
+                all_gpu.append(k)
+    if all_gpu:
+        print("─" * 70)
+        print(f"  {'GPU Memory Stage':<30} {'mean (MB)':>10} {'max (MB)':>10} {'#scenes':>8}")
+        print("─" * 70)
+        for k in all_gpu:
+            means = [pd["gpu_mean_mb"][k] for pd in perf_per_scene.values() if k in pd.get("gpu_mean_mb", {})]
+            maxes = [pd["gpu_max_mb"][k] for pd in perf_per_scene.values() if k in pd.get("gpu_max_mb", {})]
+            if means:
+                print(f"  {k:<30} {np.mean(means):>10.1f} {np.mean(maxes):>10.1f} {len(means):>8}")
+    print(sep)
 
 
 def _print_aggregate(overall: Dict, keys: List[str]) -> None:
