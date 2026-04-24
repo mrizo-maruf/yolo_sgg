@@ -254,7 +254,7 @@ def _build_metric_png_offline(
 
 
 def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
-    if dataset_name == "isaacsim":
+    if dataset_name in ("isaacsim", "scanetpp"):
         from .pi3_offline import IsaacSimOfflinePi3DepthProvider
 
         depth_dir = _resolve_scene_path(
@@ -280,10 +280,17 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
         pose_lookup_cfg = str(
             cfg.get("pi3_offline_pose_lookup_mode", cfg.get("pose_lookup_mode", "auto"))
         ).lower()
-        # IsaacSim loader always passes 1-based frame numbers regardless of
-        # depth-file naming (Pi3 exports 0-based files). Always use
-        # "frame_number" so resolve_frame_number_index converts fnum→rank.
-        pose_lookup = "frame_number" if pose_lookup_cfg == "auto" else pose_lookup_cfg
+
+        if dataset_name == "isaacsim":
+            # IsaacSim loader passes 1-based frame numbers; Pi3 exports 0-based files.
+            # "frame_number" mode converts fnum→rank via resolve_frame_number_index.
+            pose_lookup = "frame_number" if pose_lookup_cfg == "auto" else pose_lookup_cfg
+            depth_glob = "depth*.png"
+        else:
+            # ScanNet++: loader passes 0-based sequential frame_idx directly.
+            # Pi3 exports depth as frame_000000.png (0-based sequential).
+            pose_lookup = "index" if pose_lookup_cfg == "auto" else pose_lookup_cfg
+            depth_glob = "frame*.png"
 
         return IsaacSimOfflinePi3DepthProvider(
             depth_dir=str(depth_dir),
@@ -294,6 +301,8 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             max_depth=float(cfg.get("max_depth", 10.0)),
             pose_lookup=pose_lookup,
             require_transform=bool(cfg.get("pi3_offline_require_transform", True)),
+            depth_glob=depth_glob,
+            use_rank=(dataset_name == "scanetpp"),
         )
 
     # Other datasets: keep generic metric-PNG behavior.
