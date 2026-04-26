@@ -46,6 +46,11 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         self._max_depth = float(max_depth)
         self._use_rank = use_rank
         self._poses = load_poses_txt(pose_path)
+        if self._poses is None:
+            print(
+                f"[IsaacSimOfflinePi3DepthProvider] WARNING: pose_path={pose_path!r} not found "
+                f"or empty — get_pose() will return None for all frames."
+            )
         self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, depth_glob)
         self._sync = OrderedIndexMap(self._depth_ids)
 

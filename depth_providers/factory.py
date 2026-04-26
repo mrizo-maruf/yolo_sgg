@@ -253,6 +253,33 @@ def _build_metric_png_offline(
     )
 
 
+def _resolve_pi3_offline_pose_path(scene_p: Path, cfg_value) -> Optional[Path]:
+    """Return an existing Pi3 pose file path, trying common names as fallback."""
+    if cfg_value is not None:
+        explicit = _resolve_scene_path(scene_p, cfg_value, "pi3_camera_poses.txt")
+        if explicit.exists():
+            return explicit
+        print(
+            f"[pi3_offline] WARNING: configured pose path not found: {explicit}\n"
+            f"  Falling back to common filename search."
+        )
+
+    # Pi3_for_yolo_sgg/utils.py names the file pi3_<original_traj_name>.txt.
+    # The two most common originals are camera_poses.txt and traj.txt.
+    for candidate_name in ("pi3_camera_poses.txt", "pi3_traj.txt"):
+        p = scene_p / candidate_name
+        if p.exists():
+            print(f"[pi3_offline] Found pose file: {p}")
+            return p
+
+    print(
+        f"[pi3_offline] WARNING: no Pi3 pose file found in {scene_p}.\n"
+        f"  Checked: pi3_camera_poses.txt, pi3_traj.txt\n"
+        f"  Poses will be unavailable — depth will load but get_pose() returns None."
+    )
+    return None
+
+
 def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
     if dataset_name in ("isaacsim", "scanetpp"):
         from .pi3_offline import IsaacSimOfflinePi3DepthProvider
@@ -262,10 +289,9 @@ def _build_pi3_offline(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
             cfg.get("pi3_offline_depth_dir", cfg.get("predicted_depth_dir")),
             "pi3_depth",
         )
-        pose_path = _resolve_scene_path(
+        pose_path = _resolve_pi3_offline_pose_path(
             scene_p,
             cfg.get("pi3_offline_pose_path", cfg.get("predicted_pose_path")),
-            "pi3_camera_poses.txt",
         )
         transform_path = _resolve_scene_path(
             scene_p,

@@ -21,6 +21,15 @@ python kg_nav_run.py --dataset isaacsim --edges vlsat --save-graph
 python kg_nav_run.py --edges bs,sv --save-graph
 ```
 
+### running run_per_frame_graphs.py
+```
+python run_per_frame_graphs.py \
+  --dataset scanetpp \
+  --scene_path /path/to/scene0a76e06478 \
+  --depth_provider pi3_online \
+  --output_dir results/per_frame_graphs/scene0a76e06478 \
+  --edges bs,sv
+```
 
 ### visualizing scene graph edges from json
 ```
