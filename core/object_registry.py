@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Set
 
 import numpy as np
 
-from core.geometry import bbox_visibility_fraction, compute_bbox
+from core.geometry import bbox_visibility_fraction, compute_bbox, voxel_downsample
 from core.types import BBox3D, CameraIntrinsics, TrackedObject
 
 
@@ -27,6 +27,7 @@ class GlobalObjectRegistry:
 
     __slots__ = (
         "overlap_threshold", "distance_threshold", "max_points",
+        "voxel_size",
         "inactive_limit", "volume_ratio_threshold", "visibility_threshold",
         "merge_iou_threshold", "merge_containment_threshold",
         "objects", "_next_id", "prev_frame", "yolo_to_global",
@@ -38,6 +39,7 @@ class GlobalObjectRegistry:
         overlap_threshold: float = 0.1,
         distance_threshold: float = 1.0,
         max_points: int = 10_000,
+        voxel_size: float = 0.0,
         inactive_limit: int = 0,
         volume_ratio_threshold: float = 0.1,
         visibility_threshold: float = 0.2,
@@ -47,6 +49,9 @@ class GlobalObjectRegistry:
         self.overlap_threshold = overlap_threshold
         self.distance_threshold = distance_threshold
         self.max_points = max_points
+        # voxel_size > 0 enables voxel down-sampling on accumulation;
+        # max_points stays as a safety cap on top of voxelization.
+        self.voxel_size = float(voxel_size)
         self.inactive_limit = inactive_limit
         self.volume_ratio_threshold = volume_ratio_threshold
         self.visibility_threshold = visibility_threshold
@@ -93,6 +98,26 @@ class GlobalObjectRegistry:
         self._next_id += 1
         return gid
 
+    # ------------------------------------------------------------------
+    # Point-cloud accumulation
+    # ------------------------------------------------------------------
+
+    def _compress_points(self, pts: np.ndarray, seed: int) -> np.ndarray:
+        """Voxel-down-sample (if enabled), then random-cap as safety.
+
+        ``seed`` is used only for the random-cap fallback so the result
+        is reproducible per frame.
+        """
+        if pts is None or pts.shape[0] == 0:
+            return pts
+        if self.voxel_size > 0.0:
+            pts = voxel_downsample(pts, self.voxel_size)
+        if pts.shape[0] > self.max_points:
+            rng = np.random.default_rng(seed)
+            idx = rng.choice(pts.shape[0], self.max_points, replace=False)
+            pts = pts[idx]
+        return pts
+
     def register_new(
         self,
         gid: int,
@@ -132,16 +157,13 @@ class GlobalObjectRegistry:
         """Merge new points into an existing object and update metadata."""
         obj = self.objects[gid]
 
-        # Merge point clouds
+        # Merge point clouds (voxel-down-sample if enabled, else random-cap).
         existing = obj.get("points_accumulated")
         if existing is not None and existing.shape[0] > 0 and pts is not None and pts.shape[0] > 0:
             merged = np.vstack([existing, pts])
-            if merged.shape[0] > self.max_points:
-                rng = np.random.default_rng(frame_idx)
-                idx = rng.choice(merged.shape[0], self.max_points, replace=False)
-                merged = merged[idx]
+            merged = self._compress_points(merged, seed=frame_idx)
         elif pts is not None and pts.shape[0] > 0:
-            merged = pts
+            merged = self._compress_points(pts, seed=frame_idx)
         else:
             merged = existing
 
@@ -325,19 +347,15 @@ class GlobalObjectRegistry:
         surv = self.objects[survivor_gid]
         abso = self.objects[absorbed_gid]
 
-        # Merge point clouds
+        # Merge point clouds (voxel-down-sample if enabled, else random-cap).
         pts_s = surv.get("points_accumulated")
         pts_a = abso.get("points_accumulated")
         if (pts_s is not None and pts_s.shape[0] > 0
                 and pts_a is not None and pts_a.shape[0] > 0):
             merged = np.vstack([pts_s, pts_a])
-            if merged.shape[0] > self.max_points:
-                rng = np.random.default_rng(42)
-                idx = rng.choice(merged.shape[0], self.max_points, replace=False)
-                merged = merged[idx]
-            surv["points_accumulated"] = merged
+            surv["points_accumulated"] = self._compress_points(merged, seed=42)
         elif pts_a is not None and pts_a.shape[0] > 0:
-            surv["points_accumulated"] = pts_a
+            surv["points_accumulated"] = self._compress_points(pts_a, seed=42)
 
         # Recompute bbox from merged points
         pts = surv.get("points_accumulated")

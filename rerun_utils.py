@@ -167,11 +167,17 @@ def _apply_axis_remap_transform(transform_4x4: np.ndarray, axis_remap: np.ndarra
 class RerunVisualizer:
     """Manages per-frame Rerun logging for the YOLO-SSG pipeline."""
 
-    def __init__(self, recording_id: str = "yolo_ssg", axis_remap: Optional[np.ndarray] = None):
+    def __init__(
+        self,
+        recording_id: str = "yolo_ssg",
+        axis_remap: Optional[np.ndarray] = None,
+        point_radius: float = 0.008,
+    ):
         self._camera_positions: List[np.ndarray] = []
         self._recording_id = recording_id
         self._initialized = False
         self._warned_invalid_camera_pose = False
+        self._point_radius = float(point_radius)
         if axis_remap is None:
             self._axis_remap = np.eye(3, dtype=np.float32)
         else:
@@ -351,7 +357,7 @@ class RerunVisualizer:
                 rr.Points3D(
                     np.concatenate(all_points, axis=0),
                     colors=np.concatenate(all_colors, axis=0),
-                    radii=np.full(sum(len(p) for p in all_points), 0.008, dtype=np.float32),
+                    radii=np.full(sum(len(p) for p in all_points), self._point_radius, dtype=np.float32),
                 ),
             )
 

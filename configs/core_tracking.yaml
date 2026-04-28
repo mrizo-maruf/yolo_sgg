@@ -57,6 +57,17 @@ tracking_inactive_limit: 0          # 0 = never remove
 tracking_volume_ratio_threshold: 0.1
 reprojection_visibility_threshold: 0.2
 
+# Voxel size (m) used by the registry to compress accumulated point clouds
+# across frames. 0.0 disables (= legacy random sub-sample).
+# 0.005  = small / detailed objects (pens, books)
+# 0.01   = general indoor (recommended default)
+# 0.02   = large objects, faster
+registry_voxel_size: 0.01
+
+# Rerun sphere radius (m) for object point clouds. If unset, defaults to
+# `registry_voxel_size / 2` so spheres just touch (no overlap, no gaps).
+rerun_point_radius: 0.005
+
 # --- Post-frame merge (collapse duplicate objects) ---
 merge_iou_threshold: 0.7
 merge_containment_threshold: 0.7

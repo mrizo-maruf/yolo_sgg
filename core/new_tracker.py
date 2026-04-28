@@ -187,6 +187,7 @@ def _build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
         overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
         distance_threshold=float(cfg.get("tracking_distance_threshold", 1.0)),
         max_points=int(cfg.get("max_accumulated_points", 10000)),
+        voxel_size=float(cfg.get("registry_voxel_size", 0.0)),
         inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
         volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
         visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),

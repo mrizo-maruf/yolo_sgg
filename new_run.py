@@ -187,6 +187,7 @@ def main() -> int:
         overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
         distance_threshold=float(cfg.get("tracking_distance_threshold", 1.0)),
         max_points=int(cfg.get("max_accumulated_points", 10000)),
+        voxel_size=float(cfg.get("registry_voxel_size", 0.0)),
         inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
         volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
         visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
@@ -217,9 +218,15 @@ def main() -> int:
             axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
             print("[Rerun] Applying ScanNet++ axis remap (Z-up -> RDF).")
 
+        # Default sphere radius tracks the registry voxel grid: half a voxel
+        # so spheres just touch — no overlap, no gaps. Override with
+        # `rerun_point_radius` if you want bigger/smaller dots.
+        _voxel = float(cfg.get("registry_voxel_size", 0.0))
+        _default_radius = (_voxel / 2.0) if _voxel > 0.0 else 0.008
         rerun_vis = RerunVisualizer(
             recording_id=f"yolo_ssg_{dataset_name}",
             axis_remap=axis_remap,
+            point_radius=float(cfg.get("rerun_point_radius", _default_radius)),
         )
         rerun_vis.init(
             img_w=intrinsics.width,

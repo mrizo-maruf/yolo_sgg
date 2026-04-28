@@ -19,6 +19,24 @@ UnprojectFn = Callable[[np.ndarray, np.ndarray, np.ndarray, CameraIntrinsics], n
 
 
 # ---------------------------------------------------------------------------
+# Voxel down-sampling
+# ---------------------------------------------------------------------------
+
+def voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
+    """Voxel-grid down-sample an (N, 3) point cloud.
+
+    Returns the original array unchanged when ``voxel_size <= 0`` or
+    when there are fewer than 2 points (nothing useful to merge).
+    """
+    if voxel_size <= 0.0 or pts is None or pts.shape[0] < 2:
+        return pts
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    pcd = pcd.voxel_down_sample(voxel_size=float(voxel_size))
+    return np.asarray(pcd.points, dtype=pts.dtype)
+
+
+# ---------------------------------------------------------------------------
 # PCD cleaning (standalone — used after DepthProvider.get_masked_pcds)
 # ---------------------------------------------------------------------------
 
