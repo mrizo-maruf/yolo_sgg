@@ -15,6 +15,9 @@ from .sequence_sync import OrderedIndexMap, sorted_files_with_ids
 
 
 _DEPTH_SCALE_RE = re.compile(r"png_depth_scale:\s*([0-9eE+.\-]+)")
+_FORMAT_RE = re.compile(r"format:\s*(\S+)")
+_GLOBAL_MIN_RE = re.compile(r"global_depth_min_m:\s*([0-9eE+.\-]+)")
+_GLOBAL_MAX_RE = re.compile(r"global_depth_max_m:\s*([0-9eE+.\-]+)")
 
 
 class IsaacSimOfflinePi3DepthProvider(DepthProvider):
@@ -54,12 +57,34 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         self._depth_files, self._depth_ids = sorted_files_with_ids(self._depth_dir, depth_glob)
         self._sync = OrderedIndexMap(self._depth_ids)
 
+        meta = self._read_meta()
         if png_depth_scale is None:
-            self._png_depth_scale = self._read_png_depth_scale_from_meta()
+            self._png_depth_scale = meta.get("png_depth_scale", 0.001)
         else:
             self._png_depth_scale = float(png_depth_scale)
         if self._png_depth_scale <= 0.0:
             raise ValueError(f"png_depth_scale must be > 0, got {self._png_depth_scale}")
+
+        meta_max = meta.get("global_depth_max_m")
+        meta_min = meta.get("global_depth_min_m")
+        meta_fmt = meta.get("format")
+        meta_src = meta.get("_source")
+        n_files = len(self._depth_files)
+        scale_origin = "cfg" if png_depth_scale is not None else (
+            "meta" if meta_src else "default(0.001)"
+        )
+        print(
+            f"[Pi3Offline] dir={self._depth_dir} files={n_files} "
+            f"png_depth_scale={self._png_depth_scale:.6g} ({scale_origin}) "
+            f"format={meta_fmt or 'unknown'} "
+            f"meta_min={meta_min} meta_max={meta_max} "
+            f"clamp=[{self._min_depth},{self._max_depth}]"
+        )
+        if meta_max is not None and meta_max > self._max_depth:
+            print(
+                f"[Pi3Offline] WARNING: meta global_depth_max_m={meta_max:.3f} > "
+                f"clamp max_depth={self._max_depth:.3f} — pixels above will be zeroed."
+            )
 
         if transform_path is None:
             if require_transform:
@@ -70,8 +95,18 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
         else:
             self._sim3 = self._load_sim3_matrix(transform_path, require_transform)
 
-    def _read_png_depth_scale_from_meta(self) -> float:
-        """Read scale from Pi3 metadata; fallback to 1 mm/unit."""
+    def _read_meta(self) -> dict:
+        """Parse Pi3 depth metadata file (if present).
+
+        Returns a dict with any of: png_depth_scale, format,
+        global_depth_min_m, global_depth_max_m, _source (filename).
+        Empty dict if no meta file is found.
+
+        Raises ``ValueError`` if a meta file exists but ``png_depth_scale``
+        is present with an unparseable / non-positive value — silent
+        fall-through to the 0.001 default has caused encoding
+        mismatches in the past.
+        """
         for name in ("pi3_depth_meta.txt", "depth_scale.txt", "meta.txt"):
             path = self._depth_dir / name
             if not path.exists():
@@ -80,16 +115,44 @@ class IsaacSimOfflinePi3DepthProvider(DepthProvider):
                 txt = path.read_text(encoding="utf-8")
             except Exception:
                 continue
+
+            out: dict = {"_source": name}
+
             m = _DEPTH_SCALE_RE.search(txt)
             if m:
                 try:
                     value = float(m.group(1))
-                    if value > 0:
-                        return value
+                except ValueError as e:
+                    raise ValueError(
+                        f"Malformed png_depth_scale in {path}: {m.group(1)!r}"
+                    ) from e
+                if value <= 0:
+                    raise ValueError(
+                        f"png_depth_scale must be > 0 in {path}, got {value}"
+                    )
+                out["png_depth_scale"] = value
+
+            m = _FORMAT_RE.search(txt)
+            if m:
+                out["format"] = m.group(1).strip()
+
+            m = _GLOBAL_MIN_RE.search(txt)
+            if m:
+                try:
+                    out["global_depth_min_m"] = float(m.group(1))
                 except ValueError:
-                    continue
-        # Default matches Pi3 exporter default (1 unit = 1 mm).
-        return 0.001
+                    pass
+
+            m = _GLOBAL_MAX_RE.search(txt)
+            if m:
+                try:
+                    out["global_depth_max_m"] = float(m.group(1))
+                except ValueError:
+                    pass
+
+            return out
+
+        return {}
 
     @staticmethod
     def _load_sim3_matrix(path_str: str, require: bool) -> np.ndarray:
