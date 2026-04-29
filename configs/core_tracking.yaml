@@ -69,8 +69,12 @@ registry_voxel_size: 0.01
 rerun_point_radius: 0.005
 
 # --- Post-frame merge (collapse duplicate objects) ---
-merge_iou_threshold: 0.7
-merge_containment_threshold: 0.7
+# merge_every_n_frames: run merge pass every N frames; 0 disables.
+# Lowered thresholds vs. naive defaults — with Pi3 depth jitter two bboxes
+# for the same object rarely reach 0.7 IoU but often reach 0.3-0.5.
+merge_every_n_frames: 20
+merge_iou_threshold: 0.4
+merge_containment_threshold: 0.5
 
 # --- Matching (benchmark) ---
 # One mode per benchmark run:

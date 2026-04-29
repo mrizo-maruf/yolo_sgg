@@ -86,6 +86,8 @@ def run_tracking(
     o3_std = float(cfg.get("o3std_ratio", 0.1))
     kernel_size = int(cfg.get("kernel_size", 9))
     cuda_available = bool(torch is not None and torch.cuda.is_available())
+    # 0 disables periodic merge; any positive value calls merge every N frames.
+    merge_every_n = int(cfg.get("merge_every_n_frames", 20))
 
     overlap_th = object_registry.overlap_threshold
     dist_th = object_registry.distance_threshold
@@ -161,6 +163,18 @@ def run_tracking(
             visible_gids.update(o.global_id for o in extra)
         object_registry.end_frame(visible_gids)
         timings["reprojection_ms"] = (time.perf_counter() - t0) * 1000
+
+        # --- Periodic deduplication ---
+        # Merges registry objects that converged to the same physical thing
+        # (e.g. a vase seen from different angles whose bboxes now overlap).
+        # Absorbed gids are deleted from the registry; remove them from the
+        # current frame's object list so callers don't see stale entries.
+        if merge_every_n > 0 and idx % merge_every_n == 0:
+            merged_pairs = object_registry.merge_overlapping_objects()
+            if merged_pairs:
+                absorbed_ids = {a for a, _ in merged_pairs}
+                frame_objs = [o for o in frame_objs if o.global_id not in absorbed_ids]
+                visible_gids -= absorbed_ids
 
         timings["tracking_3d_ms"] = (time.perf_counter() - t_tracking_3d) * 1000
         _record_gpu(timings, "gpu_after_tracking_3d_mb", cuda_available)
@@ -275,6 +289,7 @@ def _track_one_detection(
     gid = _match_detection_to_global_id(
         bbox=bbox,
         tid=tid,
+        cls=cls,
         object_registry=object_registry,
         matched_gids=matched_gids,
         overlap_th=overlap_th,
@@ -305,6 +320,7 @@ def _match_detection_to_global_id(
     *,
     bbox,
     tid: int,
+    cls: Optional[str],
     object_registry,
     matched_gids: Set[int],
     overlap_th: float,
@@ -324,5 +340,5 @@ def _match_detection_to_global_id(
         return gid
 
     return match_registry_reobservation(
-        bbox, object_registry, matched_gids, overlap_th, dist_th,
+        bbox, cls, object_registry, matched_gids, overlap_th, dist_th,
     )

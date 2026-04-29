@@ -134,6 +134,7 @@ def match_prev_frame(
 
 def match_registry_reobservation(
     bbox: Optional[BBox3D],
+    detection_class: Optional[str],
     object_registry,
     matched_gids: Set[int],
     overlap_th: float,
@@ -144,11 +145,23 @@ def match_registry_reobservation(
     Uses a relaxed distance threshold proportional to the existing object
     size so partial views of large objects (sofa, table) whose centroid
     is offset can still match.
+
+    Class-compatibility gate: if both the detection and the registry object
+    have a known class and they differ, the candidate is skipped.  This
+    prevents a vase from matching a chair just because they happen to share
+    a volume in the scene.
     """
+    det_cls = (detection_class or "").strip().lower()
     best_gid, best_score = None, 0.0
     for cand_gid, obj in object_registry.objects.items():
         if cand_gid in matched_gids:
             continue
+
+        # Class-compatibility: skip cross-class matches when both are known.
+        reg_cls = (obj.get("class_name") or "").strip().lower()
+        if det_cls and reg_cls and det_cls != reg_cls:
+            continue
+
         existing_bbox = obj.get("bbox_3d")
         level3_dist = dist_th
         if existing_bbox is not None:

@@ -279,24 +279,25 @@ class GlobalObjectRegistry:
     # ------------------------------------------------------------------
 
     def merge_overlapping_objects(self) -> List[tuple]:
-        """Detect and merge registry objects whose bboxes significantly overlap.
+        """Detect and merge registry objects that point at the same physical thing.
 
-        Called after ``end_frame`` to clean up duplicates that arose when a
-        partial re-observation was incorrectly registered as a new object
-        and later grew to overlap the original.
+        Triggers on any of three signals:
+          1. High raw overlap          : iou ≥ merge_iou_threshold
+                                          OR containment ≥ merge_containment_threshold
+          2. Class-aware overlap        : classes compatible AND iou or containment
+                                          at half the main threshold
+          3. Class-aware center+size    : classes compatible AND centers within
+                                          half the larger object's max extent
+                                          AND volume ratio ≥ 0.5
 
-        Thresholds are read from ``self.merge_iou_threshold`` and
-        ``self.merge_containment_threshold`` (set via config).
+        "Compatible classes" = either class is missing/empty OR they string-match
+        case-insensitively. This protects against merging a chair onto a table
+        even when their AABBs happen to overlap.
 
         Returns list of ``(absorbed_gid, survivor_gid)`` pairs.
         """
-        from core.geometry import aabb_iou, aabb_containment
-
         if len(self.objects) < 2:
             return []
-
-        iou_th = self.merge_iou_threshold
-        cont_th = self.merge_containment_threshold
 
         gids = list(self.objects.keys())
         merged_pairs: List[tuple] = []
@@ -308,39 +309,91 @@ class GlobalObjectRegistry:
             for j in range(i + 1, len(gids)):
                 if gids[j] in absorbed:
                     continue
-                # gids[i] may have been absorbed during a previous j iteration
-                # (when it had fewer observations than gids[j'])
                 if gids[i] in absorbed:
                     break
 
                 obj_a = self.objects[gids[i]]
                 obj_b = self.objects[gids[j]]
-                bbox_a = obj_a.get("bbox_3d")
-                bbox_b = obj_b.get("bbox_3d")
 
-                if bbox_a is None or bbox_b is None:
+                if not self._should_merge(obj_a, obj_b):
                     continue
 
-                iou = aabb_iou(bbox_a, bbox_b)
-                containment = aabb_containment(bbox_a, bbox_b)
+                # Survivor = more observations, ties → older (lower gid).
+                cnt_a = obj_a.get("observation_count", 0)
+                cnt_b = obj_b.get("observation_count", 0)
+                if cnt_a >= cnt_b:
+                    survivor, absorbed_id = gids[i], gids[j]
+                else:
+                    survivor, absorbed_id = gids[j], gids[i]
 
-                if iou >= iou_th or containment >= cont_th:
-                    # Survivor = the object seen in more frames (tie → older)
-                    cnt_a = obj_a.get("observation_count", 0)
-                    cnt_b = obj_b.get("observation_count", 0)
-                    if cnt_a >= cnt_b:
-                        survivor, absorbed_id = gids[i], gids[j]
-                    else:
-                        survivor, absorbed_id = gids[j], gids[i]
-
-                    self._merge_into(survivor, absorbed_id)
-                    absorbed.add(absorbed_id)
-                    merged_pairs.append((absorbed_id, survivor))
-                    # If the outer-loop object was absorbed, stop the inner loop
-                    if absorbed_id == gids[i]:
-                        break
+                self._merge_into(survivor, absorbed_id)
+                absorbed.add(absorbed_id)
+                merged_pairs.append((absorbed_id, survivor))
+                if absorbed_id == gids[i]:
+                    break
 
         return merged_pairs
+
+    def _should_merge(self, obj_a: dict, obj_b: dict) -> bool:
+        """Decide whether two registry objects should be merged.
+
+        See :meth:`merge_overlapping_objects` for the three signals.
+        """
+        from core.geometry import aabb_iou, aabb_containment
+
+        bbox_a = obj_a.get("bbox_3d")
+        bbox_b = obj_b.get("bbox_3d")
+        if bbox_a is None or bbox_b is None:
+            return False
+
+        iou = aabb_iou(bbox_a, bbox_b)
+        cont = aabb_containment(bbox_a, bbox_b)
+
+        # Signal 1: high overlap is decisive regardless of class.
+        if iou >= self.merge_iou_threshold or cont >= self.merge_containment_threshold:
+            return True
+
+        cls_a = (obj_a.get("class_name") or "").strip().lower()
+        cls_b = (obj_b.get("class_name") or "").strip().lower()
+        classes_compatible = (not cls_a) or (not cls_b) or (cls_a == cls_b)
+        if not classes_compatible:
+            return False
+
+        # Signal 2: moderate overlap with matching/unknown class.
+        if iou >= self.merge_iou_threshold * 0.5 or cont >= self.merge_containment_threshold * 0.5:
+            return True
+
+        # Signal 3: jittered duplicates — close centers + similar volume.
+        try:
+            ext_a = np.asarray(bbox_a.obb_extent, dtype=np.float64)
+            ext_b = np.asarray(bbox_b.obb_extent, dtype=np.float64)
+            center_dist = float(np.linalg.norm(bbox_a.center - bbox_b.center))
+        except Exception:
+            return False
+
+        vol_a = float(np.prod(ext_a))
+        vol_b = float(np.prod(ext_b))
+        if vol_a <= 0.0 or vol_b <= 0.0:
+            return False
+        size_ratio = min(vol_a, vol_b) / max(vol_a, vol_b)
+        max_extent = float(max(ext_a.max(), ext_b.max()))
+
+        return center_dist < 0.5 * max_extent and size_ratio >= 0.5
+
+    def remove_object(self, gid: int) -> bool:
+        """Delete an object from the registry and clean up all references.
+
+        Returns ``True`` if something was removed.
+        """
+        if gid not in self.objects:
+            return False
+        del self.objects[gid]
+        self.yolo_to_global = {
+            k: v for k, v in self.yolo_to_global.items() if v != gid
+        }
+        self.prev_frame.pop(gid, None)
+        self._visible_this_frame.discard(gid)
+        return True
 
     def _merge_into(self, survivor_gid: int, absorbed_gid: int) -> None:
         """Absorb one object into another and delete the absorbed entry."""
