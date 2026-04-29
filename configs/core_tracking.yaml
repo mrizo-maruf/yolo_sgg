@@ -39,8 +39,8 @@ alpha: 0.7
 fast_mask: true
 
 # --- Point cloud ---
-max_points_per_obj: 250
-max_accumulated_points: 750
+max_points_per_obj: 500
+max_accumulated_points: 1500
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 
@@ -62,11 +62,11 @@ reprojection_visibility_threshold: 0.2
 # 0.005  = small / detailed objects (pens, books)
 # 0.01   = general indoor (recommended default)
 # 0.02   = large objects, faster
-registry_voxel_size: 0.01
+registry_voxel_size: 0.04
 
 # Rerun sphere radius (m) for object point clouds. If unset, defaults to
 # `registry_voxel_size / 2` so spheres just touch (no overlap, no gaps).
-rerun_point_radius: 0.005
+rerun_point_radius: 0.02
 
 # --- Post-frame merge (collapse duplicate objects) ---
 # merge_every_n_frames: run merge pass every N frames; 0 disables.
