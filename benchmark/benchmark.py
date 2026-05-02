@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import traceback
 from collections import defaultdict
 from datetime import datetime
@@ -178,6 +179,25 @@ def benchmark_scene(
     timings_agg: Dict[str, List[float]] = {k: [] for k in _TIMING_KEY_MAP.values()}
     gpu_usage: Dict[str, List[float]] = {k: [] for k in _GPU_KEY_MAP.values()}
 
+    # --- Background Pi3 feeder (mirrors new_run.py) -------------------------
+    # Pi3 emits depth in chunks; without a pre-feeder thread the tracking
+    # loop deadlocks on get_depth(0) — only one frame is in the buffer and
+    # it never reaches chunk_size. The feeder pushes RGBs ahead of the
+    # tracker so chunks are ready when needed.
+    _pi3_feeder = None
+    if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
+        def _pi3_feed_worker():
+            for fidx in range(n_frames):
+                loader.get_rgb(fidx)              # calls feed_frame internally
+            if hasattr(depth_provider, "drain"):
+                depth_provider.drain()
+
+        _pi3_feeder = threading.Thread(
+            target=_pi3_feed_worker, daemon=True, name="pi3-feeder",
+        )
+        _pi3_feeder.start()
+        print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
+
     # --- Core tracking loop --------------------------------------------------
     for tf in tqdm(
         run_tracking(loader=loader, cfg=cfg, object_registry=object_registry),
@@ -239,6 +259,15 @@ def benchmark_scene(
                 vis_save,
                 match_mode=match_mode,
             )
+
+    # --- Shut down Pi3 worker thread (so the next scene gets a clean slate)
+    if hasattr(depth_provider, "close"):
+        try:
+            depth_provider.close()
+        except Exception:
+            pass
+    if _pi3_feeder is not None:
+        _pi3_feeder.join(timeout=5.0)
 
     # --- Final metrics -------------------------------------------------------
     metrics = acc.compute()
