@@ -44,8 +44,9 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.new_tracker import run_tracking
+from core.new_tracker import build_default_registry, run_tracking
 from core.object_registry import GlobalObjectRegistry
+from depth_providers.pi3_online import apply_pi3_online_transform_from_cfg
 from scene_graph import SceneGraph
 from data_loaders import get_loader
 from depth_providers.factory import PROVIDER_CHOICES, build_depth_provider
@@ -144,7 +145,7 @@ def main() -> int:
 
     # --- Apply Sim(3) alignment for Pi3 online (Pi3 world → GT world) ---
     if dp_type == "pi3_online":
-        _apply_pi3_online_transform(depth_provider, scene_path, cfg)
+        apply_pi3_online_transform_from_cfg(depth_provider, scene_path, cfg)
 
     loader_kwargs = _build_loader_kwargs(dataset_name, cfg)
     loader = LoaderCls(scene_path, depth_provider=depth_provider, **loader_kwargs)
@@ -183,17 +184,7 @@ def main() -> int:
         print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
 
     # --- Object registry ---
-    object_registry = GlobalObjectRegistry(
-        overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
-        distance_threshold=float(cfg.get("tracking_distance_threshold", 1.0)),
-        max_points=int(cfg.get("max_accumulated_points", 10000)),
-        voxel_size=float(cfg.get("registry_voxel_size", 0.0)),
-        inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
-        volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
-        visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
-        merge_iou_threshold=float(cfg.get("merge_iou_threshold", 0.5)),
-        merge_containment_threshold=float(cfg.get("merge_containment_threshold", 0.7)),
-    )
+    object_registry = build_default_registry(cfg)
 
     # SceneGraph
     scene_graph = SceneGraph(cfg.ssg)
@@ -428,36 +419,6 @@ def main() -> int:
         _save_objects_json(object_registry, save_dir, dataset_name)
 
     return 0
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Pi3 online Sim(3) transform
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _apply_pi3_online_transform(depth_provider, scene_path: str, cfg) -> None:
-    """Resolve and apply Sim(3) alignment (Pi3 world → GT world) from config."""
-    transform_raw = cfg.get(
-        "pi3_online_transform_path",
-        cfg.get("pi3_offline_transform_path"),
-    )
-    if transform_raw is None:
-        return
-
-    tp = Path(transform_raw)
-    if not tp.is_absolute():
-        tp = Path(scene_path) / tp
-
-    require = bool(cfg.get("pi3_online_require_transform", False))
-    if not tp.exists():
-        if require:
-            raise FileNotFoundError(f"Pi3 alignment transform not found: {tp}")
-        return
-
-    from depth_providers.pi3_online import _load_sim3_matrix
-
-    sim3 = _load_sim3_matrix(str(tp), require=True)
-    depth_provider.set_sim3_transform(sim3)
-    print(f"[Pi3] Sim(3) alignment loaded from {tp}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -48,8 +48,8 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.new_tracker import run_tracking
-from core.object_registry import GlobalObjectRegistry
+from core.new_tracker import build_default_registry, run_tracking
+from depth_providers.pi3_online import apply_pi3_online_transform_from_cfg
 from core.types import CameraIntrinsics, TrackedFrame
 from data_loaders import get_loader
 from depth_providers.factory import PROVIDER_CHOICES, build_depth_provider
@@ -127,6 +127,10 @@ def benchmark_scene(
     dp_type = str(cfg.get("depth_provider", "gt"))
     depth_provider = build_depth_provider(dp_type, dataset_name, scene_path, cfg)
 
+    # --- Apply Sim(3) alignment for Pi3 online (Pi3 world → GT world) ---
+    if dp_type == "pi3_online":
+        apply_pi3_online_transform_from_cfg(depth_provider, scene_path, cfg)
+
     loader_kwargs = _build_loader_kwargs(dataset_name, cfg)
     loader = LoaderCls(scene_path, depth_provider=depth_provider, **loader_kwargs)
 
@@ -154,14 +158,7 @@ def benchmark_scene(
         )
 
     # --- Object registry -----------------------------------------------------
-    object_registry = GlobalObjectRegistry(
-        overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
-        distance_threshold=float(cfg.get("tracking_distance_threshold", 1.0)),
-        max_points=int(cfg.get("max_accumulated_points", 10000)),
-        inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
-        volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
-        visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
-    )
+    object_registry = build_default_registry(cfg)
 
     # --- Vis setup -----------------------------------------------------------
     vis_cfg = OmegaConf.to_container(cfg.get("visualization", {}), resolve=True)

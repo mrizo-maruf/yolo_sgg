@@ -61,7 +61,7 @@ def run_tracking(
     TrackedFrame
     """
     if object_registry is None:
-        object_registry = _build_default_registry(cfg)
+        object_registry = build_default_registry(cfg)
 
     intrinsics = loader.get_intrinsics()
     class_names_to_track = _resolve_open_vocab_classes(loader, cfg)
@@ -196,7 +196,13 @@ def run_tracking(
 # Setup helpers
 # ---------------------------------------------------------------------------
 
-def _build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
+def build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
+    """Construct a :class:`GlobalObjectRegistry` from the merged config.
+
+    Single source of truth for ``new_run.py`` and ``benchmark/benchmark.py``
+    so the two entry points cannot drift on registry parameters
+    (voxel size, merge thresholds, etc.).
+    """
     return GlobalObjectRegistry(
         overlap_threshold=float(cfg.get("tracking_overlap_threshold", 0.1)),
         distance_threshold=float(cfg.get("tracking_distance_threshold", 1.0)),

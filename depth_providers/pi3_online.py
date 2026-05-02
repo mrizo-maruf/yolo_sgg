@@ -79,6 +79,44 @@ def load_sim3_matrix(path_str: str, require: bool = True) -> np.ndarray:
 _load_sim3_matrix = load_sim3_matrix
 
 
+def apply_pi3_online_transform_from_cfg(
+    depth_provider,
+    scene_path: str,
+    cfg,
+) -> None:
+    """Resolve a Sim(3) JSON path from cfg and apply it to a Pi3 online provider.
+
+    Reads ``pi3_online_transform_path`` (falling back to
+    ``pi3_offline_transform_path``).  Path is resolved relative to
+    ``scene_path`` if not absolute.  Honours
+    ``pi3_online_require_transform`` (raise on missing file vs. silently
+    skip).  No-op if no path is configured.
+
+    Used by both ``new_run.py`` and ``benchmark/benchmark.py`` so they
+    stay aligned.
+    """
+    transform_raw = cfg.get(
+        "pi3_online_transform_path",
+        cfg.get("pi3_offline_transform_path"),
+    )
+    if transform_raw is None:
+        return
+
+    tp = Path(transform_raw)
+    if not tp.is_absolute():
+        tp = Path(scene_path) / tp
+
+    require = bool(cfg.get("pi3_online_require_transform", False))
+    if not tp.exists():
+        if require:
+            raise FileNotFoundError(f"Pi3 alignment transform not found: {tp}")
+        return
+
+    sim3 = load_sim3_matrix(str(tp), require=True)
+    depth_provider.set_sim3_transform(sim3)
+    log.info("[Pi3] Sim(3) alignment loaded from %s", tp)
+
+
 # ------------------------------------------------------------------
 #  Internal helpers
 # ------------------------------------------------------------------
