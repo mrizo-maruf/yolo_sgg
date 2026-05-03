@@ -64,7 +64,7 @@ def run_tracking(
         object_registry = build_default_registry(cfg)
 
     intrinsics = loader.get_intrinsics()
-    class_names_to_track = _resolve_open_vocab_classes(loader, cfg)
+    class_names_to_track = resolve_open_vocab_classes(loader, cfg)
     skip_exact, skip_sub = _build_skip_sets(cfg)
 
     yolo_stream = run_yolo_tracking_stream(
@@ -216,7 +216,7 @@ def build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
     )
 
 
-def _resolve_open_vocab_classes(
+def resolve_open_vocab_classes(
     loader: DatasetLoader, cfg: DictConfig,
 ) -> Optional[List[str]]:
     """Return scene-specific open-vocab class list, or None for closed-set."""

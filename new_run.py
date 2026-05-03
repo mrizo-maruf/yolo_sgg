@@ -44,8 +44,13 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.new_tracker import build_default_registry, run_tracking
+from core.new_tracker import (
+    build_default_registry,
+    resolve_open_vocab_classes,
+    run_tracking,
+)
 from core.object_registry import GlobalObjectRegistry
+from core.run_info import print_run_banner
 from depth_providers.pi3_online import apply_pi3_online_transform_from_cfg
 from scene_graph import SceneGraph
 from data_loaders import get_loader
@@ -151,17 +156,38 @@ def main() -> int:
     loader = LoaderCls(scene_path, depth_provider=depth_provider, **loader_kwargs)
     frame_numbers = getattr(loader, "_frame_numbers", None)
 
-    print(f"\n{'=' * 60}")
-    print(f"  RUN — {loader.scene_label}  (dataset: {dataset_name})")
-    print(f"{'=' * 60}")
-
     n_frames = loader.get_num_frames()
-    print(f"Frames: {n_frames}")
-
     intrinsics = loader.get_intrinsics()
-    print(f"Intrinsics: fx={intrinsics.fx:.1f}  fy={intrinsics.fy:.1f}  "
-          f"cx={intrinsics.cx:.1f}  cy={intrinsics.cy:.1f}  "
-          f"image={intrinsics.width}x{intrinsics.height}")
+
+    ssg_cfg_view = cfg.get("ssg", {}) or {}
+    edges_enabled = [
+        name for name, key in (
+            ("basic", "basic_edges"),
+            ("baseline", "baseline_edges"),
+            ("vlsat", "vlsat_edges"),
+        ) if bool(ssg_cfg_view.get(key, False))
+    ]
+    extras = {
+        "Scene graph": [
+            f"edges:             {', '.join(edges_enabled) if edges_enabled else '(none)'}",
+            f"rerun:             {bool(ssg_cfg_view.get('rerun', False))}",
+            f"vis_graph:         {bool(ssg_cfg_view.get('vis_graph', False))}",
+            f"save_local:        {bool(ssg_cfg_view.get('save_local_graph', False))}",
+            f"save_global:       {bool(ssg_cfg_view.get('save_global_graph', False))}",
+        ],
+    }
+    print_run_banner(
+        title="RUN",
+        dataset_name=dataset_name,
+        scene_label=loader.scene_label,
+        scene_path=scene_path,
+        n_frames=n_frames,
+        intrinsics=intrinsics,
+        dp_type=dp_type,
+        cfg=cfg,
+        classes=resolve_open_vocab_classes(loader, cfg),
+        extras=extras,
+    )
 
     # --- Stream frames to Pi3 depth provider in background ---
     # A background thread reads RGB frames and feeds them to Pi3.  Pi3

@@ -48,7 +48,12 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.new_tracker import build_default_registry, run_tracking
+from core.new_tracker import (
+    build_default_registry,
+    resolve_open_vocab_classes,
+    run_tracking,
+)
+from core.run_info import print_run_banner
 from depth_providers.pi3_online import apply_pi3_online_transform_from_cfg
 from core.types import CameraIntrinsics, TrackedFrame
 from data_loaders import get_loader
@@ -138,14 +143,25 @@ def benchmark_scene(
     intrinsics = loader.get_intrinsics()
     match_mode = _resolve_match_mode(cfg)
 
-    print(f"\n{'=' * 60}")
-    print(f"  BENCHMARK  –  {loader.scene_label}  (dataset: {dataset_name})")
-    print(f"{'=' * 60}")
-    print(f"Frames: {n_frames}")
-    print(f"Intrinsics: fx={intrinsics.fx:.1f}  fy={intrinsics.fy:.1f}  "
-          f"cx={intrinsics.cx:.1f}  cy={intrinsics.cy:.1f}  "
-          f"image={intrinsics.width}x{intrinsics.height}")
-    print(f"Matching mode: {match_mode} ({_similarity_label(match_mode)})")
+    extras = {
+        "Benchmark": [
+            f"match_mode:        {match_mode} ({_similarity_label(match_mode)})",
+            f"iou_threshold:     {cfg.get('iou_threshold', 0.3)}",
+            f"include_reproj:    {bool(cfg.get('benchmark_include_reprojected_masks', False))}",
+        ],
+    }
+    print_run_banner(
+        title="BENCHMARK",
+        dataset_name=dataset_name,
+        scene_label=loader.scene_label,
+        scene_path=scene_path,
+        n_frames=n_frames,
+        intrinsics=intrinsics,
+        dp_type=dp_type,
+        cfg=cfg,
+        classes=resolve_open_vocab_classes(loader, cfg),
+        extras=extras,
+    )
 
     # Quick check: does this loader support GT?
     test_gt = loader.get_gt_instances(0)
