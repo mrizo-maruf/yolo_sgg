@@ -304,6 +304,8 @@ def benchmark_dataset(
     all_results: Dict[str, Dict] = {}
     agg: Dict[str, List[float]] = defaultdict(list)
 
+    import gc
+
     for scene_dir in scenes:
         scene_label = Path(scene_dir).name
         try:
@@ -315,6 +317,12 @@ def benchmark_dataset(
         except Exception as exc:
             print(f"\n[ERROR] {scene_label}: {exc}")
             traceback.print_exc()
+
+        # Force reclamation between scenes — prevents YOLO+Pi3 model
+        # ghosts from compounding across scenes and triggering kernel OOM.
+        gc.collect()
+        if _torch is not None and _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
 
     # --- Aggregate -----------------------------------------------------------
     overall: Dict[str, Dict] = {}

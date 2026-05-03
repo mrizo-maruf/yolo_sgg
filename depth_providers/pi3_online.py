@@ -270,12 +270,23 @@ class Pi3OnlineDepthProvider(OnlineDepthProvider):
         done.wait(timeout=timeout)
         log.info("[Pi3] drain complete")
 
-    def close(self) -> None:
-        """Shut down the worker and free resources."""
+    def close(self, join_timeout: float = 120.0) -> None:
+        """Shut down the worker and free resources.
+
+        ``join_timeout`` must be longer than one chunk's inference time;
+        otherwise we'd return while the worker is still mid-inference and
+        the model would stay resident in RAM/VRAM (a leak across scenes
+        in multi-scene benchmarks). Default 120 s is conservative.
+        """
         if self._worker is not None and self._worker.is_alive():
             self._worker_stop.set()
             self._queue.put(_STOP)
-            self._worker.join(timeout=5.0)
+            self._worker.join(timeout=join_timeout)
+            if self._worker.is_alive():
+                log.warning(
+                    "[Pi3] worker did not exit within %.1fs — model may leak",
+                    join_timeout,
+                )
             self._worker = None
 
         self._model = None
