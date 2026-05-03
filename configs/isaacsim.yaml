@@ -16,6 +16,28 @@ vertical_aperture: 45
 min_depth: 0.01
 max_depth: 10.0
 png_max_value: 65535
+# Pose indexing mode:
+#   auto         -> infer from frame/depth numbering (000000 => index, 000001 => frame_number)
+#   index        -> pose line i maps to frame i
+#   frame_number -> pose line (frame_number - 1)
+pose_lookup_mode: auto
+
+# --- Offline Pi3 depth (for depth_provider: pi3_offline) ---
+pi3_offline_depth_dir: "pi3_depth_20_10"
+# Pi3 camera poses saved by Pi3_for_yolo_sgg/run.py
+pi3_offline_pose_path: "pi3_traj_20_10.txt"
+# Scene-level Sim(3) from align_pi3_gt.py --save_transform
+pi3_offline_transform_path: "align_pi3_20_10.json"
+# If null, provider reads png_depth_scale from pi3_depth/pi3_depth_meta.txt
+pi3_offline_png_depth_scale: null
+pi3_offline_require_transform: true
+pi3_offline_pose_lookup_mode: auto
+
+pi3_online_transform_path: "align_pi3_5_3.json"
+
+# --- Offline DepthAnythingV3 (for depth_provider: dav3_offline) ---
+dav3_offline_depth_dir: "dav3_depth"
+dav3_offline_pose_path: "dav3_camera_poses.txt"
 
 # IsaacSim-specific labels to skip in GT loading
 loader_skip_labels:
@@ -28,11 +50,52 @@ loader_skip_labels:
   - unknown
 
 load_rgb: true
-load_depth: true
+load_depth: false
 pi3: false
 dav3: false
 require_all_ids: true
 
+fixed_nice_room_nikita_class_names:
+  - "couch"
+  - "box"
+  - "table"
+  - "teddy bear"
+  - "bookshelf"
+  - "books"
+  - "vase"
+  - "plant"
+  - "buddha statue"
+  - "statue"
+  - "chiffonier"
+  - "lamp"
+  - "trash can"
+  - "chair"
+  - "painting"
+  - "pen"
+  - "glass"
+  - "notebook"
+  - "chessboard"
+  - "curtain"
+  - "clock"
+  - "object"
+scene_0_class_names:
+  - "teddy bear"
+  - "box"
+  - "oven"
+  - "table"
+  - "ladder"
+  - "chair"
+  - "palm tree"
+  - "clock"
+  - "cabinet"
+  - "chiffonier"
+  - "lamp"
+  - "vase"
+  - "sofa"
+  - "trash can"
+  - "desk"
+
+save_graph_dir: "results/scene_graphs"
 # class names for open vocabulary evaluation (if enabled)
 scene_1_class_names:
   - "red office chair"

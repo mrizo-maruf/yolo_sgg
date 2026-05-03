@@ -15,4 +15,5 @@ runs/
 *.json
 *.csv
 thud/
-logs/
+*out.tfevents.*
+results/

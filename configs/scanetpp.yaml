@@ -1,0 +1,142 @@
+# ============================================================================
+# ScanNet++ dataset overrides
+# ============================================================================
+# Inherits everything from core_tracking.yaml; override only what differs.
+
+dataset: scanetpp
+
+# --- ScanNet++ camera intrinsics ---
+fx: 692.52
+fy: 693.83
+cx: 459.76
+cy: 344.76
+image_width: 920
+image_height: 690
+
+# --- Depth conversion (uint16 PNG, metres = px / 1000) ---
+depth_scale: 1000.0
+min_depth: 0.01
+max_depth: 10.0
+
+# ScanNet++ labels to skip in GT loading
+loader_skip_labels:
+  - wall
+  - floor
+  - ground
+  - ceiling
+  - background
+
+load_rgb: true
+load_depth: false
+pi3: false
+dav3: false
+require_all_ids: true
+
+# --- Offline Pi3 depth (for depth_provider: pi3_offline) ---
+# Pi3 output dir from Pi3_for_yolo_sgg/run.py
+pi3_offline_depth_dir: "pi3_depth_5_3"
+# Pi3 camera poses saved by Pi3_for_yolo_sgg/run.py
+pi3_offline_pose_path: "pi3_traj_5_3.txt"
+# Scene-level Sim(3) from align_pi3_gt.py --save_transform
+pi3_offline_transform_path: "align_pi3_5_3.json"
+# If null, provider reads png_depth_scale from pi3_depth/pi3_depth_meta.txt
+pi3_offline_png_depth_scale: null
+pi3_offline_require_transform: true
+pi3_offline_pose_lookup_mode: auto
+
+# --- Online Pi3 depth (for depth_provider: pi3_online) ---
+pi3_online_transform_path: "align_pi3_5_3.json"
+pi3_online_require_transform: true
+
+
+save_graph_dir: "results/scene_graphs"
+benchmark_metrics_path: "./results/scanetpp_metrics/"
+
+scene0cf2e9402d_class_names:
+  - "fridge"
+  - "sink"
+  - "microwave"
+  - "washing machine"
+  - "door"
+  - "bottle"
+  - "pot"
+  - "socker"
+
+scene0b31f3119_class_names:
+  - "chair"
+  - "screen"
+  - "pc"
+  - "table"
+  - "desk"
+  - "door"
+  - "clock"
+  - "window"
+  - "socket"
+  - "lamp"
+  - "projector"
+  - "mouse"
+  - "keyboard"
+  - "pen"
+  - "marker"
+  - "paper"
+  - "book"
+  - "whiteboard"
+  - "box"
+  - "trash can"
+  - "bucket"
+  - "tripod"
+  - "wire"
+
+scene0a76e06478_class_names:
+  - "bed"
+  - "pillow"
+  - "blanket"
+  - "door"
+  - "window"
+  - "lamp"
+  - "chair"
+  - "table"
+  - "bag"
+  - "painting"
+  - "curtain"
+  - "shelf"
+  - "book"
+  - "toy"
+  - "laptop"
+  - "bucket"
+  - "trash can"
+  - "keys"
+  - "clothes"
+  - "box"
+  - "pen"
+
+Scene0a7cc12c0e_class_names:
+  - "bed"
+  - "pillow"
+  - "blanket"
+  - "door"
+  - "window"
+  - "lamp"
+  - "chair"
+  - "table"
+  - "bag"
+  - "painting"
+  - "curtain"
+  - "shelf"
+  - "book"
+  - "toy"
+  - "laptop"
+  - "bucket"
+  - "trash can"
+  - "keys"
+  - "clothes"
+  - "box"
+  - "pen"
+  - "luggage"
+  - "bottle"
+  - "fan"
+  - "sink"
+  - "laptop"
+  - "microwave"
+
+

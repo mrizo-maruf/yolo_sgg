@@ -70,6 +70,33 @@ def draw_masks_with_labels(
     return vis
 
 
+def draw_boxes_with_labels(
+    rgb: np.ndarray,
+    boxes: List[Optional[Tuple[float, float, float, float]]],
+    ids: List[int],
+    labels: List[str],
+    title: str = "",
+    line_thickness: int = 2,
+) -> np.ndarray:
+    """Draw 2D boxes on *rgb* and return annotated copy."""
+    vis = rgb.copy()
+    for box, oid, label in zip(boxes, ids, labels):
+        if box is None:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        c = color_from_id(oid)
+        cv2.rectangle(vis, (x1, y1), (x2, y2), c[::-1], line_thickness)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        y_top = max(0, y1 - th - 8)
+        cv2.rectangle(vis, (x1, y_top), (x1 + tw + 4, y1), c[::-1], -1)
+        cv2.putText(vis, label, (x1 + 2, max(12, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    if title:
+        cv2.putText(vis, title, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+    return vis
+
+
 # ---------------------------------------------------------------------------
 # GT-vs-Pred matching visualisation (3 panels)
 # ---------------------------------------------------------------------------
@@ -180,6 +207,99 @@ def visualize_matching(
         axes[1].imshow(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)); axes[1].set_title(f"Matching – Frame {frame_idx}"); axes[1].axis("off")
         axes[2].imshow(cv2.cvtColor(pred_panel, cv2.COLOR_BGR2RGB)); axes[2].set_title("Predictions"); axes[2].axis("off")
         plt.suptitle(f"GT ↔ Pred Matching – Frame {frame_idx}", fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
+    elif save_path:
+        cv2.imwrite(save_path, full)
+
+    return full
+
+
+def visualize_matching_boxes(
+    rgb: np.ndarray,
+    gt_boxes: List[Optional[Tuple[float, float, float, float]]],
+    gt_ids: List[int],
+    gt_labels: List[str],
+    pred_boxes: List[Optional[Tuple[float, float, float, float]]],
+    pred_ids: List[int],
+    pred_labels: List[str],
+    mapping: Dict[int, int],
+    ious: Dict[int, float],
+    frame_idx: int = 0,
+    save_path: Optional[str] = None,
+    show: bool = True,
+) -> np.ndarray:
+    """3-panel view for 2D box matching: GT | Combined matching | Predictions."""
+    if rgb is None:
+        return None
+
+    matched_gt = set(mapping.keys())
+    matched_pred = set(mapping.values())
+
+    gt_panel = rgb.copy()
+    gt_centroids: Dict[int, Tuple[int, int]] = {}
+    for box, gid, _label in zip(gt_boxes, gt_ids, gt_labels):
+        if box is None:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        gt_centroids[gid] = ((x1 + x2) // 2, (y1 + y2) // 2)
+        border = (0, 255, 0) if gid in matched_gt else (0, 0, 255)
+        cv2.rectangle(gt_panel, (x1, y1), (x2, y2), border, 2)
+        iou_v = ious.get(gid, 0.0)
+        txt = f"GT:{gid} IoU:{iou_v:.2f}" if gid in matched_gt else f"GT:{gid} [FN]"
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        y_top = max(0, y1 - th - 6)
+        cv2.rectangle(gt_panel, (x1, y_top), (x1 + tw + 4, y1), border, -1)
+        cv2.putText(gt_panel, txt, (x1 + 2, max(12, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    pred_panel = rgb.copy()
+    pred_centroids: Dict[int, Tuple[int, int]] = {}
+    for box, pid, label in zip(pred_boxes, pred_ids, pred_labels):
+        if box is None:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        pred_centroids[pid] = ((x1 + x2) // 2, (y1 + y2) // 2)
+        border = (255, 165, 0) if pid in matched_pred else (0, 128, 255)
+        cv2.rectangle(pred_panel, (x1, y1), (x2, y2), border, 2)
+        txt = f"P:{pid} {label}" if pid in matched_pred else f"P:{pid} [FP]"
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        y_top = max(0, y1 - th - 6)
+        cv2.rectangle(pred_panel, (x1, y_top), (x1 + tw + 4, y1), border, -1)
+        cv2.putText(pred_panel, txt, (x1 + 2, max(12, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    combined = rgb.copy()
+    for gid, pid in mapping.items():
+        if gid in gt_centroids and pid in pred_centroids:
+            g_pt = gt_centroids[gid]
+            p_pt = pred_centroids[pid]
+            iou_v = ious.get(gid, 0.0)
+            lc = (0, 255, 0) if iou_v >= 0.7 else (0, 255, 255) if iou_v >= 0.5 else (0, 165, 255)
+            cv2.line(combined, g_pt, p_pt, lc, 2, cv2.LINE_AA)
+            mid = ((g_pt[0] + p_pt[0]) // 2, (g_pt[1] + p_pt[1]) // 2)
+            cv2.putText(combined, f"{iou_v:.2f}", mid,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, lc, 1, cv2.LINE_AA)
+
+    n_m = len(mapping)
+    avg_iou = float(np.mean(list(ious.values()))) if ious else 0.0
+    cv2.putText(gt_panel, f"GT: {len(gt_ids)} (matched {n_m})", (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.putText(combined, f"Frame {frame_idx} | {n_m} matches | IoU {avg_iou:.3f}",
+                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(pred_panel, f"Pred: {len(pred_ids)} (matched {n_m})", (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+
+    full = np.hstack([gt_panel, combined, pred_panel])
+
+    if show:
+        fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+        axes[0].imshow(cv2.cvtColor(gt_panel, cv2.COLOR_BGR2RGB)); axes[0].set_title("Ground Truth"); axes[0].axis("off")
+        axes[1].imshow(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)); axes[1].set_title(f"Matching – Frame {frame_idx}"); axes[1].axis("off")
+        axes[2].imshow(cv2.cvtColor(pred_panel, cv2.COLOR_BGR2RGB)); axes[2].set_title("Predictions"); axes[2].axis("off")
+        plt.suptitle(f"GT ↔ Pred Box Matching – Frame {frame_idx}", fontsize=14, fontweight="bold")
         plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")

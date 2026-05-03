@@ -1,0 +1,41 @@
+running with rerun visualizaiton
+
+```
+python run.py --dataset isaacsim --rerun --edge-predictor bs
+```
+
+### running in new_run.py
+```
+python new_run.py --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_Dataset/scene_7 --rerun --vis_edge
+```
+
+### running isaacsim with pi3_offline depth
+```
+python new_run.py --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3/cabinet_simple --depth_provider pi3_offline
+```
+
+### running kg_nav_run
+```
+python kg_nav_run.py --dataset isaacsim --edges vlsat --save-graph
+
+python kg_nav_run.py --edges bs,sv --save-graph
+```
+
+### running run_per_frame_graphs.py
+```
+python run_per_frame_graphs.py \
+  --dataset scanetpp \
+  --scene_path /path/to/scene0a76e06478 \
+  --depth_provider pi3_online \
+  --output_dir results/per_frame_graphs/scene0a76e06478 \
+  --edges bs,sv
+```
+
+### visualizing scene graph edges from json
+```
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type sv
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type bs
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type vlsat
+python visualize_scene_graph_edges_3d.py results/scene_graphs/scene_0_2.json --edge-type edges_vlsat --only-with-edges
+
+```
