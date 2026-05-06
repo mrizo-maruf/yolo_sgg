@@ -1064,10 +1064,6 @@ Examples
         choices=["mask2d", "bbox2d", "bbox3d"],
         help="Single matching mode for the run.",
     )
-    p.add_argument("--abl_matching_max_level", type=int, default=None,
-                   choices=[0, 1, 2, 3],
-                   help="Cascade ablation: 0=pure-BotSORT, 1=L1, 2=L1+L2, "
-                        "3=full (default from cfg).")
 
     # Model overrides
     p.add_argument("--yolo_model", type=str, default=None,
@@ -1128,8 +1124,6 @@ def main() -> int:
         cfg.depth_provider = args.depth_provider
     if args.match_mode:
         cfg.match_mode = args.match_mode
-    if args.abl_matching_max_level is not None:
-        cfg.abl_matching_max_level = args.abl_matching_max_level
     if args.vis:
         cfg.visualization = cfg.get("visualization", {})
         cfg.visualization.enabled = True
