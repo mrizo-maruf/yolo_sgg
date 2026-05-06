@@ -88,6 +88,8 @@ def run_tracking(
     cuda_available = bool(torch is not None and torch.cuda.is_available())
     # 0 disables periodic merge; any positive value calls merge every N frames.
     merge_every_n = int(cfg.get("merge_every_n_frames", 20))
+    # Ablation gate: 0=pure-BotSORT, 1=L1 only, 2=L1+L2, 3=full (default).
+    max_matching_level = int(cfg.get("abl_matching_max_level", 3))
 
     overlap_th = object_registry.overlap_threshold
     dist_th = object_registry.distance_threshold
@@ -148,6 +150,7 @@ def run_tracking(
                 o3_nb=o3_nb,
                 o3_std=o3_std,
                 frame_idx=idx,
+                max_matching_level=max_matching_level,
             )
             if tracked_obj is not None:
                 frame_objs.append(tracked_obj)
@@ -271,6 +274,7 @@ def _track_one_detection(
     o3_nb: int,
     o3_std: float,
     frame_idx: int,
+    max_matching_level: int = 3,
 ) -> Optional[TrackedObject]:
     """Clean one detection's points, match against the registry, and
     update/register the object. Returns the per-frame TrackedObject
@@ -292,21 +296,31 @@ def _track_one_detection(
     bbox = compute_bbox(pts_world, fast=True)
     cls = class_names[i] if class_names and i < len(class_names) else None
 
-    gid = _match_detection_to_global_id(
-        bbox=bbox,
-        tid=tid,
-        cls=cls,
-        object_registry=object_registry,
-        matched_gids=matched_gids,
-        overlap_th=overlap_th,
-        dist_th=dist_th,
-    )
-
-    if gid is None:
-        gid = object_registry.new_id()
-        object_registry.register_new(gid, pts_world, bbox, cls, mask, tid, frame_idx)
+    if max_matching_level == 0:
+        # Pure BotSORT 2D baseline: YOLO track_id IS the global identity.
+        # No 3D spatial verification; the registry still stores the 3D bbox
+        # so downstream benchmark matching (bbox3d / mask2d) can work.
+        gid = tid if tid >= 0 else object_registry.new_id()
+        if gid in object_registry.objects:
+            object_registry.update_object(gid, pts_world, bbox, cls, mask, tid, frame_idx)
+        else:
+            object_registry.register_new(gid, pts_world, bbox, cls, mask, tid, frame_idx)
     else:
-        object_registry.update_object(gid, pts_world, bbox, cls, mask, tid, frame_idx)
+        gid = _match_detection_to_global_id(
+            bbox=bbox,
+            tid=tid,
+            cls=cls,
+            object_registry=object_registry,
+            matched_gids=matched_gids,
+            overlap_th=overlap_th,
+            dist_th=dist_th,
+            max_matching_level=max_matching_level,
+        )
+        if gid is None:
+            gid = object_registry.new_id()
+            object_registry.register_new(gid, pts_world, bbox, cls, mask, tid, frame_idx)
+        else:
+            object_registry.update_object(gid, pts_world, bbox, cls, mask, tid, frame_idx)
 
     matched_gids.add(gid)
     reg_obj = object_registry.objects[gid]
@@ -331,20 +345,35 @@ def _match_detection_to_global_id(
     matched_gids: Set[int],
     overlap_th: float,
     dist_th: float,
+    max_matching_level: int = 3,
 ) -> Optional[int]:
-    """Run the 4-level matching cascade and return a gid (or None)."""
+    """Run the matching cascade up to ``max_matching_level`` and return a gid (or None).
+
+    max_matching_level == 1 : Level 1 only  (BoT-SORT-ID 3D verification)
+    max_matching_level == 2 : Level 1 + 2   (+ temporal continuity)
+    max_matching_level == 3 : Level 1 + 2 + 3 (full, default)
+    """
+    # Level 1: YOLO track-id → registry, spatially verified.
     gid = match_yolo_track_id(
         bbox, tid, object_registry, matched_gids, overlap_th, dist_th,
     )
     if gid is not None:
         return gid
 
+    if max_matching_level < 2:
+        return None
+
+    # Level 2: best-overlap match against previous frame.
     gid = match_prev_frame(
         bbox, object_registry, matched_gids, overlap_th, dist_th,
     )
     if gid is not None:
         return gid
 
+    if max_matching_level < 3:
+        return None
+
+    # Level 3: global registry re-observation (handles multi-frame occlusion).
     return match_registry_reobservation(
         bbox, cls, object_registry, matched_gids, overlap_th, dist_th,
     )

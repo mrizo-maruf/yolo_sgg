@@ -68,6 +68,14 @@ registry_voxel_size: 0.04
 # `registry_voxel_size / 2` so spheres just touch (no overlap, no gaps).
 rerun_point_radius: 0.02
 
+# --- Ablation: matching cascade depth ---
+# Controls how many levels of the 4-level 3D matching cascade are active.
+#   0 = no 3D registry — BotSORT track_id IS the global identity (pure 2D baseline)
+#   1 = Level 1 only: BoT-SORT-ID 3D spatial verification
+#   2 = Level 1+2:    + previous-frame temporal continuity
+#   3 = Level 1+2+3:  + global re-observation (full cascade, default)
+abl_matching_max_level: 3
+
 # --- Post-frame merge (collapse duplicate objects) ---
 # merge_every_n_frames: run merge pass every N frames; 0 disables.
 # Lowered thresholds vs. naive defaults — with Pi3 depth jitter two bboxes

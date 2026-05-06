@@ -89,6 +89,7 @@ def match_yolo_track_id(
     matched_gids: Set[int],
     overlap_th: float,
     dist_th: float,
+    max_level: int = 3,
 ) -> Optional[int]:
     """LEVEL 1 — YOLO track-id mapping, verified spatially.
 
@@ -117,6 +118,7 @@ def match_prev_frame(
     matched_gids: Set[int],
     overlap_th: float,
     dist_th: float,
+    max_level: int = 3,
 ) -> Optional[int]:
     """LEVEL 2 — best-overlap match against the previous frame."""
     best_gid, best_score = None, 0.0
@@ -139,6 +141,7 @@ def match_registry_reobservation(
     matched_gids: Set[int],
     overlap_th: float,
     dist_th: float,
+    max_level: int = 3,
 ) -> Optional[int]:
     """LEVEL 3 — global registry lookup (re-observation after occlusion).
 
