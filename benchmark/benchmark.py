@@ -1085,6 +1085,20 @@ Examples
     p.add_argument("--output_dir", type=str, default=None,
                    help="Dir to save metrics/plots (overrides config).")
 
+    # Ablation
+    p.add_argument(
+        "--abl_matching_max_level", type=int, default=None,
+        choices=[0, 1, 2, 3],
+        help=(
+            "Ablation: max active level of the 3-D matching cascade. "
+            "0=pure BotSORT (no 3-D registry), 1=L1 only, 2=L1+L2, 3=full (default)."
+        ),
+    )
+    p.add_argument(
+        "--no_periodic_merge", action="store_true",
+        help="Disable the periodic merge pass (recommended with --abl_matching_max_level 0).",
+    )
+
     return p
 
 
@@ -1122,6 +1136,10 @@ def main() -> int:
     if args.vis_save:
         cfg.visualization = cfg.get("visualization", {})
         cfg.visualization.save_dir = args.vis_save
+    if args.abl_matching_max_level is not None:
+        cfg.abl_matching_max_level = args.abl_matching_max_level
+    if args.no_periodic_merge:
+        cfg.merge_every_n_frames = 0
 
     # --- Run -----------------------------------------------------------------
     scene_path = str(Path(args.scene_path).resolve())
