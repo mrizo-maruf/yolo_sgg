@@ -90,6 +90,8 @@ def run_tracking(
     merge_every_n = int(cfg.get("merge_every_n_frames", 20))
     # Ablation gate: 0=pure-BotSORT, 1=L1 only, 2=L1+L2, 3=full (default).
     max_matching_level = int(cfg.get("abl_matching_max_level", 3))
+    print(f"[Tracker] abl_matching_max_level={max_matching_level} "
+          f"({'pure BotSORT' if max_matching_level == 0 else f'cascade L1..L{max_matching_level}'})")
 
     overlap_th = object_registry.overlap_threshold
     dist_th = object_registry.distance_threshold
