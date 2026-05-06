@@ -157,13 +157,16 @@ def run_tracking(
         timings["track_update_ms"] = (time.perf_counter() - t0) * 1000
 
         t0 = time.perf_counter()
-        extra = object_registry.get_reprojection_visible(
-            T_w_c, intrinsics, matched_gids,
-        )
         visible_gids = set(matched_gids)
-        if extra:
-            frame_objs.extend(extra)
-            visible_gids.update(o.global_id for o in extra)
+        # Level 0 = pure BotSORT: skip reprojection so stale registry
+        # objects don't leak into predictions as ghost tracks.
+        if max_matching_level > 0:
+            extra = object_registry.get_reprojection_visible(
+                T_w_c, intrinsics, matched_gids,
+            )
+            if extra:
+                frame_objs.extend(extra)
+                visible_gids.update(o.global_id for o in extra)
         object_registry.end_frame(visible_gids)
         timings["reprojection_ms"] = (time.perf_counter() - t0) * 1000
 
