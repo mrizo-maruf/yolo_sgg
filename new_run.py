@@ -110,6 +110,8 @@ def main() -> int:
         cfg.yolo_model = args.yolo_model
     if args.is_open_vocab is not None:
         cfg.is_open_vocabulary = args.is_open_vocab
+    if args.abl_matching_max_level is not None:
+        cfg.abl_matching_max_level = args.abl_matching_max_level
     if args.rerun:
         cfg.ssg = cfg.get("ssg", {})
         cfg.ssg.rerun = True
@@ -648,6 +650,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    choices=list(PROVIDER_CHOICES),
                    help="Depth provider type (overrides config). "
                         "Default from config: 'gt'.")
+    p.add_argument("--abl_matching_max_level", type=int, default=None,
+                   choices=[0, 1, 2, 3],
+                   help="Cascade ablation: 0=pure-BotSORT, 1=L1, 2=L1+L2, "
+                        "3=full (default from cfg).")
     p.add_argument("--yolo_model", type=str, default=None,
                    help="Path to YOLOE model weights.")
     p.add_argument("--is_open_vocab", action="store_true", default=None,

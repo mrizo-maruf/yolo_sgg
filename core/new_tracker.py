@@ -40,6 +40,12 @@ from core.types import TrackedFrame, TrackedObject
 from data_loaders.base import DatasetLoader
 
 
+# Level-0 ablation: BoT-SORT tids are mapped to gids above this offset so they
+# cannot collide with the registry's own `new_id()` counter (which starts at 1
+# and serves orphan tid=-1 detections).
+_LEVEL0_TID_OFFSET = 10_000_000
+
+
 def run_tracking(
     loader: DatasetLoader,
     cfg: DictConfig,
@@ -305,7 +311,15 @@ def _track_one_detection(
         # Pure BotSORT 2D baseline: YOLO track_id IS the global identity.
         # No 3D spatial verification; the registry still stores the 3D bbox
         # so downstream benchmark matching (bbox3d / mask2d) can work.
-        gid = tid if tid >= 0 else object_registry.new_id()
+        #
+        # BoT-SORT tids are offset into a high range so they cannot collide
+        # with `new_id()`'s counter (which serves orphan tid=-1 detections).
+        # Without the offset, an early tid=-1 → gid=1 would later collide
+        # with BoT-SORT confirming tid=1 and merge unrelated detections.
+        if tid >= 0:
+            gid = _LEVEL0_TID_OFFSET + tid
+        else:
+            gid = object_registry.new_id()
         if gid in object_registry.objects:
             object_registry.update_object(gid, pts_world, bbox, cls, mask, tid, frame_idx)
         else:
