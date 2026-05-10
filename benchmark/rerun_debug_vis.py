@@ -292,7 +292,11 @@ class BenchmarkDebugVisualizer:
         """
         if not self._initialized:
             return
-        rr.set_time_sequence("frame", int(frame_idx))
+        # rr.set_time_sequence was removed in rerun ≥ 0.16; use rr.set_time instead.
+        try:
+            rr.set_time(timeline="frame", sequence=int(frame_idx))
+        except AttributeError:
+            rr.set_time_sequence("frame", int(frame_idx))
 
         # All four views share the RGB background.
         rgb_u8 = self._coerce_rgb(rgb)
