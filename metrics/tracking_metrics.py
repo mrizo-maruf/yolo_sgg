@@ -20,13 +20,19 @@ from __future__ import annotations
 
 import json
 import csv
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from polars import datetime
+from scipy.optimize import linear_sum_assignment
+
+
+# One-shot guard so the mask-shape-mismatch warning fires once per process,
+# not once per IoU evaluation (which would flood logs at >100 calls/frame).
+_MASK_SHAPE_WARNED = False
 
 
 # ---------------------------------------------------------------------------
@@ -34,12 +40,28 @@ from polars import datetime
 # ---------------------------------------------------------------------------
 
 def mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
-    """IoU between two binary masks of the same spatial shape."""
+    """IoU between two binary masks of the same spatial shape.
+
+    If shapes differ, ``mask_b`` is nearest-neighbour-resized to ``mask_a``'s
+    shape and a one-shot warning is emitted (so the log isn't flooded when
+    every detection in every frame mismatches resolution).
+    """
     if mask_a is None or mask_b is None:
         return 0.0
     a = mask_a.astype(bool)
     b = mask_b.astype(bool)
     if a.shape != b.shape:
+        global _MASK_SHAPE_WARNED
+        if not _MASK_SHAPE_WARNED:
+            warnings.warn(
+                f"mask_iou: shape mismatch a={a.shape} b={b.shape}; "
+                f"resizing b → a via INTER_NEAREST. Subsequent mismatches "
+                f"will be silently resized; IoU may be slightly biased low. "
+                f"This warning is shown once per process.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _MASK_SHAPE_WARNED = True
         # Attempt nearest-neighbour resize via simple indexing.
         import cv2
         b = cv2.resize(mask_b.astype(np.uint8),
@@ -134,6 +156,43 @@ class FrameRecord:
 
 
 # ---------------------------------------------------------------------------
+# Shared IoU-matrix construction
+# ---------------------------------------------------------------------------
+
+_VALID_MATCH_MODES = {"mask2d", "bbox2d", "bbox3d"}
+
+
+def _build_iou_matrix(
+    gt_objects: List[GTInstance],
+    pred_objects: List[PredInstance],
+    match_mode: str,
+) -> np.ndarray:
+    """Return the n_gt × n_pred IoU matrix per the chosen mode.
+
+    Single source of truth for both :func:`match_greedy` and
+    :func:`match_hungarian` so the two matchers cannot drift on how
+    IoU is computed.
+    """
+    if match_mode not in _VALID_MATCH_MODES:
+        raise ValueError(
+            f"Unsupported match_mode '{match_mode}'. "
+            f"Use one of: {sorted(_VALID_MATCH_MODES)}."
+        )
+
+    n_gt, n_pred = len(gt_objects), len(pred_objects)
+    iou_matrix = np.zeros((n_gt, n_pred), dtype=np.float64)
+    for i, gt in enumerate(gt_objects):
+        for j, pr in enumerate(pred_objects):
+            if match_mode == "mask2d":
+                iou_matrix[i, j] = mask_iou(gt.mask, pr.mask)
+            elif match_mode == "bbox2d":
+                iou_matrix[i, j] = bbox_iou_2d(gt.bbox_xyxy, pr.bbox_xyxy)
+            else:  # bbox3d
+                iou_matrix[i, j] = bbox_iou_3d(gt.bbox_xyzxyz, pr.bbox_xyzxyz)
+    return iou_matrix
+
+
+# ---------------------------------------------------------------------------
 # Greedy matcher  (can be swapped for Hungarian)
 # ---------------------------------------------------------------------------
 
@@ -163,23 +222,11 @@ def match_greedy(
     if use_masks is not None:
         match_mode = "mask2d" if use_masks else "bbox2d"
 
-    if match_mode not in {"mask2d", "bbox2d", "bbox3d"}:
-        raise ValueError(f"Unsupported match_mode '{match_mode}'. "
-                         "Use one of: mask2d, bbox2d, bbox3d.")
-
     if not gt_objects or not pred_objects:
         return {}, {}
 
-    n_gt, n_pred = len(gt_objects), len(pred_objects)
-    iou_matrix = np.zeros((n_gt, n_pred), dtype=np.float64)
-    for i, gt in enumerate(gt_objects):
-        for j, pr in enumerate(pred_objects):
-            if match_mode == "mask2d":
-                iou_matrix[i, j] = mask_iou(gt.mask, pr.mask)
-            elif match_mode == "bbox2d":
-                iou_matrix[i, j] = bbox_iou_2d(gt.bbox_xyxy, pr.bbox_xyxy)
-            else:  # bbox3d
-                iou_matrix[i, j] = bbox_iou_3d(gt.bbox_xyzxyz, pr.bbox_xyzxyz)
+    iou_matrix = _build_iou_matrix(gt_objects, pred_objects, match_mode)
+    n_gt, n_pred = iou_matrix.shape
 
     # collect valid pairs, sort descending
     pairs = []
@@ -203,6 +250,88 @@ def match_greedy(
         used_pred.add(pj)
 
     return mapping, ious
+
+
+def match_hungarian(
+    gt_objects: List[GTInstance],
+    pred_objects: List[PredInstance],
+    iou_threshold: float = 0.3,
+    use_masks: Optional[bool] = None,
+    match_mode: str = "mask2d",
+) -> Tuple[Dict[int, int], Dict[int, float]]:
+    """Optimal bipartite matching via the Hungarian algorithm.
+
+    Drop-in replacement for :func:`match_greedy` — identical signature and
+    return types.  Uses ``scipy.optimize.linear_sum_assignment`` to find the
+    globally cost-minimising (IoU-maximising) assignment instead of the greedy
+    heuristic.  Pairs whose IoU falls below *iou_threshold* are discarded after
+    the assignment.
+
+    Supported match modes and ``use_masks`` semantics are the same as
+    :func:`match_greedy`.
+    """
+    if use_masks is not None:
+        match_mode = "mask2d" if use_masks else "bbox2d"
+
+    if not gt_objects or not pred_objects:
+        return {}, {}
+
+    iou_matrix = _build_iou_matrix(gt_objects, pred_objects, match_mode)
+
+    # linear_sum_assignment minimises cost → negate to maximise IoU
+    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+
+    mapping: Dict[int, int] = {}
+    ious: Dict[int, float] = {}
+    for gi, pj in zip(row_ind, col_ind):
+        iou_val = iou_matrix[gi, pj]
+        if iou_val < iou_threshold:
+            continue
+        gt_id = gt_objects[gi].track_id
+        pr_id = pred_objects[pj].pred_id
+        mapping[gt_id] = pr_id
+        ious[gt_id] = float(iou_val)
+
+    return mapping, ious
+
+
+# ---------------------------------------------------------------------------
+# Matcher factory
+# ---------------------------------------------------------------------------
+
+# Type alias for the bipartite-matcher callables both matchers expose.
+MatcherFn = Callable[
+    [List[GTInstance], List[PredInstance], float, Optional[bool], str],
+    Tuple[Dict[int, int], Dict[int, float]],
+]
+
+
+_MATCHERS: Dict[str, MatcherFn] = {
+    "greedy": match_greedy,
+    "hungarian": match_hungarian,
+}
+
+
+def match_mode_factory(name: str) -> MatcherFn:
+    """Return the matcher function for *name* (``"greedy"`` or ``"hungarian"``).
+
+    Use this when the matcher choice should come from config, e.g.::
+
+        matcher = match_mode_factory(cfg.get("matcher", "hungarian"))
+        mapping, ious = matcher(gt, pred, iou_threshold=0.3, match_mode="mask2d")
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a known matcher.
+    """
+    key = name.strip().lower()
+    if key not in _MATCHERS:
+        raise ValueError(
+            f"Unknown matcher '{name}'. "
+            f"Available: {sorted(_MATCHERS.keys())}."
+        )
+    return _MATCHERS[key]
 
 
 # ---------------------------------------------------------------------------
