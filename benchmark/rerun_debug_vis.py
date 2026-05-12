@@ -1,23 +1,42 @@
 """Rerun debug visualisation for the benchmark — single-scene only.
 
 Logs four 2-D views per frame so a human can eyeball where tracking and
-matching disagree with ground truth:
+matching disagree with ground truth.
 
-  1. **gt_view**     – RGB + reprojected GT 3-D boxes + 2-D masks + labels.
-                       Box colour: green = visible in current frame, red = not.
-  2. **pred_view**   – RGB + reprojected predicted 3-D boxes + masks.
-                       Mask colour follows track_id; box colour = visible
-                       (matched / freshly observed) vs invisible (reprojection).
-  3. **yolo_view**   – RGB + raw YOLO 2-D boxes + masks + labels (per-track
-                       colour). The ``upstream`` view, before 3-D matching.
-  4. **match_view**  – RGB overlaid with both predicted and GT projected boxes,
-                       coloured by match status:
-                         orange = matched prediction
-                         red    = unmatched prediction
-                         blue   = matched GT (only)
+Where the data comes from
+-------------------------
+* ``gt_instances``  : ``loader.get_gt_instances(frame_idx)`` — ground truth
+  for the current frame (already filtered by the loader's class set).
+* ``pred_objects``  : ``TrackedFrame.objects`` produced by ``run_tracking``.
+  This is the **currently-visible subset** of the registry — i.e. the
+  objects matched against this frame's YOLO output **plus** the
+  reprojection-visible carry-overs from previous frames. It is NOT the full
+  registry; objects out of the camera frustum are excluded.
+* ``mapping`` (``gt_to_pred``) : output of ``match_greedy`` /
+  ``match_hungarian`` operating on those same ``pred_objects``.
 
-Designed to be cheap to wire in: ``log_frame`` is the single per-frame call;
-all 2-D projection and per-track-colouring is done internally.
+So the rerun viz and the benchmark metrics are computed on **exactly the
+same set of predicted objects**. The "Matching" panel shows the same
+assignment the metrics use.
+
+The four panels
+---------------
+1. **gt_view**     – RGB + reprojected GT 3-D boxes + 2-D masks + labels.
+                     Box colour: green = visible in current frame, red = not.
+2. **pred_view**   – RGB + reprojected predicted 3-D boxes + masks.
+                     Mask colour follows ``global_id``; box colour = green if
+                     the object was matched against YOLO this frame, red if
+                     it's a reprojection-only carry-over.
+3. **yolo_view**   – RGB + raw YOLO 2-D boxes + masks + labels (per-track
+                     colour). The ``upstream`` view, before 3-D matching.
+4. **match_view**  – RGB overlaid with both predicted and GT projected boxes,
+                     coloured by match status:
+                       orange = matched prediction
+                       red    = unmatched prediction
+                       blue   = matched GT (only)
+
+``log_frame`` is the single per-frame call; all 2-D projection and
+per-track-colouring is done internally.
 """
 from __future__ import annotations
 
@@ -39,6 +58,69 @@ _GREEN  = (0, 200, 0)
 _RED    = (220, 0, 0)
 _ORANGE = (255, 140, 0)
 _BLUE   = (40, 100, 255)
+
+
+# Markdown legend logged once as a static rerun TextDocument so the colour
+# meanings are visible inside the viewer (not just in the terminal).
+_LEGEND_MD = """\
+# Benchmark debug viewer
+
+Four panels are kept in sync with the benchmark loop — every overlay
+is computed from the **same `TrackedFrame.objects`** that the metrics
+use. The Matching panel shows the same GT↔pred assignment the
+matcher gave the `MetricsAccumulator`.
+
+---
+
+## GT panel
+
+* **🟢 green box** — GT 3-D bbox is in the current camera view
+  (≥1 corner inside the image and in front of the camera).
+* **🔴 red box** — GT object exists in this frame's annotations but is
+  out of the current camera view.
+* **mask overlay** — GT instance mask, colour = hash(GT track id).
+* **label** — `class_name#gt_track_id`.
+
+## Predictions panel
+
+* **🟢 green box** — predicted object was matched against YOLO this
+  frame (`last_seen == frame_idx`).
+* **🔴 red box** — predicted object is a *reprojection-only* carry-over:
+  it lives in the registry, its bbox is still in the frustum, but it
+  wasn't observed this frame.
+* **mask overlay** — colour = hash(predicted `global_id`); consistent
+  across frames for the same tracked object.
+* **label** — `class_name#global_id`.
+
+## YOLO 2-D panel
+
+* Raw upstream YOLO output, **before** 3-D matching.
+* **2-D bboxes** are computed from the mask (tight rect).
+* Box colour = hash(`yolo_id`); same colour for the mask.
+* **label** — `class_name#yolo_id`. Compare this panel to the
+  Predictions panel to see how the 3-D cascade rewrote `yolo_id` →
+  `global_id`.
+
+## Matching panel
+
+Per-frame GT↔Pred matcher output (greedy / Hungarian):
+* **🟠 orange box** — predicted bbox that matched a GT (IoU above the
+  threshold).
+* **🔴 red box** — predicted bbox that did **not** match any GT
+  (counts as a false positive in MOTA).
+* **🔵 blue box** — GT bbox that **was** matched (true positive).
+* Unmatched GT bboxes (false negatives) are **not** drawn here — see
+  the GT panel for them; they're the green/red boxes with no
+  corresponding orange in the Matching panel.
+
+---
+
+Colour palette for masks / per-id boxes:
+golden-ratio HSV → deterministic, well-separated per id.
+
+Boxes whose 3-D corners are *behind* the camera are skipped (no
+spurious lines from off-screen verts).
+"""
 
 
 def _track_id_color(tid: int) -> Tuple[int, int, int]:
@@ -211,10 +293,11 @@ class BenchmarkDebugVisualizer:
                           matched_gids=matched_gids)
     """
 
-    GT_VIEW   = "gt_view"
-    PRED_VIEW = "pred_view"
-    YOLO_VIEW = "yolo_view"
+    GT_VIEW    = "gt_view"
+    PRED_VIEW  = "pred_view"
+    YOLO_VIEW  = "yolo_view"
     MATCH_VIEW = "match_view"
+    LEGEND     = "legend"
 
     def __init__(self, recording_id: str = "bench_debug") -> None:
         if rr is None:
@@ -249,17 +332,32 @@ class BenchmarkDebugVisualizer:
 
         rr.init(self._recording_id, spawn=spawn)
 
-        from rerun.blueprint import Blueprint, Grid, Spatial2DView
+        from rerun.blueprint import (
+            Blueprint,
+            Grid,
+            Horizontal,
+            Spatial2DView,
+            TextDocumentView,
+        )
 
         blueprint = Blueprint(
-            Grid(
-                Spatial2DView(name="GT",          origin=self.GT_VIEW),
-                Spatial2DView(name="Predictions", origin=self.PRED_VIEW),
-                Spatial2DView(name="YOLO 2D",     origin=self.YOLO_VIEW),
-                Spatial2DView(name="Matching",    origin=self.MATCH_VIEW),
+            Horizontal(
+                Grid(
+                    Spatial2DView(name="GT",          origin=self.GT_VIEW),
+                    Spatial2DView(name="Predictions", origin=self.PRED_VIEW),
+                    Spatial2DView(name="YOLO 2D",     origin=self.YOLO_VIEW),
+                    Spatial2DView(name="Matching",    origin=self.MATCH_VIEW),
+                ),
+                TextDocumentView(name="Legend", origin=self.LEGEND),
+                column_shares=[4, 1],
             ),
         )
         rr.send_blueprint(blueprint)
+
+        # Static legend visible alongside the four spatial views.
+        rr.log(self.LEGEND, rr.TextDocument(_LEGEND_MD, media_type="text/markdown"),
+               static=True)
+
         self._initialized = True
 
     # -- per-frame logging ---------------------------------------------------

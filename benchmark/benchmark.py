@@ -60,6 +60,7 @@ from metrics.tracking_metrics import (
     FrameRecord,
     MetricsAccumulator,
     match_greedy,
+    match_hungarian,
     print_summary,
     save_metrics,
 )
@@ -86,6 +87,39 @@ from benchmark.benchmark_utils import (
 # ═══════════════════════════════════════════════════════════════════════════
 # Local helpers
 # ═══════════════════════════════════════════════════════════════════════════
+
+_RERUN_LEGEND_TERMINAL = """\
+[bench] Rerun debug viewer — panel legend
+─────────────────────────────────────────────────────────────────────
+  Same blueprint as new_run.py: 3-D world view + Semantic
+  Segmentation panel + RGB + 2-D boxes panel. The benchmark adds GT
+  overlays on top of the standard view (additive, not replacing).
+
+  3-D world view  (world3d/...)
+    point clouds   accumulated per-object, colour = hash(global_id)
+    camera frustum yellow trajectory, RGB thumbnail on the image plane
+    pred bbox      green  = visible this frame  (in camera frustum)
+                   red    = registry object NOT currently visible
+
+    GT bbox        blue   = GT matched to a prediction (true positive)
+                   orange = GT MISSED — false negative
+                            (tracker didn't find this object)
+
+  Semantic Seg panel  (seg_view)
+    mask overlay per detection, colour = hash(yolo_id);
+    label = class#yolo_id  (raw upstream YOLO output)
+
+  RGB + 2-D Boxes panel  (rgb_view)
+    reprojected 3-D bboxes drawn on the RGB image;
+    label = class#global_id  (post-cascade tracking ids)
+
+  How to read it together
+    • green  pred + blue   GT overlap → true positive, visible
+    • red    pred (no GT)                → reprojection-only carry-over
+    • orange GT alone (no pred nearby)   → false negative (missed)
+    • Pred without a nearby GT and no overlap → false positive
+─────────────────────────────────────────────────────────────────────"""
+
 
 def _load_rgb_image(path: str) -> Optional[np.ndarray]:
     """Read an RGB image from disk for the Rerun debug viewer. Returns None
@@ -140,7 +174,7 @@ def benchmark_scene(
         "Benchmark": [
             f"match_mode:        {match_mode} ({similarity_label(match_mode)})",
             f"iou_threshold:     {cfg.get('iou_threshold', 0.3)}",
-            f"include_reproj:    {bool(cfg.get('benchmark_include_reprojected_masks', False))}",
+            f"include_reproj:    {bool(cfg.get('benchmark_include_reprojected_masks', True))}",
         ],
     }
     print_run_banner(
@@ -182,11 +216,29 @@ def benchmark_scene(
     gpu_usage: Dict[str, List[float]] = {k: [] for k in GPU_KEY_MAP.values()}
 
     # --- Optional Rerun debug viewer (single-scene only) --------------------
-    rerun_vis: Optional[BenchmarkDebugVisualizer] = None
+    # Uses the SAME RerunVisualizer as new_run.py — same blueprint, same
+    # data flow (full object_registry, not just tf.objects). Adds a
+    # benchmark-specific GT overlay on top so matched/missed GT bboxes are
+    # visible against the predicted bboxes.
+    rerun_vis = None
     if rerun_debug:
         try:
-            rerun_vis = BenchmarkDebugVisualizer(
-                recording_id=f"bench_debug_{loader.scene_label}",
+            from rerun_utils import RerunVisualizer, _build_axis_remap_matrix
+
+            axis_remap = None
+            if dataset_name == "isaacsim":
+                axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
+                print("[Rerun] Applying Isaac axis remap (RFU -> RDF).")
+            elif dataset_name == "scanetpp":
+                axis_remap = _build_axis_remap_matrix(swap_yz=True, flip_y=True)
+                print("[Rerun] Applying ScanNet++ axis remap (Z-up -> RDF).")
+
+            _voxel = float(cfg.get("registry_voxel_size", 0.0))
+            _default_radius = (_voxel / 2.0) if _voxel > 0.0 else 0.008
+            rerun_vis = RerunVisualizer(
+                recording_id=f"bench_{loader.scene_label}",
+                axis_remap=axis_remap,
+                point_radius=float(cfg.get("rerun_point_radius", _default_radius)),
             )
             rerun_vis.init(
                 img_w=intrinsics.width, img_h=intrinsics.height,
@@ -194,6 +246,7 @@ def benchmark_scene(
                 cx=intrinsics.cx, cy=intrinsics.cy,
             )
             print(f"[bench] Rerun debug viewer ready for {loader.scene_label}")
+            print(_RERUN_LEGEND_TERMINAL)
         except Exception as exc:
             print(f"[bench] Could not start Rerun debug viewer: {exc}")
             rerun_vis = None
@@ -234,7 +287,13 @@ def benchmark_scene(
             ),
         )
 
-        mapping, ious = match_greedy(
+        # mapping, ious = match_greedy(
+        #     gt_instances,
+        #     pred_instances,
+        #     iou_threshold=float(cfg.get("iou_threshold", 0.3)),
+        #     match_mode=match_mode,
+        # )
+        mapping, ious = match_hungarian(
             gt_instances,
             pred_instances,
             iou_threshold=float(cfg.get("iou_threshold", 0.3)),
@@ -257,24 +316,31 @@ def benchmark_scene(
                 gpu_usage[dst].append(float(tf.timings[src]))
 
         # --- Rerun debug viewer (single-scene) ------------------------------
-        # An object is "currently observed" iff it was matched against a YOLO
-        # detection in this frame (last_seen == frame_idx). Reprojection-only
-        # entries have last_seen < frame_idx and are coloured as "invisible".
+        # Same logic as new_run.py: log_frame consumes the full
+        # object_registry (not just tf.objects) so the 3-D world view shows
+        # accumulated point clouds, per-object bboxes (green=visible /
+        # red=invisible), camera frustum, and the per-track-id segmentation
+        # masks on the 2-D panels. The benchmark-specific overlay then adds
+        # GT bboxes coloured by match status (blue=matched, orange=missed).
         if rerun_vis is not None:
-            rgb_img = _load_rgb_image(tf.rgb_path)
-            matched_gids = {
-                int(o.global_id) for o in tf.objects
-                if int(o.last_seen) == int(tf.frame_idx)
-            }
+            import numpy as np
             try:
                 rerun_vis.log_frame(
                     frame_idx=tf.frame_idx,
-                    rgb=rgb_img,
+                    object_registry=object_registry,
+                    persistent_graph=None,
                     T_w_c=tf.T_w_c,
+                    rgb_path=tf.rgb_path,
+                    masks_clean=tf.masks,
+                    track_ids=(tf.track_ids if tf.track_ids is not None
+                               else np.array([], dtype=int)),
+                    class_names=tf.class_names,
+                    vis_edges=False,
+                )
+                rerun_vis.log_benchmark_overlay(
+                    frame_idx=tf.frame_idx,
                     gt_instances=gt_instances,
-                    pred_objects=tf.objects,
-                    gt_to_pred=mapping,
-                    matched_gids=matched_gids,
+                    mapping=mapping,
                 )
             except Exception as exc:
                 print(f"[bench] Rerun log_frame failed at f={tf.frame_idx}: {exc}")

@@ -79,7 +79,7 @@ merge_containment_threshold: 0.5
 # --- Matching (benchmark) ---
 # One mode per benchmark run:
 #   mask2d | bbox2d | bbox3d
-match_mode: mask2d
+match_mode: bbox3d
 iou_threshold: 0.3
 # For 2D benchmark matching: when false, skip reprojection-only objects
 # (their masks are stale from older frames).

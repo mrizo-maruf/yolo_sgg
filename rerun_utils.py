@@ -297,6 +297,72 @@ class RerunVisualizer:
         self._log_rgb_with_boxes(rgb, object_registry, T_w_c, img_w, img_h)
 
     # ------------------------------------------------------------------
+    # Benchmark overlay – GT boxes coloured by match status
+    # ------------------------------------------------------------------
+    def log_benchmark_overlay(
+        self,
+        frame_idx: int,
+        gt_instances,
+        mapping: dict,
+    ) -> None:
+        """Add GT-3D-box overlay to the existing world3d view (call AFTER
+        ``log_frame``).
+
+        Colour convention (additive to the existing pred-box colouring,
+        which is green=visible / red=not):
+
+          * **blue**   – GT bbox that the matcher matched to a prediction
+                         (true positive). Pair with the orange/green/red
+                         predicted bbox shown by ``log_frame`` to see TP +
+                         visibility together.
+          * **orange** – GT bbox that the matcher did NOT match (false
+                         negative). Indicates the tracker missed this
+                         object.
+
+        ``mapping`` is the ``gt_track_id → pred_id`` dict returned by
+        the matcher (greedy / Hungarian).
+        """
+        if not self._initialized:
+            return
+        rr.set_time(timeline="frame", sequence=int(frame_idx))
+
+        strips_matched: list = []
+        strips_missed:  list = []
+        for gi in gt_instances:
+            box = getattr(gi, "bbox_xyzxyz", None)
+            if box is None or len(box) != 6:
+                continue
+            corners = _aabb_corners({"min": list(box[:3]), "max": list(box[3:])})
+            if corners is None:
+                continue
+            corners = _apply_axis_remap_points(corners, self._axis_remap)
+            edge_pts = corners[_BOX_EDGES]  # (12, 2, 3)
+            (strips_matched if gi.track_id in mapping
+             else strips_missed).extend(edge_pts)
+
+        if strips_matched:
+            rr.log(
+                "world3d/gt/matched",
+                rr.LineStrips3D(
+                    strips=np.array(strips_matched, dtype=np.float32),
+                    colors=np.array([40, 100, 255], dtype=np.uint8),  # blue
+                ),
+            )
+        elif hasattr(rr, "Clear"):
+            rr.log("world3d/gt/matched", rr.Clear(recursive=False))
+
+        if strips_missed:
+            rr.log(
+                "world3d/gt/missed",
+                rr.LineStrips3D(
+                    strips=np.array(strips_missed, dtype=np.float32),
+                    colors=np.array([255, 140, 0], dtype=np.uint8),   # orange
+                ),
+            )
+        elif hasattr(rr, "Clear"):
+            rr.log("world3d/gt/missed", rr.Clear(recursive=False))
+
+    # ------------------------------------------------------------------
     # Panel 1 – 3-D
     # ------------------------------------------------------------------
     def _log_3d(self, frame_idx: int, object_registry, persistent_graph,
