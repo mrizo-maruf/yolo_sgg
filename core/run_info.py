@@ -158,8 +158,18 @@ def _print_pi3_offline_section(cfg, scene_path: str) -> None:
 
 
 def _print_dav3_online_section(cfg) -> None:
-    print(f"  model:             {cfg.get('dav3_model', 'depth-anything-v3')}")
+    print(f"  model:             {cfg.get('dav3_model', 'depth-anything/DA3-LARGE')}")
     print(f"  device:            {cfg.get('device', '0')}")
+    print(
+        f"  chunk_size:        {cfg.get('dav3_window_size', cfg.get('pi3_window_size', 5))}    "
+        f"overlap: {cfg.get('dav3_overlap', cfg.get('pi3_overlap', 3))}"
+    )
+    print(f"  process_res:       {cfg.get('dav3_process_res', 504)}")
+    print(f"  use_ray_pose:      {bool(cfg.get('dav3_use_ray_pose', True))}")
+    print(f"  use_intrinsics:    {bool(cfg.get('dav3_use_intrinsics', False))}")
+    print(f"  scale_mode:        {cfg.get('dav3_scale_mode', 'none')}")
+    print(f"  conf_percentile:   {cfg.get('dav3_conf_percentile', None)}")
+    print(f"  mask_sky:          {bool(cfg.get('dav3_mask_sky', False))}")
 
 
 def _print_dav3_offline_section(cfg, scene_path: str) -> None:

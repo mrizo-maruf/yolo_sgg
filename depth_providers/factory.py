@@ -12,7 +12,7 @@ Supported provider types:
 * ``gt``            – Ground-truth depth from the scene directory.
 * ``pi3_online``    – Pi3 streaming depth+pose (native provider).
 * ``pi3_offline``   – Pre-computed Pi3 depth + pose (IsaacSim uses Sim(3) alignment).
-* ``dav3_online``   – DepthAnything V3 streaming (v2 online, adapted).
+* ``dav3_online``   – DepthAnything V3 streaming (native provider).
 * ``dav3_offline``  – Pre-computed DAv3 metric-depth PNGs.
 """
 from __future__ import annotations
@@ -70,7 +70,7 @@ def build_depth_provider(
     if provider_type == "pi3_offline":
         return _build_pi3_offline(dataset_name, scene_p, cfg)
     if provider_type == "dav3_online":
-        return _build_dav3_online(cfg)
+        return _build_dav3_online(dataset_name, scene_p, cfg)
     if provider_type == "dav3_offline":
         return _build_dav3_offline(dataset_name, scene_p, cfg)
 
@@ -520,11 +520,51 @@ def _build_pi3_online(dataset_name: str, cfg) -> DepthProvider:
     )
 
 
-def _build_dav3_online(cfg) -> DepthProvider:
-    from v2.depth_providers.dav3_online import DAv3StreamingDepthProvider
+def _build_dav3_online(dataset_name: str, scene_p: Path, cfg) -> DepthProvider:
+    from .dav3_online import DAv3OnlineDepthProvider
 
-    inner = DAv3StreamingDepthProvider(
-        model_name=str(cfg.get("dav3_model", "depth-anything-v3")),
-        device=str(cfg.get("device", "cuda")),
+    K, K_size = _build_pi3_intrinsics_from_cfg(dataset_name, cfg)
+    if not bool(cfg.get("dav3_use_intrinsics", False)):
+        K = None
+        K_size = None
+
+    scale_mode = str(cfg.get("dav3_scale_mode", "none")).lower()
+    gt_depth_provider = None
+    if scale_mode == "gt_median_chunk":
+        try:
+            gt_depth_provider = _build_gt(dataset_name, scene_p, cfg)
+        except Exception as exc:
+            print(f"[dav3_online] WARNING: could not build GT depth provider for scaling: {exc}")
+
+    transform_raw = cfg.get("dav3_online_transform_path")
+    transform_path = None
+    if transform_raw is not None:
+        transform_path = str(_resolve_scene_path(scene_p, transform_raw, "dav3_to_world_transform.json"))
+
+    return DAv3OnlineDepthProvider(
+        model_name=str(cfg.get("dav3_model", "depth-anything/DA3-LARGE")),
+        chunk_size=int(cfg.get("dav3_window_size", cfg.get("pi3_window_size", 5))),
+        overlap=int(cfg.get("dav3_overlap", cfg.get("pi3_overlap", 3))),
+        device=(
+            str(cfg.get("dav3_device"))
+            if cfg.get("dav3_device") is not None
+            else (str(cfg.get("device")) if cfg.get("device") is not None else None)
+        ),
+        max_cache=int(cfg.get("dav3_online_max_cache", cfg.get("pi3_online_max_cache", 512))),
+        min_depth=float(cfg.get("min_depth", 0.01)),
+        max_depth=float(cfg.get("max_depth", 0.0)),
+        process_res=int(cfg.get("dav3_process_res", 504)),
+        process_res_method=str(cfg.get("dav3_process_res_method", "upper_bound_resize")),
+        use_ray_pose=bool(cfg.get("dav3_use_ray_pose", True)),
+        intrinsics=K,
+        intrinsics_image_size=K_size,
+        gt_depth_provider=gt_depth_provider,
+        scale_mode=scale_mode,
+        fixed_depth_scale=float(cfg.get("dav3_fixed_depth_scale", 1.0)),
+        scale_clip_min=float(cfg.get("dav3_scale_clip_min", 0.05)),
+        scale_clip_max=float(cfg.get("dav3_scale_clip_max", 20.0)),
+        conf_percentile=cfg.get("dav3_conf_percentile"),
+        mask_sky=bool(cfg.get("dav3_mask_sky", False)),
+        sim3_transform_path=transform_path,
+        require_transform=bool(cfg.get("dav3_online_require_transform", False)),
     )
-    return _OnlineProviderAdapter(inner)

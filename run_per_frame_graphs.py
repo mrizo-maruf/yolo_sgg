@@ -312,9 +312,9 @@ def main() -> int:
           f"image={intrinsics.width}x{intrinsics.height}")
     print(f"Output dir: {output_dir}")
 
-    # --- Pi3 background feeder ---
+    # --- Online depth background feeder ---
     _pi3_feeder = None
-    if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
+    if dp_type in ("pi3_online", "dav3_online"):
         def _feed_worker():
             for idx in range(n_frames):
                 loader.get_rgb(idx)
@@ -322,10 +322,10 @@ def main() -> int:
                 depth_provider.drain()
 
         _pi3_feeder = threading.Thread(
-            target=_feed_worker, daemon=True, name="pi3-feeder",
+            target=_feed_worker, daemon=True, name="depth-feeder",
         )
         _pi3_feeder.start()
-        print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
+        print(f"[Depth] Background depth feeder started ({n_frames} frames)")
 
     # --- Object registry (still needed for 3D tracking state) ---
     object_registry = GlobalObjectRegistry(

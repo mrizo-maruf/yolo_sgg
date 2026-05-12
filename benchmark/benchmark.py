@@ -251,12 +251,12 @@ def benchmark_scene(
             print(f"[bench] Could not start Rerun debug viewer: {exc}")
             rerun_vis = None
 
-    # --- Background Pi3 feeder -----------------------------------------------
-    # Pi3 emits depth in chunks; without a pre-feeder thread the tracking
+    # --- Background online depth feeder --------------------------------------
+    # Online providers emit depth in chunks; without a pre-feeder thread the tracking
     # loop deadlocks on get_depth(0).  The feeder pushes RGBs ahead so
     # chunks are ready when needed.
     _pi3_feeder = None
-    if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
+    if dp_type in ("pi3_online", "dav3_online"):
         def _pi3_feed_worker():
             for fidx in range(n_frames):
                 loader.get_rgb(fidx)
@@ -264,10 +264,10 @@ def benchmark_scene(
                 depth_provider.drain()
 
         _pi3_feeder = threading.Thread(
-            target=_pi3_feed_worker, daemon=True, name="pi3-feeder",
+            target=_pi3_feed_worker, daemon=True, name="depth-feeder",
         )
         _pi3_feeder.start()
-        print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
+        print(f"[Depth] Background depth feeder started ({n_frames} frames)")
 
     # --- Core tracking loop --------------------------------------------------
     for tf in tqdm(

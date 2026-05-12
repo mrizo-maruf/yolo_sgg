@@ -22,6 +22,28 @@ pi3_patch_size: 14
 # pi3_target_width: 1280
 pi3_inject_condition: []
 
+# --- DAv3 online streaming ---
+dav3_model: "depth-anything/DA3-GIANT-1.1"
+dav3_window_size: 5
+dav3_overlap: 3
+dav3_online_max_cache: 512
+dav3_process_res: 504
+dav3_process_res_method: "upper_bound_resize"
+dav3_use_ray_pose: true
+# Backward-compatible defaults match the original DAv3 online behavior.
+# Enable intrinsics / gt_median_chunk explicitly for metric-depth experiments.
+dav3_use_intrinsics: false
+dav3_scale_mode: "none"  # none | fixed | gt_median_chunk
+dav3_fixed_depth_scale: 1.0
+dav3_scale_clip_min: 0.05
+dav3_scale_clip_max: 20.0
+dav3_conf_percentile: null
+dav3_mask_sky: false
+dav3_online_transform_path: null
+dav3_online_require_transform: false
+# Optional override:
+# dav3_device: "cuda:0"
+
 # --- YOLO model ---
 is_open_vocabulary: true
 yolo_model: "yoloe-11l-seg.pt"

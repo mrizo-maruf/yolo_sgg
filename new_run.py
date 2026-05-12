@@ -189,14 +189,14 @@ def main() -> int:
         extras=extras,
     )
 
-    # --- Stream frames to Pi3 depth provider in background ---
-    # A background thread reads RGB frames and feeds them to Pi3.  Pi3
-    # processes chunks as they fill up.  The tracking loop starts immediately;
+    # --- Stream frames to online depth providers in background ---
+    # A background thread reads RGB frames and feeds online providers. They
+    # process chunks as they fill up.  The tracking loop starts immediately;
     # get_depth() blocks (via per-frame Events) until the needed chunk is
-    # ready.  This gives pipeline parallelism: Pi3 computes depth on the GPU
+    # ready.  This gives pipeline parallelism: depth runs on the GPU
     # while YOLO + tracking run concurrently.
     _pi3_feeder = None
-    if dp_type == "pi3_online" and hasattr(depth_provider, "feed_frame"):
+    if dp_type in ("pi3_online", "dav3_online"):
         def _pi3_feed_worker():
             for idx in range(n_frames):
                 loader.get_rgb(idx)              # calls feed_frame internally
@@ -204,10 +204,10 @@ def main() -> int:
                 depth_provider.drain()
 
         _pi3_feeder = threading.Thread(
-            target=_pi3_feed_worker, daemon=True, name="pi3-feeder",
+            target=_pi3_feed_worker, daemon=True, name="depth-feeder",
         )
         _pi3_feeder.start()
-        print(f"[Pi3] Background depth feeder started ({n_frames} frames)")
+        print(f"[Depth] Background depth feeder started ({n_frames} frames)")
 
     # --- Object registry ---
     object_registry = build_default_registry(cfg)
@@ -430,7 +430,7 @@ def main() -> int:
     if cfg.ssg.save_global_graph:
         scene_graph.save_global_graph(scene_name=loader.scene_label)
 
-    # Ensure Pi3 background feeder is done before printing summary
+    # Ensure background depth feeder is done before printing summary
     if _pi3_feeder is not None:
         _pi3_feeder.join(timeout=300)
 
@@ -443,6 +443,12 @@ def main() -> int:
     if ssg_cfg.get("save_graph", False) or ssg_cfg.get("save_global_graph", False):
         save_dir = Path(ssg_cfg.get("save_graph_dir", "results/scene_graphs"))
         _save_objects_json(object_registry, save_dir, dataset_name)
+
+    if hasattr(depth_provider, "close"):
+        try:
+            depth_provider.close()
+        except Exception:
+            pass
 
     return 0
 
