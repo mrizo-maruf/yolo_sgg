@@ -32,8 +32,8 @@ dav3_process_res_method: "upper_bound_resize"
 dav3_use_ray_pose: true
 # Backward-compatible defaults match the original DAv3 online behavior.
 # Enable intrinsics / gt_median_chunk explicitly for metric-depth experiments.
-dav3_use_intrinsics: false
-dav3_scale_mode: "none"  # none | fixed | gt_median_chunk
+dav3_use_intrinsics: true
+dav3_scale_mode: "fixed"  # none | fixed | gt_median_chunk
 dav3_fixed_depth_scale: 1.0
 dav3_scale_clip_min: 0.05
 dav3_scale_clip_max: 20.0
