@@ -226,6 +226,14 @@ class RerunVisualizer:
                         name="RGB + 2D Boxes",
                         origin="rgb_view",
                     ),
+                    Spatial2DView(
+                        name="PCD Masks",
+                        origin="pcd_mask_view",
+                    ),
+                    Spatial2DView(
+                        name="Registry YOLO Masks",
+                        origin="registry_mask_view",
+                    ),
                 ),
                 column_shares=[2, 1],
             ),
@@ -295,6 +303,12 @@ class RerunVisualizer:
 
         # === Panel 3: RGB + Reprojected 2-D Boxes ===========================
         self._log_rgb_with_boxes(rgb, object_registry, T_w_c, img_w, img_h)
+
+        # === Panel 4: PCD Masks =============================================
+        self._log_pcd_masks(rgb, object_registry)
+
+        # === Panel 5: Registry YOLO Masks ===================================
+        self._log_registry_masks(rgb, object_registry)
 
     # ------------------------------------------------------------------
     # Benchmark overlay – GT boxes coloured by match status
@@ -556,37 +570,177 @@ class RerunVisualizer:
             for c in range(3):
                 overlay[:, :, c] = np.where(binary, color[c], overlay[:, :, c])
 
-            # Draw class name label at mask center
-            cls = None
-            if class_names and i < len(class_names):
-                cls = class_names[i]
-            if cls:
-                ys, xs = np.where(binary)
-                if len(ys) > 0:
-                    cx = int(np.mean(xs))
-                    cy = int(np.mean(ys))
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    scale = 0.5
-                    thickness = 1
-                    (tw, th), baseline = cv2.getTextSize(cls, font, scale, thickness)
-                    # Black background rectangle
-                    pad = 3
-                    cv2.rectangle(
-                        overlay,
-                        (cx - tw // 2 - pad, cy - th // 2 - pad),
-                        (cx + tw // 2 + pad, cy + th // 2 + pad + baseline),
-                        (0, 0, 0), cv2.FILLED,
-                    )
-                    # White text
-                    cv2.putText(
-                        overlay, cls,
-                        (cx - tw // 2, cy + th // 2),
-                        font, scale, (255, 255, 255), thickness, cv2.LINE_AA,
-                    )
+            # Draw "class#yolo_track_id" label at mask center
+            cls = class_names[i] if (class_names and i < len(class_names)) else None
+            label = f"{cls}#{int(tid)}" if cls else f"#{int(tid)}"
+            ys, xs = np.where(binary)
+            if len(ys) > 0:
+                cx = int(np.mean(xs))
+                cy = int(np.mean(ys))
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                scale = 0.5
+                thickness = 1
+                (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+                pad = 3
+                cv2.rectangle(
+                    overlay,
+                    (cx - tw // 2 - pad, cy - th // 2 - pad),
+                    (cx + tw // 2 + pad, cy + th // 2 + pad + baseline),
+                    (0, 0, 0), cv2.FILLED,
+                )
+                cv2.putText(
+                    overlay, label,
+                    (cx - tw // 2, cy + th // 2),
+                    font, scale, (255, 255, 255), thickness, cv2.LINE_AA,
+                )
 
         rr.log(
             "seg_view/segmentation",
             rr.Image(overlay, color_model=rr.ColorModel.RGB),
+        )
+
+    # ------------------------------------------------------------------
+    # Panel 4 – PCD-derived masks with global IDs
+    # ------------------------------------------------------------------
+    def _log_pcd_masks(self, rgb: np.ndarray, object_registry) -> None:
+        """Render depth-gated PCD masks stored on each registry object.
+
+        Reads ``pcd_mask`` set by ``GlobalObjectRegistry.compute_pcd_masks``.
+        Each mask is alpha-blended over the RGB image in the object's track
+        colour.  The global_id is drawn at the mask centroid.
+        """
+        h, w = rgb.shape[:2]
+        overlay = rgb.astype(np.float32).copy()
+        alpha = 0.55
+
+        all_objs = object_registry.get_all_objects()
+        for gid, obj in all_objs.items():
+            mask = obj.get("pcd_mask")
+            if mask is None:
+                continue
+            mask_bool = np.asarray(mask, dtype=bool)
+            if mask_bool.shape != (h, w):
+                mask_bool = cv2.resize(
+                    mask_bool.astype(np.uint8), (w, h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            if not mask_bool.any():
+                continue
+
+            color = _track_color_u8(gid).astype(np.float32)
+
+            # Alpha-blend mask region: out = (1-α)·rgb + α·color
+            for c in range(3):
+                overlay[:, :, c][mask_bool] = (
+                    (1.0 - alpha) * overlay[:, :, c][mask_bool]
+                    + alpha * color[c]
+                )
+
+            # Draw global_id at the centroid of the mask
+            ys, xs = np.where(mask_bool)
+            cx_m = int(np.mean(xs))
+            cy_m = int(np.mean(ys))
+            label = str(gid)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            thickness = 2
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            pad = 3
+            color_bgr = tuple(int(c) for c in color[::-1].astype(np.uint8))
+            canvas = overlay.astype(np.uint8)
+            cv2.rectangle(
+                canvas,
+                (cx_m - tw // 2 - pad, cy_m - th // 2 - pad),
+                (cx_m + tw // 2 + pad, cy_m + th // 2 + pad + baseline),
+                color_bgr, cv2.FILLED,
+            )
+            cv2.putText(
+                canvas, label,
+                (cx_m - tw // 2, cy_m + th // 2),
+                font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
+            )
+            overlay = canvas.astype(np.float32)
+
+        rr.log(
+            "pcd_mask_view/pcd_masks",
+            rr.Image(overlay.astype(np.uint8), color_model=rr.ColorModel.RGB),
+        )
+
+    # ------------------------------------------------------------------
+    # Panel 5 – Registry objects: last YOLO mask, current frame only
+    # ------------------------------------------------------------------
+    def _log_registry_masks(self, rgb: np.ndarray, object_registry) -> None:
+        """Overlay last YOLO masks for objects currently in the camera frame.
+
+        Only objects whose ``visible_current_frame`` flag is True are shown
+        — i.e. objects the registry considers active this frame (either
+        detected by YOLO or kept alive by reprojection).  The mask shown is
+        the last actual YOLO mask stored in the registry (``last_mask``).
+        Global track ID is drawn at the mask centroid.
+        """
+        h, w = rgb.shape[:2]
+        overlay = rgb.astype(np.float32).copy()
+        alpha = 0.55
+
+        all_vis = object_registry.get_all_pcds_for_visualization()
+        all_objs = object_registry.get_all_objects()
+
+        for obj_vis in all_vis:
+            if not obj_vis.get("visible_current_frame", False):
+                continue
+
+            gid = obj_vis["global_id"]
+            obj = all_objs.get(gid)
+            if obj is None:
+                continue
+
+            mask = obj.get("last_mask")
+            if mask is None:
+                continue
+
+            mask_bool = np.asarray(mask, dtype=bool)
+            if mask_bool.shape[:2] != (h, w):
+                mask_bool = cv2.resize(
+                    mask_bool.astype(np.uint8), (w, h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            if not mask_bool.any():
+                continue
+
+            color = _track_color_u8(gid).astype(np.float32)
+            for c in range(3):
+                overlay[:, :, c][mask_bool] = (
+                    (1.0 - alpha) * overlay[:, :, c][mask_bool]
+                    + alpha * color[c]
+                )
+
+            ys, xs = np.where(mask_bool)
+            cx_m = int(np.mean(xs))
+            cy_m = int(np.mean(ys))
+            label = str(gid)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            thickness = 2
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            pad = 3
+            color_bgr = tuple(int(c) for c in color[::-1].astype(np.uint8))
+            canvas = overlay.astype(np.uint8)
+            cv2.rectangle(
+                canvas,
+                (cx_m - tw // 2 - pad, cy_m - th // 2 - pad),
+                (cx_m + tw // 2 + pad, cy_m + th // 2 + pad + baseline),
+                color_bgr, cv2.FILLED,
+            )
+            cv2.putText(
+                canvas, label,
+                (cx_m - tw // 2, cy_m + th // 2),
+                font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
+            )
+            overlay = canvas.astype(np.float32)
+
+        rr.log(
+            "registry_mask_view/registry_masks",
+            rr.Image(overlay.astype(np.uint8), color_model=rr.ColorModel.RGB),
         )
 
     # ------------------------------------------------------------------

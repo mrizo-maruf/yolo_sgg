@@ -413,6 +413,10 @@ def main() -> int:
         if cfg.ssg.save_local_graph:
             scene_graph.save_local_graph(scene_name=loader.scene_label)
 
+        # --- PCD masks (depth-gated, non-overlapping) ---
+        if rerun_vis is not None and tf.T_w_c is not None and tf.depth_m is not None:
+            object_registry.compute_pcd_masks(tf.T_w_c, tf.depth_m, intrinsics)
+
         # --- Rerun visualisation ---
         if rerun_vis is not None:
             rerun_vis.log_frame(

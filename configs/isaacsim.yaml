@@ -55,7 +55,7 @@ pi3: false
 dav3: false
 require_all_ids: true
 
-fixed_nice_room_nikita_class_names:
+fixed_nice_room_seq_2_class_names:
   - "couch"
   - "box"
   - "table"

@@ -71,12 +71,12 @@ def clean_pcd(
     pts = np.asarray(pcd.select_by_index(ind).points, dtype=np.float32)
 
     # Keep largest DBSCAN cluster
-    if pts.shape[0] > cluster_min_samples:
-        pts = _keep_largest_cluster(
-            pts, eps=cluster_eps,
-            min_samples=cluster_min_samples,
-            min_fraction=cluster_min_fraction,
-        )
+    # if pts.shape[0] > cluster_min_samples:
+    #     pts = _keep_largest_cluster(
+    #         pts, eps=cluster_eps,
+    #         min_samples=cluster_min_samples,
+    #         min_fraction=cluster_min_fraction,
+    #     )
 
     return pts
 

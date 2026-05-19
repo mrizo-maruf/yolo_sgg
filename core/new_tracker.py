@@ -211,8 +211,8 @@ def build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
         inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
         volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
         visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
-        merge_iou_threshold=float(cfg.get("merge_iou_threshold", 0.5)),
-        merge_containment_threshold=float(cfg.get("merge_containment_threshold", 0.7)),
+        merge_centroid_dist=float(cfg.get("merge_centroid_dist", 0.3)),
+        merge_size_tol=float(cfg.get("merge_size_tol", 0.3)),
     )
 
 
