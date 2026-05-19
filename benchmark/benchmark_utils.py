@@ -200,17 +200,14 @@ def build_pred_instances(
     tf: TrackedFrame,
     intrinsics: CameraIntrinsics,
     match_mode: str,
-    include_reprojected_masks: bool = False,
 ) -> List[PredInstance]:
     """Convert ``TrackedFrame`` outputs to a ``PredInstance`` list."""
     preds: List[PredInstance] = []
     for obj in tf.objects:
-        # Reprojection-only masks are stale; skip them for mask2d by default.
-        if (
-            match_mode == "mask2d"
-            and not include_reprojected_masks
-            and int(obj.yolo_id) < 0
-        ):
+        # Skip reprojection-only objects that have no valid mask for mask2d.
+        # When pcd_mask is available get_reprojection_visible already sets
+        # obj.mask to it, so this guard only fires when depth is missing.
+        if match_mode == "mask2d" and int(obj.yolo_id) < 0 and obj.mask is None:
             continue
 
         mask = obj.mask

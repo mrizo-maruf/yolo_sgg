@@ -174,7 +174,7 @@ def benchmark_scene(
         "Benchmark": [
             f"match_mode:        {match_mode} ({similarity_label(match_mode)})",
             f"iou_threshold:     {cfg.get('iou_threshold', 0.3)}",
-            f"include_reproj:    {bool(cfg.get('benchmark_include_reprojected_masks', True))}",
+            f"reproj_mask:       pcd_mask (current-frame) with last_mask fallback",
         ],
     }
     print_run_banner(
@@ -282,9 +282,6 @@ def benchmark_scene(
             tf,
             intrinsics=intrinsics,
             match_mode=match_mode,
-            include_reprojected_masks=bool(
-                cfg.get("benchmark_include_reprojected_masks", False)
-            ),
         )
 
         # mapping, ious = match_greedy(

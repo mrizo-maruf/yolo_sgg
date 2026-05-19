@@ -229,7 +229,8 @@ class GlobalObjectRegistry:
                     yolo_id=-1,
                     class_name=obj.get("class_name"),
                     bbox_3d=bbox,
-                    mask=obj.get("last_mask"),
+                    mask=(obj["pcd_mask"] if obj.get("pcd_mask") is not None
+                          else obj.get("last_mask")),
                     first_seen=obj["first_seen_frame"],
                     last_seen=self.current_frame,
                     observation_count=obj.get("observation_count", 0),
