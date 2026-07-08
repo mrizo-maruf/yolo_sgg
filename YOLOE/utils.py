@@ -1089,7 +1089,9 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
                                   is_open_vocabulary,
                                   class_names_to_track=None,
                                   conf=0.3,
-                                  iou=0.5):
+                                  iou=0.5,
+                                  tracker_cfg=None,
+                                  device=None):
     """Track objects in a video stream.
     Args:
         rgb_dir_path (_type_): _description_
@@ -1121,8 +1123,8 @@ def track_objects_in_video_stream(rgb_dir_path, depth_path_list,
         
         out = model.track(
             source=[rgb],
-            tracker=TRACKER_CFG,
-            device=DEVICE,
+            tracker=tracker_cfg or TRACKER_CFG,
+            device=device or DEVICE,
             conf=conf,
             verbose=False,
             persist=True,
