@@ -195,6 +195,6 @@ def _print_tracking(cfg) -> None:
     me_str = f"every {me} frames" if me > 0 else "disabled"
     print(
         f"  dedup merge:       {me_str}  "
-        f"(iou={cfg.get('merge_iou_threshold', 'n/a')}, "
-        f"containment={cfg.get('merge_containment_threshold', 'n/a')})"
+        f"(centroid_dist={cfg.get('merge_centroid_dist', 'n/a')}m, "
+        f"size_tol={cfg.get('merge_size_tol', 'n/a')})"
     )

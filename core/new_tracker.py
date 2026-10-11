@@ -153,6 +153,13 @@ def run_tracking(
                 frame_objs.append(tracked_obj)
         timings["track_update_ms"] = (time.perf_counter() - t0) * 1000
 
+        # Compute pcd_masks before reprojection check so get_reprojection_visible
+        # can hand out current-frame masks instead of stale last_mask.
+        if T_w_c is not None and depth_m is not None:
+            t0 = time.perf_counter()
+            object_registry.compute_pcd_masks(T_w_c, depth_m, intrinsics)
+            timings["pcd_mask_ms"] = (time.perf_counter() - t0) * 1000
+
         t0 = time.perf_counter()
         extra = object_registry.get_reprojection_visible(
             T_w_c, intrinsics, matched_gids,
@@ -211,8 +218,8 @@ def build_default_registry(cfg: DictConfig) -> GlobalObjectRegistry:
         inactive_limit=int(cfg.get("tracking_inactive_limit", 0)),
         volume_ratio_threshold=float(cfg.get("tracking_volume_ratio_threshold", 0.1)),
         visibility_threshold=float(cfg.get("reprojection_visibility_threshold", 0.2)),
-        merge_iou_threshold=float(cfg.get("merge_iou_threshold", 0.5)),
-        merge_containment_threshold=float(cfg.get("merge_containment_threshold", 0.7)),
+        merge_centroid_dist=float(cfg.get("merge_centroid_dist", 0.3)),
+        merge_size_tol=float(cfg.get("merge_size_tol", 0.3)),
     )
 
 

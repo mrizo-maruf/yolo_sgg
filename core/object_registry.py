@@ -29,7 +29,7 @@ class GlobalObjectRegistry:
         "overlap_threshold", "distance_threshold", "max_points",
         "voxel_size",
         "inactive_limit", "volume_ratio_threshold", "visibility_threshold",
-        "merge_iou_threshold", "merge_containment_threshold",
+        "merge_centroid_dist", "merge_size_tol",
         "objects", "_next_id", "prev_frame", "yolo_to_global",
         "current_frame", "_visible_this_frame",
     )
@@ -43,8 +43,8 @@ class GlobalObjectRegistry:
         inactive_limit: int = 0,
         volume_ratio_threshold: float = 0.1,
         visibility_threshold: float = 0.2,
-        merge_iou_threshold: float = 0.5,
-        merge_containment_threshold: float = 0.7,
+        merge_centroid_dist: float = 0.3,
+        merge_size_tol: float = 0.3,
     ) -> None:
         self.overlap_threshold = overlap_threshold
         self.distance_threshold = distance_threshold
@@ -55,8 +55,8 @@ class GlobalObjectRegistry:
         self.inactive_limit = inactive_limit
         self.volume_ratio_threshold = volume_ratio_threshold
         self.visibility_threshold = visibility_threshold
-        self.merge_iou_threshold = merge_iou_threshold
-        self.merge_containment_threshold = merge_containment_threshold
+        self.merge_centroid_dist = float(merge_centroid_dist)
+        self.merge_size_tol = float(merge_size_tol)
 
         self.objects: Dict[int, dict] = {}
         self._next_id = 1
@@ -110,8 +110,8 @@ class GlobalObjectRegistry:
         """
         if pts is None or pts.shape[0] == 0:
             return pts
-        if self.voxel_size > 0.0:
-            pts = voxel_downsample(pts, self.voxel_size)
+        # if self.voxel_size > 0.0:
+        #     pts = voxel_downsample(pts, self.voxel_size)
         if pts.shape[0] > self.max_points:
             rng = np.random.default_rng(seed)
             idx = rng.choice(pts.shape[0], self.max_points, replace=False)
@@ -229,7 +229,8 @@ class GlobalObjectRegistry:
                     yolo_id=-1,
                     class_name=obj.get("class_name"),
                     bbox_3d=bbox,
-                    mask=obj.get("last_mask"),
+                    mask=(obj["pcd_mask"] if obj.get("pcd_mask") is not None
+                          else obj.get("last_mask")),
                     first_seen=obj["first_seen_frame"],
                     last_seen=self.current_frame,
                     observation_count=obj.get("observation_count", 0),
@@ -281,18 +282,10 @@ class GlobalObjectRegistry:
     def merge_overlapping_objects(self) -> List[tuple]:
         """Detect and merge registry objects that point at the same physical thing.
 
-        Triggers on any of three signals:
-          1. High raw overlap          : iou ≥ merge_iou_threshold
-                                          OR containment ≥ merge_containment_threshold
-          2. Class-aware overlap        : classes compatible AND iou or containment
-                                          at half the main threshold
-          3. Class-aware center+size    : classes compatible AND centers within
-                                          half the larger object's max extent
-                                          AND volume ratio ≥ 0.5
-
-        "Compatible classes" = either class is missing/empty OR they string-match
-        case-insensitively. This protects against merging a chair onto a table
-        even when their AABBs happen to overlap.
+        Two objects are merged when BOTH conditions hold:
+          1. Centroid distance  ≤ ``merge_centroid_dist`` (metres)
+          2. Every bbox dimension (x, y, z extent) differs by at most
+             ``merge_size_tol`` relative to the larger value.
 
         Returns list of ``(absorbed_gid, survivor_gid)`` pairs.
         """
@@ -335,50 +328,35 @@ class GlobalObjectRegistry:
         return merged_pairs
 
     def _should_merge(self, obj_a: dict, obj_b: dict) -> bool:
-        """Decide whether two registry objects should be merged.
-
-        See :meth:`merge_overlapping_objects` for the three signals.
+        """Merge if centroids are within ``merge_centroid_dist`` metres AND
+        each bbox dimension (x, y, z extent) differs by at most
+        ``merge_size_tol`` relative to the larger of the two values.
         """
-        from core.geometry import aabb_iou, aabb_containment
-
         bbox_a = obj_a.get("bbox_3d")
         bbox_b = obj_b.get("bbox_3d")
         if bbox_a is None or bbox_b is None:
             return False
 
-        iou = aabb_iou(bbox_a, bbox_b)
-        cont = aabb_containment(bbox_a, bbox_b)
-
-        # Signal 1: high overlap is decisive regardless of class.
-        if iou >= self.merge_iou_threshold or cont >= self.merge_containment_threshold:
-            return True
-
-        cls_a = (obj_a.get("class_name") or "").strip().lower()
-        cls_b = (obj_b.get("class_name") or "").strip().lower()
-        classes_compatible = (not cls_a) or (not cls_b) or (cls_a == cls_b)
-        if not classes_compatible:
-            return False
-
-        # Signal 2: moderate overlap with matching/unknown class.
-        if iou >= self.merge_iou_threshold * 0.5 or cont >= self.merge_containment_threshold * 0.5:
-            return True
-
-        # Signal 3: jittered duplicates — close centers + similar volume.
         try:
+            center_dist = float(np.linalg.norm(
+                np.asarray(bbox_a.center, dtype=np.float64)
+                - np.asarray(bbox_b.center, dtype=np.float64)
+            ))
             ext_a = np.asarray(bbox_a.obb_extent, dtype=np.float64)
             ext_b = np.asarray(bbox_b.obb_extent, dtype=np.float64)
-            center_dist = float(np.linalg.norm(bbox_a.center - bbox_b.center))
         except Exception:
             return False
 
-        vol_a = float(np.prod(ext_a))
-        vol_b = float(np.prod(ext_b))
-        if vol_a <= 0.0 or vol_b <= 0.0:
+        if center_dist > self.merge_centroid_dist:
             return False
-        size_ratio = min(vol_a, vol_b) / max(vol_a, vol_b)
-        max_extent = float(max(ext_a.max(), ext_b.max()))
 
-        return center_dist < 0.5 * max_extent and size_ratio >= 0.5
+        # At least one 2-axis pair (x,y), (y,z), (x,z) must both be within tol.
+        max_ext = np.maximum(ext_a, ext_b)
+        if np.any(max_ext <= 0):
+            return False
+        within = np.abs(ext_a - ext_b) / max_ext <= self.merge_size_tol  # [x, y, z]
+        pairs = [(0, 1), (1, 2), (0, 2)]  # (x,y), (y,z), (x,z)
+        return any(within[i] and within[j] for i, j in pairs)
 
     def remove_object(self, gid: int) -> bool:
         """Delete an object from the registry and clean up all references.
@@ -451,6 +429,141 @@ class GlobalObjectRegistry:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # PCD-derived 2D masks
+    # ------------------------------------------------------------------
+
+    def compute_pcd_masks(
+        self,
+        T_w_c: Optional[np.ndarray],
+        depth_m: Optional[np.ndarray],
+        intrinsics: "CameraIntrinsics",
+        depth_tolerance: float = 0.05,
+        max_footprint_px: int = 12,
+    ) -> Dict[int, np.ndarray]:
+        """Project accumulated PCDs into the current camera view as 2-D masks.
+
+        Each PCD point is rendered as a filled circle whose radius equals the
+        projected half-voxel footprint at that point's depth:
+
+            r = clip(round(fx * (voxel_size / 2) / z), 1, max_footprint_px)
+
+        This fills the gaps between sparse PCD points without inflating the
+        mask beyond the object's actual silhouette.
+
+        Non-overlapping guarantee: both the depth gate and a global z-buffer
+        (min z_cam wins per pixel) ensure each pixel belongs to at most one
+        object — the one physically closest to the camera.
+
+        The inner loop is vectorised per unique radius value so the circle
+        offsets are computed once per radius and broadcast over all points
+        sharing that radius.
+
+        Parameters
+        ----------
+        T_w_c : (4, 4) camera-to-world transform
+        depth_m : (H, W) float32 depth image in metres
+        intrinsics : CameraIntrinsics
+        depth_tolerance : fraction of z_cam tolerated as sensor noise
+        max_footprint_px : upper clamp on circle radius in pixels
+        """
+        for obj in self.objects.values():
+            obj["pcd_mask"] = None
+
+        if T_w_c is None or depth_m is None:
+            return {}
+
+        try:
+            T_c_w = np.linalg.inv(T_w_c)
+        except np.linalg.LinAlgError:
+            return {}
+
+        H, W = depth_m.shape
+        R = T_c_w[:3, :3].astype(np.float32)
+        t = T_c_w[:3, 3].astype(np.float32)
+        fx = float(intrinsics.fx)
+        fy = float(intrinsics.fy)
+        cx = float(intrinsics.cx)
+        cy = float(intrinsics.cy)
+
+        # Physical half-extent of one voxel in metres (fallback: 2 cm).
+        footprint_m = float(self.voxel_size) / 2.0 if self.voxel_size > 0.0 else 0.02
+
+        # Global z-buffer — closest object wins each pixel.
+        min_z_cam = np.full((H, W), np.inf, dtype=np.float32)
+        assignment_map = np.full((H, W), -1, dtype=np.int32)
+
+        for gid, obj in self.objects.items():
+            pts = obj.get("points_accumulated")
+            if pts is None or pts.shape[0] == 0:
+                continue
+
+            # --- Camera-frame transform ---
+            pts_cam = (pts.astype(np.float32) @ R.T) + t  # (N, 3)
+            in_front = pts_cam[:, 2] > 1e-3
+            if not np.any(in_front):
+                continue
+            pts_cam = pts_cam[in_front]
+
+            z = pts_cam[:, 2]
+            u = np.round(pts_cam[:, 0] / z * fx + cx).astype(np.int32)
+            v = np.round(pts_cam[:, 1] / z * fy + cy).astype(np.int32)
+
+            # --- Image-bounds filter ---
+            in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            if not np.any(in_bounds):
+                continue
+            u, v, z = u[in_bounds], v[in_bounds], z[in_bounds]
+
+            # --- Depth gate: discard occluded points ---
+            z_sensor = depth_m[v, u]
+            visible = (z_sensor > 0) & (z_sensor >= z * (1.0 - depth_tolerance))
+            if not np.any(visible):
+                continue
+            u, v, z = u[visible], v[visible], z[visible]
+
+            # --- Per-point footprint radius (depth-adaptive) ---
+            r_arr = np.clip(
+                np.round(fx * footprint_m / z).astype(np.int32),
+                1, max_footprint_px,
+            )
+
+            # --- Paint footprint circles, vectorised per unique radius ---
+            for r in np.unique(r_arr):
+                sel = r_arr == r
+
+                # Circle offset template: all (dy, dx) with dy²+dx² <= r²
+                span = np.arange(-r, r + 1, dtype=np.int32)
+                dy_t, dx_t = np.meshgrid(span, span, indexing="ij")
+                in_circ = dy_t ** 2 + dx_t ** 2 <= r * r
+                dy_t = dy_t[in_circ]  # (M,)
+                dx_t = dx_t[in_circ]
+
+                # Broadcast over all points sharing this radius: (N_r, M)
+                vv = v[sel, None] + dy_t[None, :]  # (N_r, M)
+                uu = u[sel, None] + dx_t[None, :]
+                zz = z[sel, None] * np.ones(dy_t.shape[0], dtype=np.float32)[None, :]
+
+                # Flatten and drop out-of-bounds pixels
+                vv, uu, zz = vv.ravel(), uu.ravel(), zz.ravel()
+                in_img = (vv >= 0) & (vv < H) & (uu >= 0) & (uu < W)
+                vv, uu, zz = vv[in_img], uu[in_img], zz[in_img]
+
+                # Z-buffer update: closest object wins
+                better = zz < min_z_cam[vv, uu]
+                min_z_cam[vv[better], uu[better]] = zz[better]
+                assignment_map[vv[better], uu[better]] = gid
+
+        # --- Extract per-object masks from the assignment map ---
+        result: Dict[int, np.ndarray] = {}
+        for gid, obj in self.objects.items():
+            mask = assignment_map == gid
+            if mask.any():
+                obj["pcd_mask"] = mask
+                result[gid] = mask
+
+        return result
 
     def _cleanup(self, frame_idx: int) -> None:
         to_remove = [

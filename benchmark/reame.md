@@ -36,3 +36,8 @@ python -m benchmark.benchmark --dataset isaacsim --scene_path /home/yehia/rizo/I
 
 python -m benchmark.benchmark --dataset isaacsim --scene_path /home/yehia/rizo/IsaacSim_bench_pi3 --multi --depth_provider pi3_offline
 ```
+
+```
+python -m benchmark.benchmark --dataset isaacsim --scene_path /…/scene_2 \
+  --depth_provider gt --rerun
+```

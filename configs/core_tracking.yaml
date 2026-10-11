@@ -23,8 +23,8 @@ pi3_patch_size: 14
 pi3_inject_condition: []
 
 # --- YOLO model ---
-is_open_vocabulary: true
-yolo_model: "yoloe-11l-seg.pt"
+is_open_vocabulary: false
+yolo_model: "yoloe-11l-seg-pf.pt"
 conf: 0.25
 iou: 0.5
 verbose: false
@@ -39,8 +39,8 @@ alpha: 0.7
 fast_mask: true
 
 # --- Point cloud ---
-max_points_per_obj: 500
-max_accumulated_points: 1500
+max_points_per_obj: 1000
+max_accumulated_points: 5000
 o3_nb_neighbors: 50
 o3std_ratio: 0.1
 
@@ -70,17 +70,18 @@ rerun_point_radius: 0.02
 
 # --- Post-frame merge (collapse duplicate objects) ---
 # merge_every_n_frames: run merge pass every N frames; 0 disables.
-# Lowered thresholds vs. naive defaults — with Pi3 depth jitter two bboxes
-# for the same object rarely reach 0.7 IoU but often reach 0.3-0.5.
-merge_every_n_frames: 20
-merge_iou_threshold: 0.4
-merge_containment_threshold: 0.5
+# merge_centroid_dist: max centroid distance (metres) to consider merging.
+# merge_size_tol: per-axis relative tolerance, e.g. 0.3 → extents may differ
+#                 by up to 30 % of the larger value along each axis.
+merge_every_n_frames: 1
+merge_centroid_dist: 0.3
+merge_size_tol: 0.3
 
 # --- Matching (benchmark) ---
 # One mode per benchmark run:
 #   mask2d | bbox2d | bbox3d
-match_mode: mask2d
-iou_threshold: 0.3
+match_mode: bbox3d
+iou_threshold: 0.25
 # For 2D benchmark matching: when false, skip reprojection-only objects
 # (their masks are stale from older frames).
 benchmark_include_reprojected_masks: false
